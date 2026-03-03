@@ -1,0 +1,2 @@
+{:paths ["src/bzg"]
+ :bbin/bin {bone {:main-opts ["-m" "bzg.bone"]}}}
