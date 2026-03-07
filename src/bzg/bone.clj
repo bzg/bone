@@ -309,8 +309,26 @@
 ;; Formatting helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- has-source? [reports]
-  (some :source reports))
+(defn- multiple-sources? [reports]
+  (> (count (distinct (keep :source reports))) 1))
+
+(defn- date-only
+  "Extract just the date portion, stripping any leading weekday and trailing time.
+  Handles both 'Sat Mar 07 14:30' and '2026-03-07 14:30' style dates."
+  [s]
+  (if (and s (seq s))
+    (let [s (str/trim s)
+          ;; Strip leading 'Mon ' / 'Tue ' etc.
+          s (str/replace-first s #"^[A-Z][a-z]{2}\s+" "")
+          ;; Strip time portion after date (either 'HH:MM...' or 'THH:MM...')
+          s (str/replace-first s #"[T ]?\d{2}:\d{2}.*" "")]
+      (str/trim s))
+    ""))
+
+(defn- truncate
+  "Truncate string s to at most n characters."
+  [s n]
+  (if (> (count s) n) (subs s 0 n) s))
 
 (defn- report->row
   "Format a report as a tab-separated row for fzf display."
@@ -318,12 +336,12 @@
   (str/join "\t"
             (concat
              (when show-type? [(:type report "")])
-             (when show-src?   [(:source report "")])
+             (when show-src?  [(truncate (:source report "") 10)])
              [(str (:priority report 0))
               (:flags report "---")
               (str (:replies report 0))
               (:from report "?")
-              (:date report "")
+              (date-only (:date report))
               (:subject report "(no subject)")])))
 
 (defn- extra-str [report]
@@ -348,13 +366,13 @@
   "Format a report as a plain text line."
   [report show-type? show-src?]
   (str (when show-type? (format "[%-12s] " (:type report "")))
-       (when show-src?   (format "[%-10s] " (:source report "")))
+       (when show-src?  (format "[%-10s] " (truncate (:source report "") 10)))
        (format "%d %-3s %3d %-25s %s  %s"
                (:priority report 0)
                (:flags report "---")
                (:replies report 0)
                (:from report "?")
-               (:date report "")
+               (date-only (:date report))
                (:subject report "(no subject)"))
        (when-let [e (extra-str report)] (str " " e))))
 
@@ -561,7 +579,7 @@
   "Display reports interactively with fzf, or as plain text lines."
   [config reports meta]
   (let [show-type? true
-        show-src?   (has-source? reports)
+        show-src?   (multiple-sources? reports)
         all-types   (vec (distinct (map :type reports)))
         all-sources (vec (distinct (keep :source reports)))]
     (if (empty? reports)
