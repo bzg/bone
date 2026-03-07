@@ -1,7 +1,9 @@
 #+title: 🦴 BONE — Bark's Own Nifty Explorer
+#+author: Bastien Guerry
 
-*BONE* (what you get when you stop barking) is a standalone [[https://github.com/babashka/babashka][Babashka]]
-script using [[https://github.com/junegunn/fzf][fzf]] for browsing [[https://codeberg.org/bzg/bark][BARK]] reports.
+*bone* (what you get when you stop barking) is a standalone
+[[https://github.com/babashka/babashka][Babashka]] script for browsing [[https://codeberg.org/bzg/bark][Bark]] reports.  When [[https://github.com/junegunn/fzf][fzf]] is
+available, bone lets you browse Bark reports interactively.
 
 * Install
 
@@ -29,17 +31,6 @@ Create =~/.config/bone/config.edn=:
 : bone [options]
 : bone clear
 : bone update
-
-** Interactive keys (fzf)
-
-| Key | Action                          |
-|-----+---------------------------------|
-| =RET= | View report in terminal browser |
-| =C-o= | Open report in system browser   |
-| =C-p= | View patch (fetched to cache)   |
-| =C-s= | Change sort order               |
-| =C-t= | Filter by report type           |
-| =C-n= | Filter by source                |
 
 ** Options
 
@@ -73,9 +64,20 @@ Sources are stored in =~/.config/bone/sources.json=.
 | =clear=   | Empty the cache                       |
 | =update=  | Fetch/update reports from all sources |
 
-By default, bone reads cached reports if available. If no cache
-exists, it fetches from sources once and caches the result. Use =bone
-update= to refresh.
+By default, bone reads cached reports if available.  If no cache
+exists, it fetches from sources once and caches the result.  Use
+=bone update= to refresh.
+
+** Interactive keys (fzf)
+
+| Key | Action                          |
+|-----+---------------------------------|
+| =RET= | View report in terminal browser |
+| =C-o= | Open report in system browser   |
+| =C-p= | View patch (fetched to cache)   |
+| =C-s= | Change sort order               |
+| =C-t= | Filter by report type           |
+| =C-n= | Filter by source                |
 
 * Examples
 
@@ -110,8 +112,8 @@ Update cached reports and browse only yours:
 |-------------------------------+---------------------------|
 | =~/.config/bone/config.edn=     | User configuration        |
 | =~/.config/bone/sources.json=   | Registered report sources |
-| =~/.config/bone/cache/=         | Cached patches            |
-| =~/.config/bone/reports-cache/= | Cached reports.json files |
+| =~/.config/bone/cache/patches/= | Cached patches            |
+| =~/.config/bone/cache/reports/= | Cached reports.json files |
 
 * License
 

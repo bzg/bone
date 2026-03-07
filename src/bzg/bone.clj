@@ -47,11 +47,14 @@
 (def sources-path
   (str (System/getProperty "user.home") "/.config/bone/sources.json"))
 
-(def cache-base
+(def cache-dir
   (str (System/getProperty "user.home") "/.config/bone/cache"))
 
+(def patches-cache-dir
+  (str cache-dir "/patches"))
+
 (def reports-cache-dir
-  (str (System/getProperty "user.home") "/.config/bone/reports-cache"))
+  (str cache-dir "/reports"))
 
 (defn- load-config []
   (let [f (io/file config-path)]
@@ -209,7 +212,7 @@
     (spit f body)))
 
 (defn- clear-cache! []
-  (doseq [dir [(io/file cache-base) (io/file reports-cache-dir)]]
+  (let [dir (io/file cache-dir)]
     (when (.exists dir)
       (run! #(.delete %) (reverse (file-seq dir)))))
   (println "Cache cleared."))
@@ -405,7 +408,7 @@
       (mapv (fn [p]
               (let [file (:file p)]
                 {:url        (if base (str base file) file)
-                 :cache-path (str cache-base "/" src-name "/" file)
+                 :cache-path (str patches-cache-dir "/" src-name "/" file)
                  :filename   (:patch/filename p (:file p))}))
             ps))))
 
