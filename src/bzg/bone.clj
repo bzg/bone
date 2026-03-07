@@ -130,18 +130,18 @@
 
 (defn- extra-str [report]
   (let [parts (remove nil?
-                [(:source report)
-                 (:version report)
-                 (:topic report)
-                 (:patch-seq report)
-                 (when-let [sources (seq (:patch-source report))]
-                   (str "src:" (str/join "," sources)))
-                 (when-let [v (:votes report)] (str "votes:" v))
-                 (when-let [s (:series report)]
-                   (str "series:" (:received s) "/" (:expected s)
-                        (when (:closed s) " closed")))
-                 (when-let [related (seq (:related report))]
-                   (str "→" (str/join "," (distinct (map :type related)))))])]
+                      [(:source report)
+                       (:version report)
+                       (:topic report)
+                       (:patch-seq report)
+                       (when-let [sources (seq (:patch-source report))]
+                         (str "src:" (str/join "," sources)))
+                       (when-let [v (:votes report)] (str "votes:" v))
+                       (when-let [s (:series report)]
+                         (str "series:" (:received s) "/" (:expected s)
+                              (when (:closed s) " closed")))
+                       (when-let [related (seq (:related report))]
+                         (str "→" (str/join "," (distinct (map :type related)))))])]
     (when (seq parts) (str/join " " parts))))
 
 (defn- report->line
@@ -184,36 +184,64 @@
     (if (empty? reports)
       (println "No reports found.")
       (if (fzf-available?)
-        (let [header (str/join "\t"
-                               (concat
-                                (when show-type? ["Type"])
-                                (when show-src?   ["Source"])
-                                ["P" "Flags" "#" "From" "Date" "Subject"]))
-              rows   (mapv #(report->row % show-type? show-src?) reports)
-              aligned      (tabulate (cons header rows))
-              header-line  (first aligned)
-              aligned-rows (vec (rest aligned))
-              input        (str/join "\n" aligned-rows)
-              {:keys [exit out]}
-              (process/shell {:in input :out :string :continue true}
-                             "fzf" "--header" header-line
-                             "--no-sort" "--reverse"
-                             "--prompt" "report> ")]
-          (when (zero? exit)
-            (let [selected (str/trim out)
-                  idx      (.indexOf ^java.util.List aligned-rows selected)]
-              (when (>= idx 0)
-                (let [report (nth reports idx)
-                      url    (:archived-at report)]
-                  (if url
-                    (let [os   (str/lower-case (System/getProperty "os.name"))
-                          open (cond
-                                 (str/includes? os "mac") "open"
-                                 (str/includes? os "win") "start"
-                                 :else                    "xdg-open")]
-                      (process/shell open url))
-                    (do (println "No archived-at URL for this report.")
-                        (pprint/pprint report))))))))
+        (let [header   (str/join "\t"
+                                 (concat
+                                  (when show-type? ["Type"])
+                                  (when show-src?   ["Source"])
+                                  ["P" "Flags" "#" "From" "Date" "Subject"]))
+              rows     (mapv #(report->row % show-type? show-src?) reports)
+              aligned       (tabulate (cons header rows))
+              header-line   (first aligned)
+              aligned-rows  (vec (rest aligned))
+              input         (str/join "\n" aligned-rows)
+              ;; Write URLs to a temp file, one per line (same order as rows)
+              urls-file     (doto (java.io.File/createTempFile "bone-urls-" ".txt")
+                              .deleteOnExit)
+              _             (spit urls-file
+                                  (str/join "\n"
+                                            (map #(:archived-at % "") reports)))
+              ;; Write aligned rows so the helper can grep for the index
+              rows-file     (doto (java.io.File/createTempFile "bone-rows-" ".txt")
+                              .deleteOnExit)
+              _             (spit rows-file input)
+              os            (str/lower-case (System/getProperty "os.name"))
+              open-cmd      (cond
+                              (str/includes? os "mac") "open"
+                              (str/includes? os "win") "start"
+                              :else                    "xdg-open")
+              urls-path     (.getAbsolutePath urls-file)
+              rows-path     (.getAbsolutePath rows-file)
+              ;; Helper script: receives the selected line as "$@",
+              ;; finds its line number in the rows file, looks up the URL.
+              helper-file   (doto (java.io.File/createTempFile "bone-open-" ".sh")
+                              .deleteOnExit
+                              (.setExecutable true))
+              _             (spit helper-file
+                                  (str "#!/bin/sh\n"
+                                       "SELECTED=\"$*\"\n"
+                                       "IDX=$(grep -nxF -- \"$SELECTED\" "
+                                       (pr-str rows-path)
+                                       " | head -1 | cut -d: -f1)\n"
+                                       "if [ -z \"$IDX\" ]; then\n"
+                                       "  echo \"[debug] no match for line in rows file\"\n"
+                                       "  read -n1 -p 'Press any key...'\n"
+                                       "  exit 1\n"
+                                       "fi\n"
+                                       "URL=$(sed -n \"${IDX}p\" " (pr-str urls-path) ")\n"
+                                       "echo \"[debug] idx=$IDX url=$URL\"\n"
+                                       "if [ -n \"$URL\" ]; then\n"
+                                       "  " open-cmd " \"$URL\" 2>/dev/null\n"
+                                       "  echo \"Opened: $URL\"\n"
+                                       "else\n"
+                                       "  echo \"No archived-at URL.\"\n"
+                                       "fi\n"
+                                       "read -n1 -p 'Press any key...'\n"))
+              helper-path   (.getAbsolutePath helper-file)]
+          (process/shell {:in input :continue true}
+                         "fzf" "--header" header-line
+                         "--no-sort" "--reverse" "--no-hscroll"
+                         "--prompt" "report> "
+                         "--bind" (str "enter:execute:" helper-path " {}")))
         ;; Plain text fallback
         (do (println (str (count reports) " report(s):\n"))
             (doseq [r reports]
