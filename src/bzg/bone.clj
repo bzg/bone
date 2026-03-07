@@ -133,6 +133,16 @@
 (defn- load-from-stdin []
   (unwrap-envelope (load-json-string (slurp *in*))))
 
+(defn- merge-results
+  "Reduce a seq of {:reports [...] :meta {...}} into one."
+  [results]
+  (reduce (fn [acc {:keys [reports meta]}]
+            (-> acc
+                (update :reports into reports)
+                (update :meta merge meta)))
+          {:reports [] :meta {}}
+          results))
+
 (defn- load-from-urls-file [path]
   (when-not (.exists (io/file path))
     (binding [*out* *err*]
@@ -141,43 +151,40 @@
   (let [urls (->> (str/split-lines (slurp path))
                   (map str/trim)
                   (remove #(or (str/blank? %) (str/starts-with? % "#"))))]
-    (reduce (fn [acc u]
-              (let [{:keys [reports meta]} (load-from-url u)]
-                (-> acc
-                    (update :reports into reports)
-                    (update :meta merge meta))))
-            {:reports [] :meta {}}
-            urls)))
+    (merge-results (map load-from-url urls))))
 
 (defn- url? [s]
   (boolean (re-find #"^https?://" s)))
 
+(defn- strip-file-scheme
+  "Strip file:// prefix if present."
+  [s]
+  (cond-> s (str/starts-with? s "file://") (str/replace-first "file://" "")))
+
 (defn- source-base-dir
   "Compute the base directory from a source path/URL.
   For file paths, returns the parent directory.
-  For file:// URIs, strips the scheme and returns parent.
   For HTTP URLs, returns nil (use bark-path instead)."
   [src]
-  (let [path (cond
-               (str/starts-with? src "file://") (str/replace-first src "file://" "")
-               (url? src)                       nil
-               :else                            src)]
-    (when path
-      (let [parent (.getParent (io/file path))]
-        (when parent (str parent "/"))))))
+  (when-not (url? src)
+    (when-let [parent (.getParent (io/file (strip-file-scheme src)))]
+      (str parent "/"))))
+
+(defn- with-base-dir
+  "Inject :base-dir into result meta from a source string."
+  [result src]
+  (if-let [base (source-base-dir src)]
+    (assoc-in result [:meta :base-dir] base)
+    result))
 
 (defn- load-one-source
   "Load reports from a single source string (URL, file:// URI, or file path).
   Returns {:reports [...] :meta {...}} with :base-dir injected into meta."
   [src]
-  (let [result (cond
-                 (url? src)                        (load-from-url src)
-                 (str/starts-with? src "file://")  (load-from-file (str/replace-first src "file://" ""))
-                 :else                             (load-from-file src))
-        base   (source-base-dir src)]
-    (if base
-      (assoc-in result [:meta :base-dir] base)
-      result)))
+  (-> (if (url? src)
+        (load-from-url src)
+        (load-from-file (strip-file-scheme src)))
+      (with-base-dir src)))
 
 (defn- source->cache-file
   "Deterministic cache filename for a source URL/path."
@@ -207,29 +214,24 @@
       (run! #(.delete %) (reverse (file-seq dir)))))
   (println "Cache cleared."))
 
+(defn- fetch-source-body
+  "Fetch raw JSON body string from a source (URL or file path)."
+  [src]
+  (if (url? src)
+    (let [resp (http/get src {:headers {"Accept" "application/json"}})]
+      (when (not= 200 (:status resp))
+        (throw (ex-info (str "HTTP " (:status resp)) {:url src :status (:status resp)})))
+      (:body resp))
+    (slurp (strip-file-scheme src))))
+
 (defn- load-one-source-cached
   "Load reports from cache if available, otherwise fetch and cache."
   [src]
   (if-let [cached (cache-read src)]
-    (let [result (unwrap-envelope cached)
-          base   (source-base-dir src)]
-      (if base (assoc-in result [:meta :base-dir] base) result))
-    (let [resp   (when (url? src)
-                   (http/get src {:headers {"Accept" "application/json"}}))
-          body   (if (url? src)
-                   (do (when (not= 200 (:status resp))
-                         (binding [*out* *err*]
-                           (println (str "HTTP " (:status resp) " fetching " src)))
-                         (System/exit 1))
-                       (:body resp))
-                   (slurp (let [p (if (str/starts-with? src "file://")
-                                    (str/replace-first src "file://" "")
-                                    src)]
-                            p)))]
+    (with-base-dir (unwrap-envelope cached) src)
+    (let [body (fetch-source-body src)]
       (cache-write! src body)
-      (let [result (unwrap-envelope (load-json-string body))
-            base   (source-base-dir src)]
-        (if base (assoc-in result [:meta :base-dir] base) result)))))
+      (with-base-dir (unwrap-envelope (load-json-string body)) src))))
 
 (defn- update-sources-cache!
   "Fetch all configured sources and update cache."
@@ -240,16 +242,8 @@
       (System/exit 1))
     (doseq [src sources]
       (try
-        (let [body (if (url? src)
-                     (let [resp (http/get src {:headers {"Accept" "application/json"}})]
-                       (when (not= 200 (:status resp))
-                         (throw (ex-info "HTTP error" {:status (:status resp)})))
-                       (:body resp))
-                     (slurp (if (str/starts-with? src "file://")
-                              (str/replace-first src "file://" "")
-                              src)))]
-          (cache-write! src body)
-          (println (str "  Updated: " src)))
+        (cache-write! src (fetch-source-body src))
+        (println (str "  Updated: " src))
         (catch Exception e
           (binding [*out* *err*]
             (println (str "  [warn] Failed to update " src ": " (.getMessage e)))))))))
@@ -264,18 +258,15 @@
         (println "Add a source:  bone --add-source URL_OR_PATH")
         (println "Or use:        bone -f FILE | -u URL | -"))
       (System/exit 1))
-    (reduce (fn [acc src]
-              (try
-                (let [{:keys [reports meta]} (load-one-source-cached src)]
-                  (-> acc
-                      (update :reports into reports)
-                      (update :meta merge meta)))
-                (catch Exception e
-                  (binding [*out* *err*]
-                    (println (str "  [warn] Failed to load " src ": " (.getMessage e))))
-                  acc)))
-            {:reports [] :meta {}}
-            sources)))
+    (merge-results
+     (keep (fn [src]
+             (try
+               (load-one-source-cached src)
+               (catch Exception e
+                 (binding [*out* *err*]
+                   (println (str "  [warn] Failed to load " src ": " (.getMessage e))))
+                 nil)))
+           sources))))
 
 ;; ---------------------------------------------------------------------------
 ;; Filtering
@@ -379,19 +370,28 @@
     (zero? (:exit (process/shell {:out :string :err :string :continue true} "which" cmd)))
     (catch Exception _ false)))
 
+(def ^:private text-browser-cmds
+  {"w3m"   ["w3m" "-o" "confirm_qq=false"]
+   "lynx"  ["lynx"]
+   "links" ["links"]})
+
+(defn- platform-opener []
+  (let [os (str/lower-case (System/getProperty "os.name"))]
+    (cond
+      (str/includes? os "mac") ["open"]
+      (str/includes? os "win") ["start"]
+      :else                    ["xdg-open"])))
+
 (defn- browse-cmd
   "Return the best available command for viewing a URL.
-  Prefers terminal browsers, falls back to platform opener."
-  []
-  (cond
-    (command-available? "w3m")   ["w3m" "-o" "confirm_qq=false"]
-    (command-available? "lynx")  ["lynx"]
-    (command-available? "links") ["links"]
-    :else (let [os (str/lower-case (System/getProperty "os.name"))]
-            (cond
-              (str/includes? os "mac") ["open"]
-              (str/includes? os "win") ["start"]
-              :else                    ["xdg-open"]))))
+  Honors :text-browser from config, then probes w3m/lynx/links,
+  falls back to platform opener."
+  [config]
+  (or (when-let [b (:text-browser config)]
+        (text-browser-cmds b))
+      (some (fn [[cmd v]] (when (command-available? cmd) v))
+            text-browser-cmds)
+      (platform-opener)))
 
 (defn- patch-paths
   "Return a vector of {:url ... :cache-path ...} for each patch in a report.
@@ -416,7 +416,7 @@
   (let [f (io/file cache-path)]
     (when-not (.exists f)
       (.mkdirs (.getParentFile f))
-      (if (re-find #"^https?://" url)
+      (if (url? url)
         (let [resp (http/get url)]
           (if (= 200 (:status resp))
             (spit cache-path (:body resp))
@@ -428,25 +428,44 @@
             (println (str "  File not found: " url))))))
     cache-path))
 
-(defn- pager-cmd
-  "Return the pager command: $PAGER, or 'less', or 'more'."
-  []
-  (or (System/getenv "PAGER") "less"))
+(def ^:private diff-pager-cmds
+  {"delta"          ["delta" "--paging" "always"]
+   "bat"            ["bat" "--style=plain" "--language=diff" "--paging=always"]
+   "diff-so-fancy"  ["diff-so-fancy"]})
+
+(def ^:private stdin-diff-pagers
+  "Pagers that read from stdin rather than a file argument."
+  #{"delta" "diff-so-fancy"})
+
+(defn- patch-pager
+  "Return a command vector for viewing patches with syntax highlighting.
+  Honors :diff-pager from config, then probes delta/bat, falls back to $PAGER/less."
+  [config]
+  (or (when-let [p (:diff-pager config)]
+        (diff-pager-cmds p))
+      (some (fn [[cmd v]] (when (command-available? cmd) v))
+            (dissoc diff-pager-cmds "diff-so-fancy"))
+      [(or (System/getenv "PAGER") "less")]))
+
+(defn- page-file! [config path]
+  (when (.exists (io/file path))
+    (let [cmd (patch-pager config)]
+      (if (stdin-diff-pagers (first cmd))
+        (if (= "diff-so-fancy" (first cmd))
+          (process/shell {:in (slurp path) :continue true}
+                         "sh" "-c" "diff-so-fancy | less -RFX")
+          (apply process/shell {:in (slurp path) :continue true} cmd))
+        (apply process/shell {:continue true} (conj cmd path))))))
 
 (defn- show-patch!
-  "Fetch a patch to cache and display it with a pager."
-  [report meta]
+  "Fetch a patch to cache and display it with a diff-aware pager."
+  [config report meta]
   (if-let [paths (seq (patch-paths report meta))]
     (if (= 1 (count paths))
-      ;; Single patch — fetch and page
-      (let [{:keys [url cache-path]} (first paths)
-            cached (fetch-to-cache! url cache-path)]
-        (when (.exists (io/file cached))
-          (process/shell {:continue true} (pager-cmd) cached)))
+      (let [{:keys [url cache-path]} (first paths)]
+        (page-file! config (fetch-to-cache! url cache-path)))
       ;; Multiple patches — let user pick with fzf, then page
-      (let [labels (mapv (fn [{:keys [url cache-path]}]
-                           (last (str/split url #"/")))
-                         paths)
+      (let [labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) paths)
             input  (str/join "\n" labels)
             {:keys [exit out]}
             (process/shell {:in input :out :string :continue true}
@@ -455,16 +474,13 @@
           (let [selected (str/trim out)
                 idx      (.indexOf ^java.util.List labels selected)]
             (when (>= idx 0)
-              (let [{:keys [url cache-path]} (nth paths idx)
-                    cached (fetch-to-cache! url cache-path)]
-                (when (.exists (io/file cached))
-                  (process/shell {:continue true} (pager-cmd) cached))))))))
+              (let [{:keys [url cache-path]} (nth paths idx)]
+                (page-file! config (fetch-to-cache! url cache-path))))))))
     (println "  No patches for this report.")))
 
-(defn- open-url! [url]
+(defn- open-url! [config url]
   (try
-    (let [cmd (browse-cmd)]
-      (apply process/shell {:continue true} (conj cmd url)))
+    (apply process/shell {:continue true} (conj (browse-cmd config) url))
     (catch Exception _
       (println (str "  Failed to open: " url)))))
 
@@ -511,36 +527,19 @@
   (let [[_ key-fn cmp] (nth sort-options sort-idx)]
     (sort-by key-fn cmp reports)))
 
-(defn- pick-types!
-  "Let user pick which report types to show via fzf multi-select.
-  '[all]' resets to all types. Returns a set of type strings, or nil on cancel."
-  [all-types active-types]
-  (let [options (cons "[all]" all-types)
-        input   (str/join "\n" options)
+(defn- pick-multi!
+  "Let user pick from `all` via fzf multi-select.
+  '[all]' resets to full set. Returns a set, or nil on cancel."
+  [prompt all]
+  (let [input (str/join "\n" (cons "[all]" all))
         {:keys [exit out]}
         (process/shell {:in input :out :string :continue true}
-                       "fzf" "--multi" "--prompt" "types> "
+                       "fzf" "--multi" "--prompt" prompt
                        "--no-sort" "--reverse")]
     (when (zero? exit)
       (let [selected (set (remove str/blank? (str/split-lines (str/trim out))))]
         (if (contains? selected "[all]")
-          (set all-types)
-          selected)))))
-
-(defn- pick-sources!
-  "Let user pick which sources to show via fzf multi-select.
-  '[all]' resets to all sources. Returns a set of source strings, or nil on cancel."
-  [all-sources active-sources]
-  (let [options (cons "[all]" all-sources)
-        input   (str/join "\n" options)
-        {:keys [exit out]}
-        (process/shell {:in input :out :string :continue true}
-                       "fzf" "--multi" "--prompt" "sources> "
-                       "--no-sort" "--reverse")]
-    (when (zero? exit)
-      (let [selected (set (remove str/blank? (str/split-lines (str/trim out))))]
-        (if (contains? selected "[all]")
-          (set all-sources)
+          (set all)
           selected)))))
 
 ;; ---------------------------------------------------------------------------
@@ -549,7 +548,7 @@
 
 (defn display-reports!
   "Display reports interactively with fzf, or as plain text lines."
-  [reports meta]
+  [config reports meta]
   (let [show-type? true
         show-src?   (has-source? reports)
         all-types   (vec (distinct (map :type reports)))
@@ -600,7 +599,7 @@
                     (recur sorted-reports sort-idx active-types active-sources))
 
                   "ctrl-t"
-                  (if-let [new-types (pick-types! all-types active-types)]
+                  (if-let [new-types (pick-multi! "types> " all-types)]
                     (recur sorted-reports sort-idx new-types active-sources)
                     (recur sorted-reports sort-idx active-types active-sources))
 
@@ -608,7 +607,7 @@
                   (if (empty? all-sources)
                     (do (println "  No source information available.")
                         (recur sorted-reports sort-idx active-types active-sources))
-                    (if-let [new-sources (pick-sources! all-sources active-sources)]
+                    (if-let [new-sources (pick-multi! "sources> " all-sources)]
                       (recur sorted-reports sort-idx active-types new-sources)
                       (recur sorted-reports sort-idx active-types active-sources)))
 
@@ -620,24 +619,16 @@
                           (let [report (nth visible idx)]
                             (case key-used
                               "ctrl-p"
-                              (show-patch! report meta)
+                              (show-patch! config report meta)
 
                               "ctrl-o"
                               (if-let [url (:archived-at report)]
-                                (let [os  (str/lower-case (System/getProperty "os.name"))
-                                      cmd (cond
-                                            (str/includes? os "mac") "open"
-                                            (str/includes? os "win") "start"
-                                            :else                    "xdg-open")]
-                                  (try
-                                    (process/shell {:continue true} cmd url)
-                                    (catch Exception _
-                                      (println (str "  Failed to open: " url)))))
+                                (open-url! config url)
                                 (println "  No archived-at URL for this report."))
 
                               ;; enter (default)
                               (if-let [url (:archived-at report)]
-                                (open-url! url)
+                                (open-url! config url)
                                 (do (println "  No archived-at URL for this report.")
                                     (pprint/pprint report))))))))
                     (recur sorted-reports sort-idx active-types active-sources)))))))
@@ -685,7 +676,11 @@
   (println "With no -f/-u/-U/- option, bone reads cached reports or fetches")
   (println "once from ~/.config/bone/sources.json. Use 'bone update' to refresh.")
   (println)
-  (println "Config: ~/.config/bone/config.edn  e.g. {:email \"you@example.com\"}"))
+  (println "Config: ~/.config/bone/config.edn")
+  (println "  {:email        \"you@example.com\"")
+  (println "   :text-browser \"w3m\"       ;; or lynx, links")
+  (println "   :diff-pager   \"delta\"     ;; or bat, diff-so-fancy")
+  (println "   }"))
 
 (defn -main [& args]
   (let [args   (seq (or (seq args) *command-line-args*))
@@ -704,17 +699,17 @@
       (list-sources!)
 
       (some #{"-a" "--add-source"} args)
-      (let [av   (vec (or args []))
-            idx  (some #(when (#{"-a" "--add-source"} (nth av % nil)) %)
-                       (range (count av)))
-            src  (when idx (nth av (inc idx) nil))]
+      (let [av  (vec args)
+            idx (first (keep-indexed #(when (#{"-a" "--add-source"} %2) (inc %1)) av))
+            src (when idx (nth av idx nil))]
         (if src
           (add-source! src)
           (println "Usage: bone -a URL_OR_PATH")))
 
       (some #{"--remove-source"} args)
-      (let [idx (.indexOf ^java.util.List (vec args) "--remove-source")
-            src (nth (vec args) (inc idx) nil)]
+      (let [av  (vec args)
+            idx (inc (.indexOf ^java.util.List av "--remove-source"))
+            src (nth av idx nil)]
         (if src
           (remove-source! src)
           (println "Usage: bone --remove-source URL_OR_PATH")))
@@ -777,7 +772,7 @@
                         (filter-by-status reports min-status) reports)
               reports (if-not closed?
                         (filter-open reports) reports)]
-          (display-reports! reports meta))))))
+          (display-reports! config reports meta))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))
