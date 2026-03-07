@@ -3,7 +3,7 @@
 
 *bone* (what you get when you stop barking) is a standalone [[https://github.com/babashka/babashka][Babashka]]
 script for browsing [[https://codeberg.org/bzg/bark][BARK]] reports. When [[https://github.com/junegunn/fzf][fzf]] is available, bone lets you
-browse Bark reports interactively.
+browse BARK reports interactively.
 
 [[file:bone.png]]
 
@@ -91,7 +91,7 @@ Browse all reports from a remote URL:
 
 : bone -u https://example.com/reports.json
 
-Merge reports from multiple Bark instances:
+Merge reports from multiple BARK instances:
 
 : bone -U my-urls.txt
 

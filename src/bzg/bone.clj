@@ -524,7 +524,7 @@
     (try
       ;; Java Date.toString() format: "Sat Mar 07 04:10:11 CET 2026"
       (let [fmt (java.text.SimpleDateFormat. "EEE MMM dd HH:mm:ss z yyyy"
-                                              java.util.Locale/ENGLISH)]
+                                             java.util.Locale/ENGLISH)]
         (.getTime (.parse fmt s)))
       (catch Exception _
         ;; Try ISO-ish format: "2026-03-07..."
@@ -572,6 +572,71 @@
           selected)))))
 
 ;; ---------------------------------------------------------------------------
+;; Dispatch script for fzf execute bindings
+;; ---------------------------------------------------------------------------
+
+(defn- shell-escape
+  "Escape a string for use inside single quotes in shell."
+  [s]
+  (str "'" (str/replace s "'" "'\\''") "'"))
+
+(defn- write-dispatch-script!
+  "Write a temp shell script that maps fzf line numbers to actions.
+  The script takes two args: ACTION (open|patch|browse) and LINE_NUMBER.
+  Returns the path to the script."
+  [dispatch-path config visible meta]
+  (let [browse  (browse-cmd config)
+        pager   (patch-pager config)
+        stdin?  (stdin-diff-pagers (first pager))
+        dsf?    (= "diff-so-fancy" (first pager))
+        sb      (StringBuilder.)]
+    (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
+    (.append sb "case \"$ACTION:$N\" in\n")
+    (doseq [[i report] (map-indexed vector visible)]
+      (let [n    (inc i) ;; fzf {n} is 1-based
+            url  (:archived-at report)
+            ps   (patch-paths report meta)]
+        ;; open action (text browser / enter)
+        (when url
+          (.append sb (str "  open:" n ")\n"))
+          (.append sb (str "    " (str/join " " (map shell-escape (conj browse url))) "\n"))
+          (.append sb "    ;;\n"))
+        ;; browse action (system browser / ctrl-o)
+        (when url
+          (.append sb (str "  browse:" n ")\n"))
+          (let [opener (platform-opener)]
+            (.append sb (str "    " (str/join " " (map shell-escape (conj opener url))) "\n")))
+          (.append sb "    ;;\n"))
+        ;; patch action
+        (when (seq ps)
+          (let [cached-paths (mapv (fn [{:keys [url cache-path]}]
+                                     (fetch-to-cache! url cache-path))
+                                   ps)]
+            (.append sb (str "  patch:" n ")\n"))
+            (if (= 1 (count cached-paths))
+              ;; Single patch
+              (let [cached (first cached-paths)]
+                (if stdin?
+                  (if dsf?
+                    (.append sb (str "    cat " (shell-escape cached) " | diff-so-fancy | less -RFX\n"))
+                    (.append sb (str "    " (str/join " " (map shell-escape pager))
+                                     " < " (shell-escape cached) "\n")))
+                  (.append sb (str "    " (str/join " " (map shell-escape (conj pager cached))) "\n"))))
+              ;; Multiple patches — concatenate into pager
+              (let [cat-cmd (str "cat " (str/join " " (map shell-escape cached-paths)))]
+                (if stdin?
+                  (if dsf?
+                    (.append sb (str "    " cat-cmd " | diff-so-fancy | less -RFX\n"))
+                    (.append sb (str "    " cat-cmd " | " (str/join " " (map shell-escape pager)) "\n")))
+                  ;; For file-based pagers (bat), pass all files as args
+                  (.append sb (str "    " (str/join " " (map shell-escape (into (vec pager) cached-paths))) "\n")))))
+            (.append sb "    ;;\n")))))
+    (.append sb "esac\n")
+    (spit dispatch-path (str sb))
+    (.setExecutable (io/file dispatch-path) true)
+    dispatch-path))
+
+;; ---------------------------------------------------------------------------
 ;; Display
 ;; ---------------------------------------------------------------------------
 
@@ -581,86 +646,75 @@
   (let [show-type? true
         show-src?   (multiple-sources? reports)
         all-types   (vec (distinct (map :type reports)))
-        all-sources (vec (distinct (keep :source reports)))]
+        all-sources (vec (distinct (keep :source reports)))
+        dispatch-path (str (System/getProperty "java.io.tmpdir") "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
     (if (empty? reports)
       (println "No reports found.")
       (if (fzf-available?)
-        (loop [sorted-reports reports
-               sort-idx       0
-               active-types   (set all-types)
-               active-sources (set all-sources)]
-          (let [visible  (->> sorted-reports
-                              (filter #(contains? active-types (:type %)))
-                              (filter #(or (empty? all-sources)
-                                           (contains? active-sources (:source %)))))
-                header   (str/join "\t"
-                                   (concat
-                                    (when show-type? ["Type"])
-                                    (when show-src?   ["Source"])
-                                    ["P" "Flags" "#" "From" "Date" "Subject"]))
-                rows     (mapv #(report->row % show-type? show-src?) visible)
-                aligned      (tabulate (cons header rows))
-                header-line  (first aligned)
-                aligned-rows (vec (rest aligned))
-                input        (str/join "\n" aligned-rows)
-                sort-label   (first (nth sort-options sort-idx))
-                type-label   (if (= active-types (set all-types))
-                               ""
-                               (str " types:" (str/join "," (sort active-types))))
-                src-label    (if (or (empty? all-sources)
-                                    (= active-sources (set all-sources)))
-                               ""
-                               (str " src:" (str/join "," (sort active-sources))))
-                {:keys [exit out]}
-                (process/shell {:in input :out :string :continue true}
-                               "fzf" "--header" (str header-line "  [" sort-label "]" type-label src-label)
-                               "--no-sort" "--reverse" "--no-hscroll"
-                               "--prompt" "report> "
-                               "--expect" "enter,ctrl-p,ctrl-o,ctrl-s,ctrl-t,ctrl-n")]
-            (when (zero? exit)
-              (let [lines    (str/split-lines (str/trim out))
-                    key-used (first lines)
-                    selected (second lines)]
-                (case key-used
-                  "ctrl-s"
-                  (if-let [new-idx (pick-sort!)]
-                    (recur (sort-reports reports new-idx) new-idx active-types active-sources)
-                    (recur sorted-reports sort-idx active-types active-sources))
+        (try
+          (loop [sorted-reports reports
+                 sort-idx       0
+                 active-types   (set all-types)
+                 active-sources (set all-sources)]
+            (let [visible  (->> sorted-reports
+                                (filter #(contains? active-types (:type %)))
+                                (filter #(or (empty? all-sources)
+                                             (contains? active-sources (:source %)))))
+                  header   (str/join "\t"
+                                     (concat
+                                      (when show-type? ["Type"])
+                                      (when show-src?   ["Source"])
+                                      ["P" "Flags" "#" "From" "Date" "Subject"]))
+                  rows     (mapv #(report->row % show-type? show-src?) visible)
+                  aligned      (tabulate (cons header rows))
+                  header-line  (first aligned)
+                  aligned-rows (vec (rest aligned))
+                  input        (str/join "\n" aligned-rows)
+                  sort-label   (first (nth sort-options sort-idx))
+                  type-label   (if (= active-types (set all-types))
+                                 ""
+                                 (str " types:" (str/join "," (sort active-types))))
+                  src-label    (if (or (empty? all-sources)
+                                       (= active-sources (set all-sources)))
+                                 ""
+                                 (str " src:" (str/join "," (sort active-sources))))
+                  _            (write-dispatch-script! dispatch-path config visible meta)
+                  {:keys [exit out]}
+                  (process/shell {:in input :out :string :continue true}
+                                 "fzf" "--header" (str header-line "  [" sort-label "]" type-label src-label)
+                                 "--no-sort" "--reverse" "--no-hscroll"
+                                 "--prompt" "report> "
+                                 "--expect" "ctrl-s,ctrl-t,ctrl-n"
+                                 "--bind" (str "enter:execute(" dispatch-path " open {n})")
+                                 "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
+                                 "--bind" (str "ctrl-p:execute(" dispatch-path " patch {n})"))]
+              (when (zero? exit)
+                (let [lines    (str/split-lines (str/trim out))
+                      key-used (first lines)]
+                  (case key-used
+                    "ctrl-s"
+                    (if-let [new-idx (pick-sort!)]
+                      (recur (sort-reports reports new-idx) new-idx active-types active-sources)
+                      (recur sorted-reports sort-idx active-types active-sources))
 
-                  "ctrl-t"
-                  (if-let [new-types (pick-multi! "types> " all-types)]
-                    (recur sorted-reports sort-idx new-types active-sources)
-                    (recur sorted-reports sort-idx active-types active-sources))
+                    "ctrl-t"
+                    (if-let [new-types (pick-multi! "types> " all-types)]
+                      (recur sorted-reports sort-idx new-types active-sources)
+                      (recur sorted-reports sort-idx active-types active-sources))
 
-                  "ctrl-n"
-                  (if (empty? all-sources)
-                    (do (println "  No source information available.")
-                        (recur sorted-reports sort-idx active-types active-sources))
-                    (if-let [new-sources (pick-multi! "sources> " all-sources)]
-                      (recur sorted-reports sort-idx active-types new-sources)
-                      (recur sorted-reports sort-idx active-types active-sources)))
+                    "ctrl-n"
+                    (if (empty? all-sources)
+                      (do (println "  No source information available.")
+                          (recur sorted-reports sort-idx active-types active-sources))
+                      (if-let [new-sources (pick-multi! "sources> " all-sources)]
+                        (recur sorted-reports sort-idx active-types new-sources)
+                        (recur sorted-reports sort-idx active-types active-sources)))
 
-                  ;; enter, ctrl-p, ctrl-o
-                  (do
-                    (when selected
-                      (let [idx (.indexOf ^java.util.List aligned-rows selected)]
-                        (when (>= idx 0)
-                          (let [report (nth visible idx)]
-                            (case key-used
-                              "ctrl-p"
-                              (show-patch! config report meta)
-
-                              "ctrl-o"
-                              (if-let [url (:archived-at report)]
-                                (open-url! config url)
-                                (println "  No archived-at URL for this report."))
-
-                              ;; enter (default)
-                              (if-let [url (:archived-at report)]
-                                (open-url! config url)
-                                (do (println "  No archived-at URL for this report.")
-                                    (pprint/pprint report))))))))
-                    (recur sorted-reports sort-idx active-types active-sources)))))))
+                    ;; Empty key = user pressed enter/ctrl-o/ctrl-p (handled by execute)
+                    ;; or escaped from fzf — just re-enter the loop
+                    (recur sorted-reports sort-idx active-types active-sources))))))
+          (finally
+            (.delete (io/file dispatch-path))))
         ;; Plain text fallback
         (do (println (str (count reports) " report(s):\n"))
             (doseq [r reports]
