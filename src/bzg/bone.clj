@@ -99,6 +99,8 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
+(def supported-format-version "0.1.0")
+
 (defn- load-json-string [s]
   (json/parse-string s keyword))
 
@@ -110,13 +112,19 @@
   [data]
   (if (sequential? data)
     {:reports data :meta {}}
-    (let [reports    (or (:reports data) [])
-          meta       (dissoc data :reports)
-          src-name   (:source meta)
-          reports    (if src-name
-                       (mapv #(if (:source %) % (assoc % :source src-name)) reports)
-                       reports)]
-      {:reports reports :meta meta})))
+    (let [fv (:format-version data)]
+      (when (and fv (not= fv supported-format-version))
+        (binding [*out* *err*]
+          (println (str "Warning: format-version " fv
+                        " differs from supported version "
+                        supported-format-version))))
+      (let [reports    (or (:reports data) [])
+            meta       (dissoc data :reports :format-version)
+            src-name   (:source meta)
+            reports    (if src-name
+                         (mapv #(if (:source %) % (assoc % :source src-name)) reports)
+                         reports)]
+        {:reports reports :meta meta}))))
 
 (defn- load-from-file [path]
   (when-not (.exists (io/file path))
