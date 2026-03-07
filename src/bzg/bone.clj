@@ -11,6 +11,8 @@
 ;;
 ;; Usage:
 ;;   bone.clj [options]
+;;   bone.clj clear           Empty the cache
+;;   bone.clj update          Fetch/update reports from all sources
 ;;
 ;; Options:
 ;;   -f, --file FILE          Read reports from a JSON file
@@ -43,10 +45,13 @@
   (str (System/getProperty "user.home") "/.config/bone/config.edn"))
 
 (def sources-path
-  (str (System/getProperty "user.home") "/.config/bone/sources.edn"))
+  (str (System/getProperty "user.home") "/.config/bone/sources.json"))
 
 (def cache-base
   (str (System/getProperty "user.home") "/.config/bone/cache"))
+
+(def reports-cache-dir
+  (str (System/getProperty "user.home") "/.config/bone/reports-cache"))
 
 (defn- load-config []
   (let [f (io/file config-path)]
@@ -55,16 +60,16 @@
       {})))
 
 (defn- load-sources
-  "Load sources.edn — a vector of URL or file path strings."
+  "Load sources.json — a JSON array of URL or file path strings."
   []
   (let [f (io/file sources-path)]
     (if (.exists f)
-      (read-string (slurp f))
+      (json/parse-string (slurp f))
       [])))
 
 (defn- save-sources! [sources]
   (.mkdirs (.getParentFile (io/file sources-path)))
-  (spit sources-path (pr-str (vec (distinct sources)))))
+  (spit sources-path (json/generate-string (vec (distinct sources)))))
 
 (defn- add-source! [src]
   (let [sources (load-sources)]
@@ -174,6 +179,81 @@
       (assoc-in result [:meta :base-dir] base)
       result)))
 
+(defn- source->cache-file
+  "Deterministic cache filename for a source URL/path."
+  [src]
+  (let [safe (-> src
+                 (str/replace #"[^a-zA-Z0-9._-]" "_")
+                 (subs 0 (min 200 (count src))))]
+    (str reports-cache-dir "/" safe ".json")))
+
+(defn- cache-read
+  "Read cached reports.json for a source. Returns nil if not cached."
+  [src]
+  (let [f (io/file (source->cache-file src))]
+    (when (.exists f)
+      (load-json-string (slurp f)))))
+
+(defn- cache-write!
+  "Write raw JSON string to cache for a source."
+  [src body]
+  (let [f (io/file (source->cache-file src))]
+    (.mkdirs (.getParentFile f))
+    (spit f body)))
+
+(defn- clear-cache! []
+  (doseq [dir [(io/file cache-base) (io/file reports-cache-dir)]]
+    (when (.exists dir)
+      (run! #(.delete %) (reverse (file-seq dir)))))
+  (println "Cache cleared."))
+
+(defn- load-one-source-cached
+  "Load reports from cache if available, otherwise fetch and cache."
+  [src]
+  (if-let [cached (cache-read src)]
+    (let [result (unwrap-envelope cached)
+          base   (source-base-dir src)]
+      (if base (assoc-in result [:meta :base-dir] base) result))
+    (let [resp   (when (url? src)
+                   (http/get src {:headers {"Accept" "application/json"}}))
+          body   (if (url? src)
+                   (do (when (not= 200 (:status resp))
+                         (binding [*out* *err*]
+                           (println (str "HTTP " (:status resp) " fetching " src)))
+                         (System/exit 1))
+                       (:body resp))
+                   (slurp (let [p (if (str/starts-with? src "file://")
+                                    (str/replace-first src "file://" "")
+                                    src)]
+                            p)))]
+      (cache-write! src body)
+      (let [result (unwrap-envelope (load-json-string body))
+            base   (source-base-dir src)]
+        (if base (assoc-in result [:meta :base-dir] base) result)))))
+
+(defn- update-sources-cache!
+  "Fetch all configured sources and update cache."
+  []
+  (let [sources (load-sources)]
+    (when (empty? sources)
+      (println "No sources configured.")
+      (System/exit 1))
+    (doseq [src sources]
+      (try
+        (let [body (if (url? src)
+                     (let [resp (http/get src {:headers {"Accept" "application/json"}})]
+                       (when (not= 200 (:status resp))
+                         (throw (ex-info "HTTP error" {:status (:status resp)})))
+                       (:body resp))
+                     (slurp (if (str/starts-with? src "file://")
+                              (str/replace-first src "file://" "")
+                              src)))]
+          (cache-write! src body)
+          (println (str "  Updated: " src)))
+        (catch Exception e
+          (binding [*out* *err*]
+            (println (str "  [warn] Failed to update " src ": " (.getMessage e)))))))))
+
 (defn- load-from-sources
   "Load and merge reports from all configured sources."
   []
@@ -186,7 +266,7 @@
       (System/exit 1))
     (reduce (fn [acc src]
               (try
-                (let [{:keys [reports meta]} (load-one-source src)]
+                (let [{:keys [reports meta]} (load-one-source-cached src)]
                   (-> acc
                       (update :reports into reports)
                       (update :meta merge meta)))
@@ -590,6 +670,10 @@
   (println "  --remove-source URL_OR_PATH    Remove a source")
   (println "  --list-sources                 List configured sources")
   (println)
+  (println "Cache management:")
+  (println "  clear                          Empty the cache")
+  (println "  update                         Fetch/update reports from sources")
+  (println)
   (println "Keys (fzf):")
   (println "  Enter                      View report in terminal browser")
   (println "  Ctrl-o                     Open report in system browser")
@@ -598,8 +682,8 @@
   (println "  Ctrl-t                     Filter by report type")
   (println "  Ctrl-n                     Filter by source")
   (println)
-  (println "With no -f/-u/-U/- option, bone reads all sources from")
-  (println "~/.config/bone/sources.edn (one URL or path per entry).")
+  (println "With no -f/-u/-U/- option, bone reads cached reports or fetches")
+  (println "once from ~/.config/bone/sources.json. Use 'bone update' to refresh.")
   (println)
   (println "Config: ~/.config/bone/config.edn  e.g. {:email \"you@example.com\"}"))
 
@@ -609,6 +693,12 @@
     (cond
       (some #{"-h" "--help"} args)
       (usage)
+
+      (some #{"clear"} args)
+      (clear-cache!)
+
+      (some #{"update"} args)
+      (update-sources-cache!)
 
       (some #{"--list-sources"} args)
       (list-sources!)
@@ -667,7 +757,7 @@
                 :url       (load-from-url (:url opts))
                 :urls-file (load-from-urls-file (:urls-path opts))
                 :stdin     (load-from-stdin)
-                ;; No explicit source → read from sources.edn
+                ;; No explicit source → read from sources.json
                 (load-from-sources))
               ;; Inject base-dir for -f local files
               {:keys [reports meta]}
