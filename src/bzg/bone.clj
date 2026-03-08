@@ -325,6 +325,22 @@
       (str/trim s))
     ""))
 
+(defn- parse-votes
+  "Parse a votes string like \"3/5\" (sum/total) into [sum total].
+  Returns [0 0] on nil."
+  [v]
+  (if (and v (re-matches #"-?\d+/\d+" v))
+    (mapv parse-long (str/split v #"/"))
+    [0 0]))
+
+(defn- vote-cookie
+  "Format a vote cookie like \"[3/5] \" from a report's :votes field.
+  Returns empty string when no votes."
+  [report]
+  (if-let [v (:votes report)]
+    (str "[" v "] ")
+    ""))
+
 (defn- truncate
   "Truncate string s to at most n characters."
   [s n]
@@ -342,7 +358,7 @@
               (str (:replies report 0))
               (:from report "?")
               (date-only (:date report))
-              (:subject report "(no subject)")])))
+              (str (vote-cookie report) (:subject report "(no subject)"))])))
 
 (defn- extra-str [report]
   (let [parts (remove nil?
@@ -354,7 +370,6 @@
                          (str "src:" (str/join "," sources)))
                        (when-let [ps (seq (:patches report))]
                          (str "📎" (count ps)))
-                       (when-let [v (:votes report)] (str "votes:" v))
                        (when-let [s (:series report)]
                          (str "series:" (:received s) "/" (:expected s)
                               (when (:closed s) " closed")))
@@ -373,7 +388,7 @@
                (:replies report 0)
                (:from report "?")
                (date-only (:date report))
-               (:subject report "(no subject)"))
+               (str (vote-cookie report) (:subject report "(no subject)")))
        (when-let [e (extra-str report)] (str " " e))))
 
 ;; ---------------------------------------------------------------------------
@@ -537,6 +552,9 @@
    ["date (oldest)"    (fn [r] (or (parse-date-ms (:date-raw r)) 0))      compare]
    ["priority (high)"  (fn [r] (- (:priority r 0)))                        compare]
    ["replies (most)"   (fn [r] (- (:replies r 0)))                         compare]
+   ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
+                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
+                                                                           compare]
    ["type"             (fn [r] (:type r ""))                                compare]
    ["author"           (fn [r] (str/lower-case (:from r "")))              compare]])
 
