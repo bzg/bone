@@ -592,9 +592,8 @@
         sb      (StringBuilder.)]
     (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
     (.append sb "case \"$ACTION:$N\" in\n")
-    (doseq [[i report] (map-indexed vector visible)]
-      (let [n    (inc i) ;; fzf {n} is 1-based
-            url  (:archived-at report)
+    (doseq [[n report] (map-indexed vector visible)]
+      (let [url  (:archived-at report)
             ps   (patch-paths report meta)]
         ;; open action (text browser / enter)
         (when url
@@ -669,7 +668,7 @@
                   aligned      (tabulate (cons header rows))
                   header-line  (first aligned)
                   aligned-rows (vec (rest aligned))
-                  input        (str/join "\n" aligned-rows)
+                  input        (str/join "\n" (cons (first aligned) aligned-rows))
                   sort-label   (first (nth sort-options sort-idx))
                   type-label   (if (= active-types (set all-types))
                                  ""
@@ -678,10 +677,12 @@
                                        (= active-sources (set all-sources)))
                                  ""
                                  (str " src:" (str/join "," (sort active-sources))))
+                  status-line  (str "[" sort-label "]" type-label src-label)
                   _            (write-dispatch-script! dispatch-path config visible meta)
                   {:keys [exit out]}
                   (process/shell {:in input :out :string :continue true}
-                                 "fzf" "--header" (str header-line "  [" sort-label "]" type-label src-label)
+                                 "fzf" "--header-lines" "1"
+                                 "--header" status-line
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
                                  "--expect" "ctrl-s,ctrl-t,ctrl-n"
