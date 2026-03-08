@@ -553,8 +553,8 @@
    ["priority (high)"  (fn [r] (- (:priority r 0)))                        compare]
    ["replies (most)"   (fn [r] (- (:replies r 0)))                         compare]
    ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
-                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
-                                                                           compare]
+                                 (if (pos? total) (- (/ (double sum) total)) 0.0)))
+    compare]
    ["type"             (fn [r] (:type r ""))                                compare]
    ["author"           (fn [r] (str/lower-case (:from r "")))              compare]])
 
@@ -631,7 +631,7 @@
                                    ps)]
             (.append sb (str "  patch:" n ")\n"))
             (if (= 1 (count cached-paths))
-              ;; Single patch
+              ;; Single patch — page directly
               (let [cached (first cached-paths)]
                 (if stdin?
                   (if dsf?
@@ -639,14 +639,26 @@
                     (.append sb (str "    " (str/join " " (map shell-escape pager))
                                      " < " (shell-escape cached) "\n")))
                   (.append sb (str "    " (str/join " " (map shell-escape (conj pager cached))) "\n"))))
-              ;; Multiple patches — concatenate into pager
-              (let [cat-cmd (str "cat " (str/join " " (map shell-escape cached-paths)))]
-                (if stdin?
-                  (if dsf?
-                    (.append sb (str "    " cat-cmd " | diff-so-fancy | less -RFX\n"))
-                    (.append sb (str "    " cat-cmd " | " (str/join " " (map shell-escape pager)) "\n")))
-                  ;; For file-based pagers (bat), pass all files as args
-                  (.append sb (str "    " (str/join " " (map shell-escape (into (vec pager) cached-paths))) "\n")))))
+              ;; Multiple patches — let user pick via fzf
+              (let [labels    (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) ps)
+                    fzf-input (str/join "\\n" labels)
+                    ;; Build a case statement mapping label → cached path
+                    inner-sb  (StringBuilder.)]
+                (.append inner-sb (str "    PATCH=$(printf " (shell-escape fzf-input)
+                                       " | fzf --prompt 'patch> ' --no-sort --reverse)\n"))
+                (.append inner-sb "    [ -z \"$PATCH\" ] && exit 0\n")
+                (.append inner-sb "    case \"$PATCH\" in\n")
+                (doseq [[label cached] (map vector labels cached-paths)]
+                  (.append inner-sb (str "      " (shell-escape label) ")\n"))
+                  (if stdin?
+                    (if dsf?
+                      (.append inner-sb (str "        cat " (shell-escape cached) " | diff-so-fancy | less -RFX\n"))
+                      (.append inner-sb (str "        " (str/join " " (map shell-escape pager))
+                                             " < " (shell-escape cached) "\n")))
+                    (.append inner-sb (str "        " (str/join " " (map shell-escape (conj pager cached))) "\n")))
+                  (.append inner-sb "        ;;\n"))
+                (.append inner-sb "    esac\n")
+                (.append sb (str inner-sb))))
             (.append sb "    ;;\n")))))
     (.append sb "esac\n")
     (spit dispatch-path (str sb))
