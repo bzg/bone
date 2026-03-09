@@ -26,7 +26,7 @@ Create =~/.config/bone/config.edn=:
 
 - =:email= — your email address, used by =-m= to filter reports involving you.
 - =:text-browser= — terminal browser for viewing reports on =RET=.  When unset, bone probes for =w3m=, =lynx=, =links=, then falls back to =xdg-open=.
-- =:diff-pager= — pager for viewing patches on =C-p=.  When unset, bone probes for =delta=, =bat=, then falls back to =$PAGER= or =less=.
+- =:diff-pager= — pager for viewing patches on =C-v=.  When unset, bone probes for =delta=, =bat=, then falls back to =$PAGER= or =less=.
 
 * Usage
 
@@ -74,12 +74,15 @@ exists, it fetches from sources once and caches the result.  Use
 
 | Key | Action                          |
 |-----+---------------------------------|
+| =C-n= | Move to the next line           |
+| =C-p= | Move to the previous line       |
 | =RET= | View report in terminal browser |
 | =C-o= | Open report in system browser   |
-| =C-p= | View patch (fetched to cache)   |
+| =C-v= | View patch (fetched to cache)   |
 | =C-s= | Change sort order               |
+| =C-r= | Filter by source                |
 | =C-t= | Filter by report type           |
-| =C-n= | Filter by source                |
+| =C-u= | Update cache and reload         |
 
 * Examples
 

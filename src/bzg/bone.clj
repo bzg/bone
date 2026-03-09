@@ -720,10 +720,12 @@
                                  "--header" status-line
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
-                                 "--expect" "ctrl-s,ctrl-t,ctrl-n,ctrl-u"
+                                 "--expect" "ctrl-s,ctrl-t,ctrl-r,ctrl-u"
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                                 "--bind" (str "ctrl-p:execute(" dispatch-path " patch {n})"))]
+                                 "--bind" (str "ctrl-v:execute(" dispatch-path " patch {n})")
+                                 "--bind" "ctrl-n:down"
+                                 "--bind" "ctrl-p:up")]
               (when (zero? exit)
                 (let [lines    (str/split-lines (str/trim out))
                       key-used (first lines)]
@@ -738,7 +740,7 @@
                       (recur sorted-reports sort-idx new-types active-sources)
                       (recur sorted-reports sort-idx active-types active-sources))
 
-                    "ctrl-n"
+                    "ctrl-r"
                     (if (empty? all-sources)
                       (do (println "  No source information available.")
                           (recur sorted-reports sort-idx active-types active-sources))
@@ -758,7 +760,7 @@
                       (do (println "  Cache update not available for this data source.")
                           (recur sorted-reports sort-idx active-types active-sources)))
 
-                    ;; Empty key = user pressed enter/ctrl-o/ctrl-p (handled by execute)
+                    ;; Empty key = user pressed enter/ctrl-o/ctrl-v (handled by execute)
                     ;; or escaped from fzf — just re-enter the loop
                     (recur sorted-reports sort-idx active-types active-sources))))))
           (finally
@@ -797,12 +799,14 @@
   (println "  update                         Fetch/update reports from sources")
   (println)
   (println "Keys (fzf):")
+  (println "  Ctrl-n                     Move to the next line")
+  (println "  Ctrl-p                     Move to the previous line")
   (println "  Enter                      View report in terminal browser")
   (println "  Ctrl-o                     Open report in system browser")
-  (println "  Ctrl-p                     View patch (fetched to cache)")
+  (println "  Ctrl-v                     View patch (fetched to cache)")
   (println "  Ctrl-s                     Change sort order")
+  (println "  Ctrl-r                     Filter by source")
   (println "  Ctrl-t                     Filter by report type")
-  (println "  Ctrl-n                     Filter by source")
   (println "  Ctrl-u                     Update cache and reload")
   (println)
   (println "With no -f/-u/-U/- option, bone reads cached reports or fetches")
