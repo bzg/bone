@@ -32,6 +32,7 @@
 (ns bzg.bone
   (:require [babashka.process :as process]
             [babashka.http-client :as http]
+            [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.pprint :as pprint]
@@ -748,6 +749,8 @@
                     "ctrl-u"
                     (if reload-fn
                       (do (println "  Updating cache...")
+                          (when (fs/exists? patches-cache-dir)
+                            (fs/delete-tree patches-cache-dir))
                           (update-sources-cache!)
                           (let [{new-reports :reports new-meta :meta} (reload-fn)]
                             (recur (sort-reports new-reports sort-idx) sort-idx
