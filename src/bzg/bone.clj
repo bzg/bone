@@ -670,12 +670,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn display-reports!
-  "Display reports interactively with fzf, or as plain text lines."
-  [config reports meta]
+  "Display reports interactively with fzf, or as plain text lines.
+  reload-fn, when non-nil, is called on ctrl-u to refresh the cache and
+  return a new {:reports ... :meta ...} map."
+  [config reports meta & {:keys [reload-fn]}]
   (let [show-type? true
         show-src?   (multiple-sources? reports)
-        all-types   (vec (distinct (map :type reports)))
-        all-sources (vec (distinct (keep :source reports)))
         dispatch-path (str (System/getProperty "java.io.tmpdir") "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
     (if (empty? reports)
       (println "No reports found.")
@@ -683,9 +683,13 @@
         (try
           (loop [sorted-reports reports
                  sort-idx       0
-                 active-types   (set all-types)
-                 active-sources (set all-sources)]
-            (let [visible  (->> sorted-reports
+                 active-types   nil
+                 active-sources nil]
+            (let [all-types   (vec (distinct (map :type sorted-reports)))
+                  all-sources (vec (distinct (keep :source sorted-reports)))
+                  active-types   (or active-types (set all-types))
+                  active-sources (or active-sources (set all-sources))
+                  visible  (->> sorted-reports
                                 (filter #(contains? active-types (:type %)))
                                 (filter #(or (empty? all-sources)
                                              (contains? active-sources (:source %)))))
@@ -715,7 +719,7 @@
                                  "--header" status-line
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
-                                 "--expect" "ctrl-s,ctrl-t,ctrl-n"
+                                 "--expect" "ctrl-s,ctrl-t,ctrl-n,ctrl-u"
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
                                  "--bind" (str "ctrl-p:execute(" dispatch-path " patch {n})"))]
@@ -740,6 +744,16 @@
                       (if-let [new-sources (pick-multi! "sources> " all-sources)]
                         (recur sorted-reports sort-idx active-types new-sources)
                         (recur sorted-reports sort-idx active-types active-sources)))
+
+                    "ctrl-u"
+                    (if reload-fn
+                      (do (println "  Updating cache...")
+                          (update-sources-cache!)
+                          (let [{new-reports :reports new-meta :meta} (reload-fn)]
+                            (recur (sort-reports new-reports sort-idx) sort-idx
+                                   nil nil)))
+                      (do (println "  Cache update not available for this data source.")
+                          (recur sorted-reports sort-idx active-types active-sources)))
 
                     ;; Empty key = user pressed enter/ctrl-o/ctrl-p (handled by execute)
                     ;; or escaped from fzf — just re-enter the loop
@@ -786,6 +800,7 @@
   (println "  Ctrl-s                     Change sort order")
   (println "  Ctrl-t                     Filter by report type")
   (println "  Ctrl-n                     Filter by source")
+  (println "  Ctrl-u                     Update cache and reload")
   (println)
   (println "With no -f/-u/-U/- option, bone reads cached reports or fetches")
   (println "once from ~/.config/bone/sources.json. Use 'bone update' to refresh.")
@@ -860,6 +875,19 @@
           (binding [*out* *err*] (println (str "Invalid --min-status: " min-status " (must be 1–7)")))
           (System/exit 1))
         (let [data-src (:data-src opts)
+              apply-filters
+              (fn [{:keys [reports meta] :as result}]
+                (let [reports (if-let [src (:source-filter opts)]
+                                (filter-by-source reports src) reports)
+                      reports (if (and mine? email)
+                                (filter-mine reports email) reports)
+                      reports (if min-priority
+                                (filter-by-priority reports min-priority) reports)
+                      reports (if min-status
+                                (filter-by-status reports min-status) reports)
+                      reports (if-not closed?
+                                (filter-open reports) reports)]
+                  {:reports reports :meta meta}))
               raw-result
               (case data-src
                 :file      (load-from-file (:path opts))
@@ -869,24 +897,17 @@
                 ;; No explicit source → read from sources.json
                 (load-from-sources))
               ;; Inject base-dir for -f local files
-              {:keys [reports meta]}
+              raw-result
               (if (and (= data-src :file) (nil? (:base-dir (:meta raw-result))))
                 (let [base (source-base-dir (:path opts))]
                   (if base
                     (assoc-in raw-result [:meta :base-dir] base)
                     raw-result))
                 raw-result)
-              reports (if-let [src (:source-filter opts)]
-                        (filter-by-source reports src) reports)
-              reports (if (and mine? email)
-                        (filter-mine reports email) reports)
-              reports (if min-priority
-                        (filter-by-priority reports min-priority) reports)
-              reports (if min-status
-                        (filter-by-status reports min-status) reports)
-              reports (if-not closed?
-                        (filter-open reports) reports)]
-          (display-reports! config reports meta))))))
+              {:keys [reports meta]} (apply-filters raw-result)
+              reload-fn (when (nil? data-src)
+                          #(apply-filters (load-from-sources)))]
+          (display-reports! config reports meta :reload-fn reload-fn))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))
