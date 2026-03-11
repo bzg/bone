@@ -35,7 +35,6 @@
             [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.pprint :as pprint]
             [clojure.java.io :as io]))
 
 ;; ---------------------------------------------------------------------------
@@ -60,7 +59,10 @@
 (defn- load-config []
   (let [f (io/file config-path)]
     (if (.exists f)
-      (read-string (slurp f))
+      (try
+        (read-string (slurp f))
+        (catch Exception _
+          (throw (ex-info (str "Config file is ill-formed: " config-path) {}))))
       {})))
 
 (defn- load-sources
@@ -100,7 +102,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def supported-format-version "0.1.0")
+(def supported-format-version "0.2.0")
 
 (defn- load-json-string [s]
   (json/parse-string s keyword))
@@ -129,17 +131,14 @@
 
 (defn- load-from-file [path]
   (when-not (.exists (io/file path))
-    (binding [*out* *err*]
-      (println (str "File not found: " path)))
-    (System/exit 1))
+    (throw (ex-info (str "File not found: " path) {:path path})))
   (unwrap-envelope (load-json-string (slurp path))))
 
 (defn- load-from-url [url]
   (let [resp (http/get url {:headers {"Accept" "application/json"}})]
     (when (not= 200 (:status resp))
-      (binding [*out* *err*]
-        (println (str "HTTP " (:status resp) " fetching " url)))
-      (System/exit 1))
+      (throw (ex-info (str "HTTP " (:status resp) " fetching " url)
+                      {:url url :status (:status resp)})))
     (unwrap-envelope (load-json-string (:body resp)))))
 
 (defn- load-from-stdin []
@@ -157,9 +156,7 @@
 
 (defn- load-from-urls-file [path]
   (when-not (.exists (io/file path))
-    (binding [*out* *err*]
-      (println (str "URLs file not found: " path)))
-    (System/exit 1))
+    (throw (ex-info (str "URLs file not found: " path) {:path path})))
   (let [urls (->> (str/split-lines (slurp path))
                   (map str/trim)
                   (remove #(or (str/blank? %) (str/starts-with? % "#"))))]
@@ -189,22 +186,11 @@
     (assoc-in result [:meta :base-dir] base)
     result))
 
-(defn- load-one-source
-  "Load reports from a single source string (URL, file:// URI, or file path).
-  Returns {:reports [...] :meta {...}} with :base-dir injected into meta."
-  [src]
-  (-> (if (url? src)
-        (load-from-url src)
-        (load-from-file (strip-file-scheme src)))
-      (with-base-dir src)))
-
 (defn- source->cache-file
   "Deterministic cache filename for a source URL/path."
   [src]
-  (let [safe (-> src
-                 (str/replace #"[^a-zA-Z0-9._-]" "_")
-                 (subs 0 (min 200 (count src))))]
-    (str reports-cache-dir "/" safe ".json")))
+  (let [safe (str/replace src #"[^a-zA-Z0-9._-]" "_")]
+    (str reports-cache-dir "/" (subs safe 0 (min 200 (count safe))) ".json")))
 
 (defn- cache-read
   "Read cached reports.json for a source. Returns nil if not cached."
@@ -221,9 +207,8 @@
     (spit f body)))
 
 (defn- clear-cache! []
-  (let [dir (io/file cache-dir)]
-    (when (.exists dir)
-      (run! #(.delete %) (reverse (file-seq dir)))))
+  (when (fs/exists? cache-dir)
+    (fs/delete-tree cache-dir))
   (println "Cache cleared."))
 
 (defn- fetch-source-body
@@ -250,8 +235,7 @@
   []
   (let [sources (load-sources)]
     (when (empty? sources)
-      (println "No sources configured.")
-      (System/exit 1))
+      (throw (ex-info "No sources configured." {})))
     (doseq [src sources]
       (try
         (cache-write! src (fetch-source-body src))
@@ -265,11 +249,10 @@
   []
   (let [sources (load-sources)]
     (when (empty? sources)
-      (binding [*out* *err*]
-        (println "No sources configured and no -f/-u/-U/- given.")
-        (println "Add a source:  bone --add-source URL_OR_PATH")
-        (println "Or use:        bone -f FILE | -u URL | -"))
-      (System/exit 1))
+      (throw (ex-info (str "No sources configured and no -f/-u/-U/- given.\n"
+                           "Add a source:  bone --add-source URL_OR_PATH\n"
+                           "Or use:        bone -f FILE | -u URL | -")
+                      {})))
     (merge-results
      (keep (fn [src]
              (try
@@ -291,20 +274,6 @@
     (some #(when % (= (str/lower-case %) e))
           [(:from report) (:acked-by report) (:owned-by report) (:closed-by report)])))
 
-(defn- filter-mine [reports email]
-  (filter #(involves-email? % email) reports))
-
-(defn- filter-by-source [reports src-name]
-  (filter #(= (:source %) src-name) reports))
-
-(defn- filter-by-priority [reports min-p]
-  (filter #(>= (:priority % 0) min-p) reports))
-
-(defn- filter-by-status [reports min-s]
-  (filter #(>= (:status % 0) min-s) reports))
-
-(defn- filter-open [reports]
-  (remove :closed reports))
 
 ;; ---------------------------------------------------------------------------
 ;; Formatting helpers
@@ -348,9 +317,9 @@
   [report]
   (when-let [dl (:deadline report)]
     (try
-      (let [today    (java.time.LocalDate/now)
-            deadline (java.time.LocalDate/parse dl)]
-        (.getDays (java.time.Period/between today deadline)))
+      (.between java.time.temporal.ChronoUnit/DAYS
+                (java.time.LocalDate/now)
+                (java.time.LocalDate/parse dl))
       (catch Exception _ nil))))
 
 (defn- deadline-col
@@ -363,20 +332,24 @@
   [s n]
   (if (> (count s) n) (subs s 0 n) s))
 
+(defn- report-columns
+  "Return a vector of column values for a report."
+  [report show-type? show-src?]
+  (concat
+   (when show-type? [(:type report "")])
+   (when show-src?  [(truncate (:source report "") 10)])
+   [(str (:priority report 0))
+    (deadline-col report)
+    (:flags report "---")
+    (str (:replies report 0))
+    (:from report "?")
+    (date-only (:date report))
+    (str (vote-cookie report) (:subject report "(no subject)"))]))
+
 (defn- report->row
   "Format a report as a tab-separated row for fzf display."
   [report show-type? show-src?]
-  (str/join "\t"
-            (concat
-             (when show-type? [(:type report "")])
-             (when show-src?  [(truncate (:source report "") 10)])
-             [(str (:priority report 0))
-              (deadline-col report)
-              (:flags report "---")
-              (str (:replies report 0))
-              (:from report "?")
-              (date-only (:date report))
-              (str (vote-cookie report) (:subject report "(no subject)"))])))
+  (str/join "\t" (report-columns report show-type? show-src?)))
 
 (defn- extra-str [report]
   (let [parts (remove nil?
@@ -398,17 +371,10 @@
 (defn- report->line
   "Format a report as a plain text line."
   [report show-type? show-src?]
-  (str (when show-type? (format "[%-12s] " (:type report "")))
-       (when show-src?  (format "[%-10s] " (truncate (:source report "") 10)))
-       (format "%d %4s %-3s %3d %-25s %s  %s"
-               (:priority report 0)
-               (deadline-col report)
-               (:flags report "---")
-               (:replies report 0)
-               (:from report "?")
-               (date-only (:date report))
-               (str (vote-cookie report) (:subject report "(no subject)")))
-       (when-let [e (extra-str report)] (str " " e))))
+  (let [line (str/join "  " (report-columns report show-type? show-src?))]
+    (if-let [e (extra-str report)]
+      (str line " " e)
+      line)))
 
 ;; ---------------------------------------------------------------------------
 ;; Display
@@ -466,9 +432,11 @@
                            (if (str/ends-with? bp "/") bp (str bp "/"))))
           src-name   (or (:source meta) "default")]
       (mapv (fn [p]
-              (let [file (:file p)]
+              (let [file (:file p)
+                    ;; Strip leading "../" segments so cache stays flat under patches-cache-dir
+                    cache-file (str/replace-first file #"^(\.\./?)+" "")]
                 {:url        (if base (str base file) file)
-                 :cache-path (str patches-cache-dir "/" src-name "/" file)
+                 :cache-path (str patches-cache-dir "/" src-name "/" cache-file)
                  :filename   (:patch/filename p (:file p))}))
             ps))))
 
@@ -570,6 +538,7 @@
   [["date (newest)"    (fn [r] (- (or (parse-date-ms (:date-raw r)) 0)))  compare]
    ["date (oldest)"    (fn [r] (or (parse-date-ms (:date-raw r)) 0))      compare]
    ["priority (high)"  (fn [r] (- (:priority r 0)))                        compare]
+   ["deadline (soon)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))    compare]
    ["replies (most)"   (fn [r] (- (:replies r 0)))                         compare]
    ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
@@ -617,6 +586,21 @@
   [s]
   (str "'" (str/replace s "'" "'\\''") "'"))
 
+(def ^:private usage-text
+  (str/join "\n"
+            ["  Ctrl-n                     Move to the next line"
+             "  Ctrl-p                     Move to the previous line"
+             "  Enter                      View report in terminal browser"
+             "  Ctrl-o                     Open report in system browser"
+             "  Ctrl-v                     View patch (fetched to cache)"
+             "  Ctrl-s                     Change sort order"
+             "  Ctrl-b                     Filter by source"
+             "  Ctrl-r                     Filter by report type"
+             "  Ctrl-t                     Filter by topic"
+             "  Ctrl-u                     Update cache and reload"
+             "  Ctrl-h                     Show this help"
+             "   }"]))
+
 (defn- write-dispatch-script!
   "Write a temp shell script that maps fzf line numbers to actions.
   The script takes two args: ACTION (open|patch|browse) and LINE_NUMBER.
@@ -628,6 +612,12 @@
         dsf?    (= "diff-so-fancy" (first pager))
         sb      (StringBuilder.)]
     (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
+    (.append sb (str "if [ \"$ACTION\" = \"help\" ]; then\n"
+                     "  cat <<'BONE_HELP' | less -RX\n"
+                     usage-text "\n"
+                     "BONE_HELP\n"
+                     "  exit 0\n"
+                     "fi\n"))
     (.append sb "case \"$ACTION:$N\" in\n")
     (doseq [[n report] (map-indexed vector visible)]
       (let [url  (:archived-at report)
@@ -700,18 +690,21 @@
       (println "No reports found.")
       (if (fzf-available?)
         (try
-          (loop [sorted-reports reports
-                 sort-idx       0
-                 active-types   nil
-                 active-sources nil]
-            (let [all-types   (vec (distinct (map :type sorted-reports)))
-                  all-sources (vec (distinct (keep :source sorted-reports)))
-                  active-types   (or active-types (set all-types))
-                  active-sources (or active-sources (set all-sources))
-                  visible  (->> sorted-reports
+          (loop [{:keys [reports sort-idx types sources topics] :as state}
+                 {:reports reports :sort-idx 0 :types nil :sources nil :topics nil}]
+            (let [all-types      (vec (distinct (map :type reports)))
+                  all-sources    (vec (distinct (keep :source reports)))
+                  all-topics     (vec (distinct (keep :topic reports)))
+                  active-types   (or types (set all-types))
+                  active-sources (or sources (set all-sources))
+                  active-topics  (or topics (set all-topics))
+                  visible  (->> reports
                                 (filter #(contains? active-types (:type %)))
                                 (filter #(or (empty? all-sources)
-                                             (contains? active-sources (:source %)))))
+                                             (contains? active-sources (:source %))))
+                                (filter #(or (empty? all-topics)
+                                             (nil? (:topic %))
+                                             (contains? active-topics (:topic %)))))
                   header   (str/join "\t"
                                      (concat
                                       (when show-type? ["Type"])
@@ -719,9 +712,7 @@
                                       ["P" "D" "Flags" "#" "From" "Date" "Subject"]))
                   rows     (mapv #(report->row % show-type? show-src?) visible)
                   aligned      (tabulate (cons header rows))
-                  header-line  (first aligned)
-                  aligned-rows (vec (rest aligned))
-                  input        (str/join "\n" (cons (first aligned) aligned-rows))
+                  input        (str/join "\n" aligned)
                   sort-label   (first (nth sort-options sort-idx))
                   type-label   (if (= active-types (set all-types))
                                  ""
@@ -730,7 +721,11 @@
                                        (= active-sources (set all-sources)))
                                  ""
                                  (str " src:" (str/join "," (sort active-sources))))
-                  status-line  (str "[" sort-label "]" type-label src-label)
+                  topic-label  (if (or (empty? all-topics)
+                                       (= active-topics (set all-topics)))
+                                 ""
+                                 (str " topic:" (str/join "," (sort active-topics))))
+                  status-line  (str "[" sort-label "]" type-label src-label topic-label)
                   _            (write-dispatch-script! dispatch-path config visible meta)
                   {:keys [exit out]}
                   (process/shell {:in input :out :string :continue true}
@@ -738,103 +733,69 @@
                                  "--header" status-line
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
-                                 "--expect" "ctrl-s,ctrl-t,ctrl-r,ctrl-u"
+                                 "--expect" "ctrl-s,ctrl-r,ctrl-b,ctrl-t,ctrl-u"
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
                                  "--bind" (str "ctrl-v:execute(" dispatch-path " patch {n})")
+                                 "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
                                  "--bind" "ctrl-n:down"
                                  "--bind" "ctrl-p:up")]
               (when (zero? exit)
                 (let [lines    (str/split-lines (str/trim out))
                       key-used (first lines)]
-                  (case key-used
-                    "ctrl-s"
-                    (if-let [new-idx (pick-sort!)]
-                      (recur (sort-reports reports new-idx) new-idx active-types active-sources)
-                      (recur sorted-reports sort-idx active-types active-sources))
+                  (recur
+                   (case key-used
+                     "ctrl-s"
+                     (if-let [idx (pick-sort!)]
+                       (assoc state :reports (sort-reports reports idx) :sort-idx idx)
+                       state)
 
-                    "ctrl-t"
-                    (if-let [new-types (pick-multi! "types> " all-types)]
-                      (recur sorted-reports sort-idx new-types active-sources)
-                      (recur sorted-reports sort-idx active-types active-sources))
+                     "ctrl-r"
+                     (if-let [new-types (pick-multi! "types> " all-types)]
+                       (assoc state :types new-types)
+                       state)
 
-                    "ctrl-r"
-                    (if (empty? all-sources)
-                      (do (println "  No source information available.")
-                          (recur sorted-reports sort-idx active-types active-sources))
-                      (if-let [new-sources (pick-multi! "sources> " all-sources)]
-                        (recur sorted-reports sort-idx active-types new-sources)
-                        (recur sorted-reports sort-idx active-types active-sources)))
+                     "ctrl-b"
+                     (if (empty? all-sources)
+                       (do (println "  No source information available.") state)
+                       (if-let [new-sources (pick-multi! "sources> " all-sources)]
+                         (assoc state :sources new-sources)
+                         state))
 
-                    "ctrl-u"
-                    (if reload-fn
-                      (do (println "  Updating cache...")
-                          (when (fs/exists? patches-cache-dir)
-                            (fs/delete-tree patches-cache-dir))
-                          (update-sources-cache!)
-                          (let [{new-reports :reports new-meta :meta} (reload-fn)]
-                            (recur (sort-reports new-reports sort-idx) sort-idx
-                                   nil nil)))
-                      (do (println "  Cache update not available for this data source.")
-                          (recur sorted-reports sort-idx active-types active-sources)))
+                     "ctrl-t"
+                     (if (empty? all-topics)
+                       (do (println "  No topic information available.") state)
+                       (if-let [new-topics (pick-multi! "topics> " all-topics)]
+                         (assoc state :topics new-topics)
+                         state))
 
-                    ;; Empty key = user pressed enter/ctrl-o/ctrl-v (handled by execute)
-                    ;; or escaped from fzf — just re-enter the loop
-                    (recur sorted-reports sort-idx active-types active-sources))))))
+                     "ctrl-u"
+                     (if reload-fn
+                       (do (println "  Updating cache...")
+                           (when (fs/exists? patches-cache-dir)
+                             (fs/delete-tree patches-cache-dir))
+                           (update-sources-cache!)
+                           (let [{new-reports :reports} (reload-fn)]
+                             (assoc state
+                                    :reports (sort-reports new-reports sort-idx)
+                                    :types nil :sources nil :topics nil)))
+                       (do (println "  Cache update not available for this data source.")
+                           state))
+
+                     ;; enter/ctrl-o/ctrl-v handled by execute, or esc
+                     state))))))
           (finally
             (.delete (io/file dispatch-path))))
         ;; Plain text fallback
-        (do (println (str (count reports) " report(s):\n"))
+        (do (println (count reports) "report(s):\n")
             (doseq [r reports]
-              (println (str "  " (report->line r show-type? show-src?)))))))))
+              (println " " (report->line r show-type? show-src?))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; CLI
 ;; ---------------------------------------------------------------------------
 
-(defn- usage []
-  (println "Usage: bone.clj [options]")
-  (println)
-  (println "Options:")
-  (println "  -f, --file FILE            Read reports from a JSON file")
-  (println "  -u, --url  URL             Fetch reports from a URL")
-  (println "  -U, --urls-file FILE       Fetch & merge from URLs in FILE (one per line)")
-  (println "  -e, --email EMAIL          Your email (overrides ~/.config/bone/config.edn)")
-  (println "  -n, --source NAME          Filter by source name")
-  (println "  -p, --min-priority 1|2|3   Only show reports with priority >= N")
-  (println "  -s, --min-status 1-7       Only show reports with status >= N")
-  (println "  -m, --mine                 Show only reports involving your email")
-  (println "  -c, --closed               Include closed reports")
-  (println "  -                          Read JSON from stdin")
-  (println)
-  (println "Source management:")
-  (println "  -a, --add-source URL_OR_PATH   Add a reports.json source")
-  (println "  --remove-source URL_OR_PATH    Remove a source")
-  (println "  --list-sources                 List configured sources")
-  (println)
-  (println "Cache management:")
-  (println "  clear                          Empty the cache")
-  (println "  update                         Fetch/update reports from sources")
-  (println)
-  (println "Keys (fzf):")
-  (println "  Ctrl-n                     Move to the next line")
-  (println "  Ctrl-p                     Move to the previous line")
-  (println "  Enter                      View report in terminal browser")
-  (println "  Ctrl-o                     Open report in system browser")
-  (println "  Ctrl-v                     View patch (fetched to cache)")
-  (println "  Ctrl-s                     Change sort order")
-  (println "  Ctrl-r                     Filter by source")
-  (println "  Ctrl-t                     Filter by report type")
-  (println "  Ctrl-u                     Update cache and reload")
-  (println)
-  (println "With no -f/-u/-U/- option, bone reads cached reports or fetches")
-  (println "once from ~/.config/bone/sources.json. Use 'bone update' to refresh.")
-  (println)
-  (println "Config: ~/.config/bone/config.edn")
-  (println "  {:email        \"you@example.com\"")
-  (println "   :text-browser \"w3m\"       ;; or lynx, links")
-  (println "   :diff-pager   \"delta\"     ;; or bat, diff-so-fancy")
-  (println "   }"))
+(defn- usage [] (println usage-text))
 
 (defn -main [& args]
   (let [args   (seq (or (seq args) *command-line-args*))
@@ -849,7 +810,7 @@
       (some #{"update"} args)
       (update-sources-cache!)
 
-      (some #{"--list-sources"} args)
+      (some #{"-l" "--list-sources"} args)
       (list-sources!)
 
       (some #{"-a" "--add-source"} args)
@@ -860,13 +821,13 @@
           (add-source! src)
           (println "Usage: bone -a URL_OR_PATH")))
 
-      (some #{"--remove-source"} args)
+      (some #{"-r" "--remove-source"} args)
       (let [av  (vec args)
-            idx (inc (.indexOf ^java.util.List av "--remove-source"))
-            src (nth av idx nil)]
+            idx (first (keep-indexed #(when (#{"-r" "--remove-source"} %2) (inc %1)) av))
+            src (when idx (nth av idx nil))]
         (if src
           (remove-source! src)
-          (println "Usage: bone --remove-source URL_OR_PATH")))
+          (println "Usage: bone -r URL_OR_PATH")))
 
       :else
       (let [[opts _]
@@ -890,29 +851,22 @@
             min-priority (:min-priority opts)
             min-status   (:min-status opts)]
         (when (and mine? (not email))
-          (binding [*out* *err*]
-            (println "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL."))
-          (System/exit 1))
+          (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
         (when (and min-priority (not (#{1 2 3} min-priority)))
-          (binding [*out* *err*] (println (str "Invalid --min-priority: " min-priority " (must be 1, 2, or 3)")))
-          (System/exit 1))
+          (throw (ex-info (str "Invalid --min-priority: " min-priority " (must be 1, 2, or 3)") {})))
         (when (and min-status (not (<= 1 min-status 7)))
-          (binding [*out* *err*] (println (str "Invalid --min-status: " min-status " (must be 1–7)")))
-          (System/exit 1))
+          (throw (ex-info (str "Invalid --min-status: " min-status " (must be 1–7)") {})))
         (let [data-src (:data-src opts)
+              src-filter (:source-filter opts)
               apply-filters
-              (fn [{:keys [reports meta] :as result}]
-                (let [reports (if-let [src (:source-filter opts)]
-                                (filter-by-source reports src) reports)
-                      reports (if (and mine? email)
-                                (filter-mine reports email) reports)
-                      reports (if min-priority
-                                (filter-by-priority reports min-priority) reports)
-                      reports (if min-status
-                                (filter-by-status reports min-status) reports)
-                      reports (if-not closed?
-                                (filter-open reports) reports)]
-                  {:reports reports :meta meta}))
+              (fn [{:keys [reports meta]}]
+                {:reports (cond->> reports
+                            src-filter              (filter #(= (:source %) src-filter))
+                            (and mine? email)       (filter #(involves-email? % email))
+                            min-priority            (filter #(>= (:priority % 0) min-priority))
+                            min-status              (filter #(>= (:status % 0) min-status))
+                            (not closed?)           (remove :closed))
+                 :meta meta})
               raw-result
               (case data-src
                 :file      (load-from-file (:path opts))
@@ -935,4 +889,9 @@
           (display-reports! config reports meta :reload-fn reload-fn))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
-  (apply -main *command-line-args*))
+  (try
+    (apply -main *command-line-args*)
+    (catch clojure.lang.ExceptionInfo e
+      (binding [*out* *err*]
+        (println (.getMessage e)))
+      (System/exit 1))))
