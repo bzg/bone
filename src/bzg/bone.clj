@@ -342,6 +342,22 @@
     (str "[" v "] ")
     ""))
 
+(defn- deadline-days
+  "Days from now to the report's :deadline (yyyy-mm-dd).
+  Negative = past deadline. Returns nil when no deadline."
+  [report]
+  (when-let [dl (:deadline report)]
+    (try
+      (let [today    (java.time.LocalDate/now)
+            deadline (java.time.LocalDate/parse dl)]
+        (.getDays (java.time.Period/between today deadline)))
+      (catch Exception _ nil))))
+
+(defn- deadline-col
+  "Format the deadline column: days as string, or empty."
+  [report]
+  (if-let [d (deadline-days report)] (str d) ""))
+
 (defn- truncate
   "Truncate string s to at most n characters."
   [s n]
@@ -355,6 +371,7 @@
              (when show-type? [(:type report "")])
              (when show-src?  [(truncate (:source report "") 10)])
              [(str (:priority report 0))
+              (deadline-col report)
               (:flags report "---")
               (str (:replies report 0))
               (:from report "?")
@@ -383,8 +400,9 @@
   [report show-type? show-src?]
   (str (when show-type? (format "[%-12s] " (:type report "")))
        (when show-src?  (format "[%-10s] " (truncate (:source report "") 10)))
-       (format "%d %-3s %3d %-25s %s  %s"
+       (format "%d %4s %-3s %3d %-25s %s  %s"
                (:priority report 0)
+               (deadline-col report)
                (:flags report "---")
                (:replies report 0)
                (:from report "?")
@@ -698,7 +716,7 @@
                                      (concat
                                       (when show-type? ["Type"])
                                       (when show-src?   ["Source"])
-                                      ["P" "Flags" "#" "From" "Date" "Subject"]))
+                                      ["P" "D" "Flags" "#" "From" "Date" "Subject"]))
                   rows     (mapv #(report->row % show-type? show-src?) visible)
                   aligned      (tabulate (cons header rows))
                   header-line  (first aligned)
