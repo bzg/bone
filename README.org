@@ -54,8 +54,8 @@ Create =~/.config/bone/config.edn=:
 | Command                      | Description               |
 |------------------------------+---------------------------|
 | =-a=, =--add-source URL_OR_PATH= | Add a reports.json source |
-| =--remove-source URL_OR_PATH=  | Remove a source           |
-| =--list-sources=               | List configured sources   |
+| =-r=, =--remove-source URL_OR_PATH= | Remove a source           |
+| =-l=, =--list-sources=              | List configured sources   |
 
 Sources are stored in =~/.config/bone/sources.json=.
 
@@ -80,9 +80,11 @@ exists, it fetches from sources once and caches the result.  Use
 | =C-o= | Open report in system browser   |
 | =C-v= | View patch (fetched to cache)   |
 | =C-s= | Change sort order               |
-| =C-r= | Filter by source                |
-| =C-t= | Filter by report type           |
+| =C-r= | Filter by report type           |
+| =C-b= | Filter by source                |
+| =C-t= | Filter by topic                 |
 | =C-u= | Update cache and reload         |
+| =C-h= | Show help                       |
 
 * Examples
 
