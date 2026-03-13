@@ -102,7 +102,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def supported-format-version "0.2.0")
+(def supported-format-version "0.2.1")
 
 (defn- load-json-string [s]
   (json/parse-string s keyword))
@@ -435,7 +435,7 @@
               (let [file (:file p)
                     ;; Strip leading "../" segments so cache stays flat under patches-cache-dir
                     cache-file (str/replace-first file #"^(\.\./?)+" "")]
-                {:url        (if base (str base file) file)
+                {:url        (if base (str base "patches/" file) file)
                  :cache-path (str patches-cache-dir "/" src-name "/" cache-file)
                  :filename   (:patch/filename p (:file p))}))
             ps))))
