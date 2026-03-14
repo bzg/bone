@@ -597,6 +597,7 @@
              "  Ctrl-b                     Filter by source"
              "  Ctrl-r                     Filter by report type"
              "  Ctrl-t                     Filter by topic"
+             "  Ctrl-x                     Remove all filters"
              "  Ctrl-u                     Update cache and reload"
              "  Ctrl-h                     Show this help"
              "   }"]))
@@ -703,7 +704,7 @@
                                 (filter #(or (empty? all-sources)
                                              (contains? active-sources (:source %))))
                                 (filter #(or (empty? all-topics)
-                                             (nil? (:topic %))
+                                             (and (nil? topics) (nil? (:topic %)))
                                              (contains? active-topics (:topic %)))))
                   header   (str/join "\t"
                                      (concat
@@ -733,16 +734,18 @@
                                  "--header" status-line
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
-                                 "--expect" "ctrl-s,ctrl-r,ctrl-b,ctrl-t,ctrl-u"
+                                 "--expect" "ctrl-s,ctrl-r,ctrl-b,ctrl-t,ctrl-x,ctrl-u"
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
                                  "--bind" (str "ctrl-v:execute(" dispatch-path " patch {n})")
                                  "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
                                  "--bind" "ctrl-n:down"
                                  "--bind" "ctrl-p:up")]
-              (when (zero? exit)
-                (let [lines    (str/split-lines (str/trim out))
-                      key-used (first lines)]
+              (let [lines    (when (seq (str/trim out))
+                               (str/split-lines (str/trim out)))
+                    key-used (first lines)]
+                (when (or (zero? exit)
+                          (#{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u"} key-used))
                   (recur
                    (case key-used
                      "ctrl-s"
@@ -768,6 +771,9 @@
                        (if-let [new-topics (pick-multi! "topics> " all-topics)]
                          (assoc state :topics new-topics)
                          state))
+
+                     "ctrl-x"
+                     (assoc state :types nil :sources nil :topics nil)
 
                      "ctrl-u"
                      (if reload-fn

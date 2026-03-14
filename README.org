@@ -85,6 +85,7 @@ exists, it fetches from sources once and caches the result.  Use
 | =C-t= | Filter by topic                 |
 | =C-u= | Update cache and reload         |
 | =C-h= | Show help                       |
+| C-x | Remove current filters          |
 
 * Examples
 
