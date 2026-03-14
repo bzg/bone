@@ -599,8 +599,7 @@
              "  Ctrl-t                     Filter by topic"
              "  Ctrl-x                     Remove all filters"
              "  Ctrl-u                     Update cache and reload"
-             "  Ctrl-h                     Show this help"
-             "   }"]))
+             "  Ctrl-h                     Show this help"]))
 
 (defn- write-dispatch-script!
   "Write a temp shell script that maps fzf line numbers to actions.
