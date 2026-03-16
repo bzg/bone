@@ -20,7 +20,7 @@
 ;;   -U, --urls-file FILE     Fetch & merge reports from URLs listed in FILE
 ;;   -e, --email EMAIL        Your email (overrides config)
 ;;   -p, --min-priority 1-3   Only show reports with priority >= N
-;;   -s, --min-status 1-7     Only show reports with status >= N
+;;   -s, --min-score 0-7     Only show reports with status score >= N
 ;;   -n, --source NAME        Filter by source name
 ;;   -m, --mine               Show only reports involving your email
 ;;   -c, --closed             Include closed reports
@@ -34,6 +34,7 @@
             [babashka.http-client :as http]
             [babashka.fs :as fs]
             [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.java.io :as io]))
 
@@ -60,7 +61,7 @@
   (let [f (io/file config-path)]
     (if (.exists f)
       (try
-        (read-string (slurp f))
+        (edn/read-string (slurp f))
         (catch Exception _
           (throw (ex-info (str "Config file is ill-formed: " config-path) {}))))
       {})))
@@ -107,61 +108,6 @@
 (defn- load-json-string [s]
   (json/parse-string s keyword))
 
-(defn- unwrap-envelope
-  "Unwrap a reports.json envelope. Returns {:reports [...] :meta {...}}.
-  Injects the envelope's :source into each report that lacks one.
-  Handles: new per-source format {source, reports, list-id, ...}
-  and legacy bare-array format."
-  [data]
-  (if (sequential? data)
-    {:reports data :meta {}}
-    (let [fv (:format-version data)]
-      (when (and fv (not= fv supported-format-version))
-        (binding [*out* *err*]
-          (println (str "Warning: format-version " fv
-                        " differs from supported version "
-                        supported-format-version))))
-      (let [reports    (or (:reports data) [])
-            meta       (dissoc data :reports :format-version)
-            src-name   (:source meta)
-            reports    (if src-name
-                         (mapv #(if (:source %) % (assoc % :source src-name)) reports)
-                         reports)]
-        {:reports reports :meta meta}))))
-
-(defn- load-from-file [path]
-  (when-not (.exists (io/file path))
-    (throw (ex-info (str "File not found: " path) {:path path})))
-  (unwrap-envelope (load-json-string (slurp path))))
-
-(defn- load-from-url [url]
-  (let [resp (http/get url {:headers {"Accept" "application/json"}})]
-    (when (not= 200 (:status resp))
-      (throw (ex-info (str "HTTP " (:status resp) " fetching " url)
-                      {:url url :status (:status resp)})))
-    (unwrap-envelope (load-json-string (:body resp)))))
-
-(defn- load-from-stdin []
-  (unwrap-envelope (load-json-string (slurp *in*))))
-
-(defn- merge-results
-  "Reduce a seq of {:reports [...] :meta {...}} into one."
-  [results]
-  (reduce (fn [acc {:keys [reports meta]}]
-            (-> acc
-                (update :reports into reports)
-                (update :meta merge meta)))
-          {:reports [] :meta {}}
-          results))
-
-(defn- load-from-urls-file [path]
-  (when-not (.exists (io/file path))
-    (throw (ex-info (str "URLs file not found: " path) {:path path})))
-  (let [urls (->> (str/split-lines (slurp path))
-                  (map str/trim)
-                  (remove #(or (str/blank? %) (str/starts-with? % "#"))))]
-    (merge-results (map load-from-url urls))))
-
 (defn- url? [s]
   (boolean (re-find #"^https?://" s)))
 
@@ -179,12 +125,71 @@
     (when-let [parent (.getParent (io/file (strip-file-scheme src)))]
       (str parent "/"))))
 
-(defn- with-base-dir
-  "Inject :base-dir into result meta from a source string."
+(defn- fetch-source-body
+  "Fetch raw JSON body string from a source (URL or file path)."
+  [src]
+  (if (url? src)
+    (let [resp (http/get src {:headers {"Accept" "application/json"}})]
+      (when (not= 200 (:status resp))
+        (throw (ex-info (str "HTTP " (:status resp)) {:url src :status (:status resp)})))
+      (:body resp))
+    (slurp (strip-file-scheme src))))
+
+(defn- unwrap-envelope
+  "Unwrap a reports.json envelope. Returns {:reports [...]}.
+  Injects :source and :bark-path from envelope into each report.
+  Handles: new per-source format {source, reports, list-id, ...}
+  and legacy bare-array format."
+  [data]
+  (if (sequential? data)
+    {:reports data}
+    (let [fv (:format-version data)]
+      (when (and fv (not= fv supported-format-version))
+        (binding [*out* *err*]
+          (println (str "Warning: format-version " fv
+                        " differs from supported version "
+                        supported-format-version))))
+      (let [reports   (or (:reports data) [])
+            src-name  (:source data)
+            bark-path (:bark-path data)]
+        {:reports (mapv (fn [r]
+                          (cond-> r
+                            (and src-name (not (:source r))) (assoc :source src-name)
+                            bark-path                        (assoc :bark-path bark-path)))
+                        reports)}))))
+
+(defn- inject-base-dir
+  "Inject :base-dir into each report from a source path."
   [result src]
   (if-let [base (source-base-dir src)]
-    (assoc-in result [:meta :base-dir] base)
+    (update result :reports (partial mapv #(assoc % :base-dir base)))
     result))
+
+(defn- load-from-file [path]
+  (when-not (.exists (io/file path))
+    (throw (ex-info (str "File not found: " path) {:path path})))
+  (inject-base-dir (unwrap-envelope (load-json-string (slurp path))) path))
+
+(defn- load-from-url [url]
+  (unwrap-envelope (load-json-string (fetch-source-body url))))
+
+(defn- load-from-stdin []
+  (unwrap-envelope (load-json-string (slurp *in*))))
+
+(defn- merge-results
+  "Reduce a seq of {:reports [...]} into one."
+  [results]
+  {:reports (into [] (mapcat :reports) results)})
+
+(defn- load-from-urls-file [path]
+  (when-not (.exists (io/file path))
+    (throw (ex-info (str "URLs file not found: " path) {:path path})))
+  (let [urls (->> (str/split-lines (slurp path))
+                  (map str/trim)
+                  (remove #(or (str/blank? %) (str/starts-with? % "#"))))]
+    (merge-results (map load-from-url urls))))
+
+;; --- Cache ---
 
 (defn- source->cache-file
   "Deterministic cache filename for a source URL/path."
@@ -211,24 +216,14 @@
     (fs/delete-tree cache-dir))
   (println "Cache cleared."))
 
-(defn- fetch-source-body
-  "Fetch raw JSON body string from a source (URL or file path)."
-  [src]
-  (if (url? src)
-    (let [resp (http/get src {:headers {"Accept" "application/json"}})]
-      (when (not= 200 (:status resp))
-        (throw (ex-info (str "HTTP " (:status resp)) {:url src :status (:status resp)})))
-      (:body resp))
-    (slurp (strip-file-scheme src))))
-
 (defn- load-one-source-cached
   "Load reports from cache if available, otherwise fetch and cache."
   [src]
   (if-let [cached (cache-read src)]
-    (with-base-dir (unwrap-envelope cached) src)
+    (inject-base-dir (unwrap-envelope cached) src)
     (let [body (fetch-source-body src)]
       (cache-write! src body)
-      (with-base-dir (unwrap-envelope (load-json-string body)) src))))
+      (inject-base-dir (unwrap-envelope (load-json-string body)) src))))
 
 (defn- update-sources-cache!
   "Fetch all configured sources and update cache."
@@ -334,19 +329,23 @@
   [s n]
   (if (> (count s) n) (subs s 0 n) s))
 
-(defn- report-flags
-  "Build a 3-char flag string from report fields.
-  A=acked O=owned, third char: C=canceled R=resolved E=expired -=open."
+(defn- report-flags+score
+  "Compute flags string and numeric score from report fields.
+  Flags: A=acked O=owned, third char: C=canceled R=resolved E=expired -=open.
+  Score matches bark-index.clj: acked=1, owned=2, open=4 (closed=0)."
   [report]
-  (let [flag-a (if (:acked report) "A" "-")
-        flag-o (if (:owned report) "O" "-")
-        flag-c (let [cr (:close-reason report)]
+  (let [a? (:acked report)
+        o? (:owned report)
+        c? (:closed report)
+        cr (:close-reason report)]
+    {:flags (str (if a? "A" "-")
+                 (if o? "O" "-")
                  (cond (= cr "canceled") "C"
                        (= cr "resolved") "R"
                        (= cr "expired")  "E"
-                       (:closed report)  "R"
-                       :else             "-"))]
-    (str flag-a flag-o flag-c)))
+                       c?                "R"
+                       :else             "-"))
+     :score (+ (if a? 1 0) (if o? 2 0) (if c? 0 4))}))
 
 (defn- report-columns
   "Return a vector of column values for a report."
@@ -356,7 +355,7 @@
    (when show-src?  [(truncate (:source report "") 10)])
    [(str (:priority report 0))
     (deadline-col report)
-    (report-flags report)
+    (:flags (report-flags+score report))
     (str (:replies report 0))
     (:from report "?")
     (date-only (:date report))
@@ -440,13 +439,13 @@
 
 (defn- patch-paths
   "Return a vector of {:url ... :cache-path ...} for each patch in a report.
-  Resolves URLs from base-dir or bark-path, and cache paths from source name."
-  [report meta]
+  Resolves URLs from the report's :base-dir or :bark-path, cache paths from :source."
+  [report]
   (when-let [ps (seq (:patches report))]
-    (let [base       (or (:base-dir meta)
-                         (when-let [bp (:bark-path meta)]
+    (let [base       (or (:base-dir report)
+                         (when-let [bp (:bark-path report)]
                            (if (str/ends-with? bp "/") bp (str bp "/"))))
-          src-name   (or (:source meta) "default")]
+          src-name   (or (:source report) "default")]
       (mapv (fn [p]
               (let [file (:file p)
                     ;; Strip leading "../" segments so cache stays flat under patches-cache-dir
@@ -455,25 +454,6 @@
                  :cache-path (str patches-cache-dir "/" src-name "/" cache-file)
                  :filename   (:patch/filename p (:file p))}))
             ps))))
-
-(defn- fetch-to-cache!
-  "Ensure a patch file is in the cache. Returns the cache path.
-  For local files, copies. For URLs, downloads."
-  [url cache-path]
-  (let [f (io/file cache-path)]
-    (when-not (.exists f)
-      (.mkdirs (.getParentFile f))
-      (if (url? url)
-        (let [resp (http/get url)]
-          (if (= 200 (:status resp))
-            (spit cache-path (:body resp))
-            (println (str "  Failed to fetch: " url " (HTTP " (:status resp) ")"))))
-        ;; Local file — copy
-        (let [src (io/file url)]
-          (if (.exists src)
-            (io/copy src f)
-            (println (str "  File not found: " url))))))
-    cache-path))
 
 (def ^:private diff-pager-cmds
   {"delta"          ["delta" "--paging" "always"]
@@ -494,43 +474,6 @@
             (dissoc diff-pager-cmds "diff-so-fancy"))
       [(or (System/getenv "PAGER") "less")]))
 
-(defn- page-file! [config path]
-  (when (.exists (io/file path))
-    (let [cmd (patch-pager config)]
-      (if (stdin-diff-pagers (first cmd))
-        (if (= "diff-so-fancy" (first cmd))
-          (process/shell {:in (slurp path) :continue true}
-                         "sh" "-c" "diff-so-fancy | less -RFX")
-          (apply process/shell {:in (slurp path) :continue true} cmd))
-        (apply process/shell {:continue true} (conj cmd path))))))
-
-(defn- show-patch!
-  "Fetch a patch to cache and display it with a diff-aware pager."
-  [config report meta]
-  (if-let [paths (seq (patch-paths report meta))]
-    (if (= 1 (count paths))
-      (let [{:keys [url cache-path]} (first paths)]
-        (page-file! config (fetch-to-cache! url cache-path)))
-      ;; Multiple patches — let user pick with fzf, then page
-      (let [labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) paths)
-            input  (str/join "\n" labels)
-            {:keys [exit out]}
-            (process/shell {:in input :out :string :continue true}
-                           "fzf" "--prompt" "patch> " "--no-sort" "--reverse")]
-        (when (zero? exit)
-          (let [selected (str/trim out)
-                idx      (.indexOf ^java.util.List labels selected)]
-            (when (>= idx 0)
-              (let [{:keys [url cache-path]} (nth paths idx)]
-                (page-file! config (fetch-to-cache! url cache-path))))))))
-    (println "  No patches for this report.")))
-
-(defn- open-url! [config url]
-  (try
-    (apply process/shell {:continue true} (conj (browse-cmd config) url))
-    (catch Exception _
-      (println (str "  Failed to open: " url)))))
-
 ;; ---------------------------------------------------------------------------
 ;; Sorting
 ;; ---------------------------------------------------------------------------
@@ -538,7 +481,7 @@
 (defn- parse-date-ms
   "Parse a date-raw string to epoch millis for sorting. Returns 0 on failure."
   [s]
-  (when (and s (not (str/blank? s)))
+  (if (and s (not (str/blank? s)))
     (try
       ;; Java Date.toString() format: "Sat Mar 07 04:10:11 CET 2026"
       (let [fmt (java.text.SimpleDateFormat. "EEE MMM dd HH:mm:ss z yyyy"
@@ -548,19 +491,21 @@
         ;; Try ISO-ish format: "2026-03-07..."
         (try
           (.toEpochMilli (java.time.Instant/parse s))
-          (catch Exception _ 0))))))
+          (catch Exception _ 0))))
+    0))
 
 (def sort-options
-  [["date (newest)"    (fn [r] (- (or (parse-date-ms (:date-raw r)) 0)))  compare]
-   ["date (oldest)"    (fn [r] (or (parse-date-ms (:date-raw r)) 0))      compare]
-   ["priority (high)"  (fn [r] (- (:priority r 0)))                        compare]
-   ["deadline (soon)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))    compare]
-   ["replies (most)"   (fn [r] (- (:replies r 0)))                         compare]
+  [["date (newest)"    (fn [r] (- (parse-date-ms (:date-raw r))))               compare]
+   ["date (oldest)"    (fn [r] (parse-date-ms (:date-raw r)))                   compare]
+   ["priority (high)"  (fn [r] (- (:priority r 0)))                              compare]
+   ["status (active)"  (fn [r] (- (:score (report-flags+score r))))              compare]
+   ["deadline (soon)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))          compare]
+   ["replies (most)"   (fn [r] (- (:replies r 0)))                               compare]
    ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
     compare]
-   ["type"             (fn [r] (:type r ""))                                compare]
-   ["author"           (fn [r] (str/lower-case (:from r "")))              compare]])
+   ["type"             (fn [r] (:type r ""))                                     compare]
+   ["author"           (fn [r] (str/lower-case (:from r "")))                    compare]])
 
 (defn- pick-sort!
   "Let user pick a sort order via fzf. Returns index or nil."
@@ -617,17 +562,39 @@
              "  Ctrl-u                     Update cache and reload"
              "  Ctrl-h                     Show this help"]))
 
+(defn- page-cmd-str
+  "Return a shell command string to page a file, given pager config."
+  [pager stdin? dsf? file-var]
+  (if stdin?
+    (if dsf?
+      (str "cat " file-var " | diff-so-fancy | less -RFX")
+      (str (str/join " " (map shell-escape pager)) " < " file-var))
+    (str (str/join " " (map shell-escape pager)) " " file-var)))
+
 (defn- write-dispatch-script!
   "Write a temp shell script that maps fzf line numbers to actions.
   The script takes two args: ACTION (open|patch|browse) and LINE_NUMBER.
-  Returns the path to the script."
-  [dispatch-path config visible meta]
+  Patches are fetched lazily on first view."
+  [dispatch-path config visible]
   (let [browse  (browse-cmd config)
         pager   (patch-pager config)
         stdin?  (stdin-diff-pagers (first pager))
         dsf?    (= "diff-so-fancy" (first pager))
         sb      (StringBuilder.)]
     (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
+    ;; Lazy fetch helper: bone_fetch URL CACHE_PATH
+    (.append sb (str/join "\n"
+                          ["bone_fetch() {"
+                           "  local url=\"$1\" dest=\"$2\""
+                           "  if [ ! -f \"$dest\" ]; then"
+                           "    mkdir -p \"$(dirname \"$dest\")\""
+                           "    case \"$url\" in"
+                           "      http://*|https://*) curl -sfLo \"$dest\" \"$url\" || wget -qO \"$dest\" \"$url\" ;;"
+                           "      *) cp \"$url\" \"$dest\" ;;"
+                           "    esac"
+                           "  fi"
+                           "}"
+                           ""]))
     (.append sb (str "if [ \"$ACTION\" = \"help\" ]; then\n"
                      "  cat <<'BONE_HELP' | less -RX\n"
                      usage-text "\n"
@@ -637,7 +604,7 @@
     (.append sb "case \"$ACTION:$N\" in\n")
     (doseq [[n report] (map-indexed vector visible)]
       (let [url  (:archived-at report)
-            ps   (patch-paths report meta)]
+            ps   (patch-paths report)]
         ;; open action (text browser / enter)
         (when url
           (.append sb (str "  open:" n ")\n"))
@@ -649,42 +616,27 @@
           (let [opener (platform-opener)]
             (.append sb (str "    " (str/join " " (map shell-escape (conj opener url))) "\n")))
           (.append sb "    ;;\n"))
-        ;; patch action
+        ;; patch action — lazy fetch + page
         (when (seq ps)
-          (let [cached-paths (mapv (fn [{:keys [url cache-path]}]
-                                     (fetch-to-cache! url cache-path))
-                                   ps)]
-            (.append sb (str "  patch:" n ")\n"))
-            (if (= 1 (count cached-paths))
-              ;; Single patch — page directly
-              (let [cached (first cached-paths)]
-                (if stdin?
-                  (if dsf?
-                    (.append sb (str "    cat " (shell-escape cached) " | diff-so-fancy | less -RFX\n"))
-                    (.append sb (str "    " (str/join " " (map shell-escape pager))
-                                     " < " (shell-escape cached) "\n")))
-                  (.append sb (str "    " (str/join " " (map shell-escape (conj pager cached))) "\n"))))
-              ;; Multiple patches — let user pick via fzf
-              (let [labels    (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) ps)
-                    fzf-input (str/join "\\n" labels)
-                    ;; Build a case statement mapping label → cached path
-                    inner-sb  (StringBuilder.)]
-                (.append inner-sb (str "    PATCH=$(printf " (shell-escape fzf-input)
-                                       " | fzf --prompt 'patch> ' --no-sort --reverse)\n"))
-                (.append inner-sb "    [ -z \"$PATCH\" ] && exit 0\n")
-                (.append inner-sb "    case \"$PATCH\" in\n")
-                (doseq [[label cached] (map vector labels cached-paths)]
-                  (.append inner-sb (str "      " (shell-escape label) ")\n"))
-                  (if stdin?
-                    (if dsf?
-                      (.append inner-sb (str "        cat " (shell-escape cached) " | diff-so-fancy | less -RFX\n"))
-                      (.append inner-sb (str "        " (str/join " " (map shell-escape pager))
-                                             " < " (shell-escape cached) "\n")))
-                    (.append inner-sb (str "        " (str/join " " (map shell-escape (conj pager cached))) "\n")))
-                  (.append inner-sb "        ;;\n"))
-                (.append inner-sb "    esac\n")
-                (.append sb (str inner-sb))))
-            (.append sb "    ;;\n")))))
+          (.append sb (str "  patch:" n ")\n"))
+          (if (= 1 (count ps))
+            (let [{purl :url cp :cache-path} (first ps)]
+              (.append sb (str "    bone_fetch " (shell-escape purl) " " (shell-escape cp) "\n"))
+              (.append sb (str "    " (page-cmd-str pager stdin? dsf? (shell-escape cp)) "\n")))
+            ;; Multiple patches — let user pick via fzf, then fetch + page
+            (let [labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) ps)]
+              (.append sb (str "    PATCH=$(printf "
+                               (shell-escape (str/join "\\n" labels))
+                               " | fzf --prompt 'patch> ' --no-sort --reverse)\n"))
+              (.append sb "    [ -z \"$PATCH\" ] && exit 0\n")
+              (.append sb "    case \"$PATCH\" in\n")
+              (doseq [[label {purl :url cp :cache-path}] (map vector labels ps)]
+                (.append sb (str "      " (shell-escape label) ")\n"))
+                (.append sb (str "        bone_fetch " (shell-escape purl) " " (shell-escape cp) "\n"))
+                (.append sb (str "        " (page-cmd-str pager stdin? dsf? (shell-escape cp)) "\n"))
+                (.append sb "        ;;\n"))
+              (.append sb "    esac\n")))
+          (.append sb "    ;;\n"))))
     (.append sb "esac\n")
     (spit dispatch-path (str sb))
     (.setExecutable (io/file dispatch-path) true)
@@ -694,62 +646,111 @@
 ;; Display
 ;; ---------------------------------------------------------------------------
 
+(def ^:private loop-keys
+  #{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u"})
+
+(defn- filter-visible
+  "Apply active type/source/topic filters to reports."
+  [reports {:keys [types sources topics]}
+   all-types all-sources all-topics]
+  (let [active-types   (or types (set all-types))
+        active-sources (or sources (set all-sources))
+        active-topics  (or topics (set all-topics))]
+    (->> reports
+         (filter #(contains? active-types (:type %)))
+         (filter #(or (empty? all-sources)
+                      (contains? active-sources (:source %))))
+         (filter #(or (empty? all-topics)
+                      (and (nil? topics) (nil? (:topic %)))
+                      (contains? active-topics (:topic %)))))))
+
+(defn- status-header
+  "Build the fzf --header string showing current sort and active filters."
+  [sort-idx {:keys [types sources topics]}
+   all-types all-sources all-topics]
+  (let [active-types   (or types (set all-types))
+        active-sources (or sources (set all-sources))
+        active-topics  (or topics (set all-topics))]
+    (str "[" (first (nth sort-options sort-idx)) "]"
+         (when-not (= active-types (set all-types))
+           (str " types:" (str/join "," (sort active-types))))
+         (when-not (or (empty? all-sources) (= active-sources (set all-sources)))
+           (str " src:" (str/join "," (sort active-sources))))
+         (when-not (or (empty? all-topics) (= active-topics (set all-topics)))
+           (str " topic:" (str/join "," (sort active-topics)))))))
+
+(defn- handle-fzf-key
+  "Handle an fzf --expect key. Returns updated state."
+  [key-used state all-types all-sources all-topics reload-fn]
+  (let [{:keys [reports sort-idx]} state]
+    (case key-used
+      "ctrl-s" (if-let [idx (pick-sort!)]
+                 (assoc state :reports (sort-reports reports idx) :sort-idx idx)
+                 state)
+      "ctrl-r" (if-let [new-types (pick-multi! "types> " all-types)]
+                 (assoc state :types new-types)
+                 state)
+      "ctrl-b" (if (empty? all-sources)
+                 (do (println "  No source information available.") state)
+                 (if-let [new-sources (pick-multi! "sources> " all-sources)]
+                   (assoc state :sources new-sources)
+                   state))
+      "ctrl-t" (if (empty? all-topics)
+                 (do (println "  No topic information available.") state)
+                 (if-let [new-topics (pick-multi! "topics> " all-topics)]
+                   (assoc state :topics new-topics)
+                   state))
+      "ctrl-x" (assoc state :types nil :sources nil :topics nil)
+      "ctrl-u" (if reload-fn
+                 (do (println "  Updating cache...")
+                     (when (fs/exists? patches-cache-dir)
+                       (fs/delete-tree patches-cache-dir))
+                     (update-sources-cache!)
+                     (let [{new-reports :reports} (reload-fn)]
+                       (assoc state
+                              :reports (sort-reports new-reports sort-idx)
+                              :types nil :sources nil :topics nil)))
+                 (do (println "  Cache update not available for this data source.")
+                     state))
+      ;; enter/ctrl-o/ctrl-v handled by execute, or esc
+      state)))
+
 (defn display-reports!
   "Display reports interactively with fzf, or as plain text lines.
   reload-fn, when non-nil, is called on ctrl-u to refresh the cache and
-  return a new {:reports ... :meta ...} map."
-  [config reports meta & {:keys [reload-fn]}]
+  return a new {:reports ...} map."
+  [config reports & {:keys [reload-fn]}]
   (let [show-type? true
-        show-src?   (multiple-sources? reports)
-        dispatch-path (str (System/getProperty "java.io.tmpdir") "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
+        show-src?  (multiple-sources? reports)
+        dispatch-path (str (System/getProperty "java.io.tmpdir")
+                           "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
     (if (empty? reports)
       (println "No reports found.")
       (if (fzf-available?)
         (try
-          (loop [{:keys [reports sort-idx types sources topics] :as state}
+          (loop [{:keys [reports sort-idx] :as state}
                  {:reports reports :sort-idx 0 :types nil :sources nil :topics nil}]
-            (let [all-types      (vec (distinct (map :type reports)))
-                  all-sources    (vec (distinct (keep :source reports)))
-                  all-topics     (vec (distinct (keep :topic reports)))
-                  active-types   (or types (set all-types))
-                  active-sources (or sources (set all-sources))
-                  active-topics  (or topics (set all-topics))
-                  visible  (->> reports
-                                (filter #(contains? active-types (:type %)))
-                                (filter #(or (empty? all-sources)
-                                             (contains? active-sources (:source %))))
-                                (filter #(or (empty? all-topics)
-                                             (and (nil? topics) (nil? (:topic %)))
-                                             (contains? active-topics (:topic %)))))
-                  header   (str/join "\t"
-                                     (concat
-                                      (when show-type? ["Type"])
-                                      (when show-src?   ["Source"])
-                                      ["P" "D" "Flags" "#" "From" "Date" "Subject"]))
-                  rows     (mapv #(report->row % show-type? show-src?) visible)
-                  aligned      (tabulate (cons header rows))
-                  input        (str/join "\n" aligned)
-                  sort-label   (first (nth sort-options sort-idx))
-                  type-label   (if (= active-types (set all-types))
-                                 ""
-                                 (str " types:" (str/join "," (sort active-types))))
-                  src-label    (if (or (empty? all-sources)
-                                       (= active-sources (set all-sources)))
-                                 ""
-                                 (str " src:" (str/join "," (sort active-sources))))
-                  topic-label  (if (or (empty? all-topics)
-                                       (= active-topics (set all-topics)))
-                                 ""
-                                 (str " topic:" (str/join "," (sort active-topics))))
-                  status-line  (str "[" sort-label "]" type-label src-label topic-label)
-                  _            (write-dispatch-script! dispatch-path config visible meta)
+            (let [all-types   (vec (distinct (map :type reports)))
+                  all-sources (vec (distinct (keep :source reports)))
+                  all-topics  (vec (distinct (keep :topic reports)))
+                  visible     (filter-visible reports state all-types all-sources all-topics)
+                  header      (str/join "\t"
+                                        (concat
+                                         (when show-type? ["Type"])
+                                         (when show-src?  ["Source"])
+                                         ["P" "D" "Flags" "#" "From" "Date" "Subject"]))
+                  rows        (mapv #(report->row % show-type? show-src?) visible)
+                  aligned     (tabulate (cons header rows))
+                  input       (str/join "\n" aligned)
+                  _           (write-dispatch-script! dispatch-path config visible)
                   {:keys [exit out]}
                   (process/shell {:in input :out :string :continue true}
                                  "fzf" "--header-lines" "1"
-                                 "--header" status-line
+                                 "--header" (status-header sort-idx state
+                                                           all-types all-sources all-topics)
                                  "--no-sort" "--reverse" "--no-hscroll"
                                  "--prompt" "report> "
-                                 "--expect" "ctrl-s,ctrl-r,ctrl-b,ctrl-t,ctrl-x,ctrl-u"
+                                 "--expect" (str/join "," loop-keys)
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
                                  "--bind" (str "ctrl-v:execute(" dispatch-path " patch {n})")
@@ -759,52 +760,10 @@
               (let [lines    (when (seq (str/trim out))
                                (str/split-lines (str/trim out)))
                     key-used (first lines)]
-                (when (or (zero? exit)
-                          (#{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u"} key-used))
-                  (recur
-                   (case key-used
-                     "ctrl-s"
-                     (if-let [idx (pick-sort!)]
-                       (assoc state :reports (sort-reports reports idx) :sort-idx idx)
-                       state)
-
-                     "ctrl-r"
-                     (if-let [new-types (pick-multi! "types> " all-types)]
-                       (assoc state :types new-types)
-                       state)
-
-                     "ctrl-b"
-                     (if (empty? all-sources)
-                       (do (println "  No source information available.") state)
-                       (if-let [new-sources (pick-multi! "sources> " all-sources)]
-                         (assoc state :sources new-sources)
-                         state))
-
-                     "ctrl-t"
-                     (if (empty? all-topics)
-                       (do (println "  No topic information available.") state)
-                       (if-let [new-topics (pick-multi! "topics> " all-topics)]
-                         (assoc state :topics new-topics)
-                         state))
-
-                     "ctrl-x"
-                     (assoc state :types nil :sources nil :topics nil)
-
-                     "ctrl-u"
-                     (if reload-fn
-                       (do (println "  Updating cache...")
-                           (when (fs/exists? patches-cache-dir)
-                             (fs/delete-tree patches-cache-dir))
-                           (update-sources-cache!)
-                           (let [{new-reports :reports} (reload-fn)]
-                             (assoc state
-                                    :reports (sort-reports new-reports sort-idx)
-                                    :types nil :sources nil :topics nil)))
-                       (do (println "  Cache update not available for this data source.")
-                           state))
-
-                     ;; enter/ctrl-o/ctrl-v handled by execute, or esc
-                     state))))))
+                (when (or (zero? exit) (loop-keys key-used))
+                  (recur (handle-fzf-key key-used state
+                                         all-types all-sources all-topics
+                                         reload-fn))))))
           (finally
             (.delete (io/file dispatch-path))))
         ;; Plain text fallback
@@ -817,6 +776,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- usage [] (println usage-text))
+
+(defn- next-arg
+  "Return the argument following the first occurrence of a flag in args."
+  [args flags]
+  (let [av  (vec args)
+        idx (first (keep-indexed #(when (flags %2) (inc %1)) av))]
+    (when idx (nth av idx nil))))
 
 (defn -main [& args]
   (let [args   (seq (or (seq args) *command-line-args*))
@@ -835,20 +801,14 @@
       (list-sources!)
 
       (some #{"-a" "--add-source"} args)
-      (let [av  (vec args)
-            idx (first (keep-indexed #(when (#{"-a" "--add-source"} %2) (inc %1)) av))
-            src (when idx (nth av idx nil))]
-        (if src
-          (add-source! src)
-          (println "Usage: bone -a URL_OR_PATH")))
+      (if-let [src (next-arg args #{"-a" "--add-source"})]
+        (add-source! src)
+        (println "Usage: bone -a URL_OR_PATH"))
 
       (some #{"-r" "--remove-source"} args)
-      (let [av  (vec args)
-            idx (first (keep-indexed #(when (#{"-r" "--remove-source"} %2) (inc %1)) av))
-            src (when idx (nth av idx nil))]
-        (if src
-          (remove-source! src)
-          (println "Usage: bone -r URL_OR_PATH")))
+      (if-let [src (next-arg args #{"-r" "--remove-source"})]
+        (remove-source! src)
+        (println "Usage: bone -r URL_OR_PATH"))
 
       :else
       (let [[opts _]
@@ -862,7 +822,7 @@
                 (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
                 (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
                 (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (parse-long (first more))) (rest more))
-                (#{"-s" "--min-status"} a)      (recur (assoc opts :min-status (parse-long (first more))) (rest more))
+                (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (parse-long (first more))) (rest more))
                 (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
                 (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
                 :else                           [opts remaining]))
@@ -870,24 +830,23 @@
             mine?        (:mine? opts)
             closed?      (:closed? opts)
             min-priority (:min-priority opts)
-            min-status   (:min-status opts)]
+            min-score    (:min-score opts)]
         (when (and mine? (not email))
           (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
         (when (and min-priority (not (#{1 2 3} min-priority)))
           (throw (ex-info (str "Invalid --min-priority: " min-priority " (must be 1, 2, or 3)") {})))
-        (when (and min-status (not (<= 1 min-status 7)))
-          (throw (ex-info (str "Invalid --min-status: " min-status " (must be 1–7)") {})))
-        (let [data-src (:data-src opts)
-              src-filter (:source-filter opts)
+        (when (and min-score (not (<= 0 min-score 7)))
+          (throw (ex-info (str "Invalid --min-score: " min-score " (must be 0–7)") {})))
+        (let [data-src    (:data-src opts)
+              src-filter  (:source-filter opts)
               apply-filters
-              (fn [{:keys [reports meta]}]
+              (fn [{:keys [reports]}]
                 {:reports (cond->> reports
                             src-filter              (filter #(= (:source %) src-filter))
                             (and mine? email)       (filter #(involves-email? % email))
                             min-priority            (filter #(>= (:priority % 0) min-priority))
-                            min-status              (filter #(>= (:status % 0) min-status))
-                            (not closed?)           (remove :closed))
-                 :meta meta})
+                            min-score               (filter #(>= (:score (report-flags+score %)) min-score))
+                            (not closed?)           (remove :closed))})
               raw-result
               (case data-src
                 :file      (load-from-file (:path opts))
@@ -896,18 +855,10 @@
                 :stdin     (load-from-stdin)
                 ;; No explicit source → read from sources.json
                 (load-from-sources))
-              ;; Inject base-dir for -f local files
-              raw-result
-              (if (and (= data-src :file) (nil? (:base-dir (:meta raw-result))))
-                (let [base (source-base-dir (:path opts))]
-                  (if base
-                    (assoc-in raw-result [:meta :base-dir] base)
-                    raw-result))
-                raw-result)
-              {:keys [reports meta]} (apply-filters raw-result)
+              {:keys [reports]} (apply-filters raw-result)
               reload-fn (when (nil? data-src)
                           #(apply-filters (load-from-sources)))]
-          (display-reports! config reports meta :reload-fn reload-fn))))))
+          (display-reports! config reports :reload-fn reload-fn))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
