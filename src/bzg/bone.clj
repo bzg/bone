@@ -102,7 +102,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def supported-format-version "0.2.1")
+(def supported-format-version "0.2.2")
 
 (defn- load-json-string [s]
   (json/parse-string s keyword))
@@ -272,7 +272,9 @@
   [report email]
   (let [e (str/lower-case email)]
     (some #(when % (= (str/lower-case %) e))
-          [(:from report) (:acked-by report) (:owned-by report) (:closed-by report)])))
+          [(:from report)
+           (:acked report) (:owned report) (:closed report)
+           (:acked-proxy report) (:owned-proxy report) (:closed-proxy report)])))
 
 
 ;; ---------------------------------------------------------------------------
@@ -332,6 +334,20 @@
   [s n]
   (if (> (count s) n) (subs s 0 n) s))
 
+(defn- report-flags
+  "Build a 3-char flag string from report fields.
+  A=acked O=owned, third char: C=canceled R=resolved E=expired -=open."
+  [report]
+  (let [flag-a (if (:acked report) "A" "-")
+        flag-o (if (:owned report) "O" "-")
+        flag-c (let [cr (:close-reason report)]
+                 (cond (= cr "canceled") "C"
+                       (= cr "resolved") "R"
+                       (= cr "expired")  "E"
+                       (:closed report)  "R"
+                       :else             "-"))]
+    (str flag-a flag-o flag-c)))
+
 (defn- report-columns
   "Return a vector of column values for a report."
   [report show-type? show-src?]
@@ -340,7 +356,7 @@
    (when show-src?  [(truncate (:source report "") 10)])
    [(str (:priority report 0))
     (deadline-col report)
-    (:flags report "---")
+    (report-flags report)
     (str (:replies report 0))
     (:from report "?")
     (date-only (:date report))
