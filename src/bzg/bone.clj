@@ -353,7 +353,7 @@
   (concat
    (when show-type? [(:type report "")])
    (when show-src?  [(truncate (:source report "") 10)])
-   [(str (:priority report 0))
+   [(case (:priority report 0) 3 "A" 2 "B" 1 "C" " ")
     (deadline-col report)
     (:flags (report-flags+score report))
     (str (:replies report 0))
