@@ -103,7 +103,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def supported-format-version "0.2.2")
+(def supported-bark-format "0.2.2")
 
 (defn- load-json-string [s]
   (json/parse-string s keyword))
@@ -143,12 +143,12 @@
   [data]
   (if (sequential? data)
     {:reports data}
-    (let [fv (:format-version data)]
-      (when (and fv (not= fv supported-format-version))
+    (let [fv (:bark-format data)]
+      (when (and fv (not= fv supported-bark-format))
         (binding [*out* *err*]
-          (println (str "Warning: format-version " fv
+          (println (str "Warning: bark-format " fv
                         " differs from supported version "
-                        supported-format-version))))
+                        supported-bark-format))))
       (let [reports   (or (:reports data) [])
             src-name  (:source data)
             bark-path (:bark-path data)]
