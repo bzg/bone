@@ -13,6 +13,7 @@
 ;;   bone.clj [options]
 ;;   bone.clj clear           Empty the cache
 ;;   bone.clj update          Fetch/update reports from all sources
+;;   bone.clj report          Print a triage summary for maintainers
 ;;
 ;; Options:
 ;;   -f, --file FILE          Read reports from a JSON file
@@ -100,7 +101,18 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def supported-bark-format "0.2.2")
+(def min-bark-format "0.2.4")
+
+(defn- version-< [a b]
+  (loop [as (str/split a #"\.")
+         bs (str/split b #"\.")]
+    (let [ai (parse-long (or (first as) "0"))
+          bi (parse-long (or (first bs) "0"))]
+      (cond
+        (< ai bi) true
+        (> ai bi) false
+        (and (empty? (rest as)) (empty? (rest bs))) false
+        :else (recur (rest as) (rest bs))))))
 
 (defn- load-json-string [s]
   (json/parse-string s keyword))
@@ -116,7 +128,7 @@
 (defn- source-base-dir
   "Compute the base directory from a source path/URL.
   For file paths, returns the parent directory.
-  For HTTP URLs, returns nil (use bark-path instead)."
+  For HTTP URLs, returns nil (use base-url instead)."
   [src]
   (when-not (url? src)
     (when-let [parent (.getParent (io/file (strip-file-scheme src)))]
@@ -134,25 +146,25 @@
 
 (defn- unwrap-envelope
   "Unwrap a reports.json envelope. Returns {:reports [...]}.
-  Injects :source and :bark-path from envelope into each report.
+  Injects :source and :base-url from envelope into each report.
   Handles: new per-source format {source, reports, list-id, ...}
   and legacy bare-array format."
   [data]
   (if (sequential? data)
     {:reports data}
     (let [fv (:bark-format data)]
-      (when (and fv (not= fv supported-bark-format))
+      (when (and fv (version-< fv min-bark-format))
         (binding [*out* *err*]
           (println (str "Warning: bark-format " fv
-                        " differs from supported version "
-                        supported-bark-format))))
+                        " is older than minimum supported version "
+                        min-bark-format))))
       (let [reports   (or (:reports data) [])
             src-name  (:source data)
-            bark-path (:bark-path data)]
+            base-url (:base-url data)]
         {:reports (mapv (fn [r]
                           (cond-> r
                             (and src-name (not (:source r))) (assoc :source src-name)
-                            bark-path                        (assoc :bark-path bark-path)))
+                            base-url                         (assoc :base-url base-url)))
                         reports)}))))
 
 (defn- inject-base-dir
@@ -436,11 +448,11 @@
 
 (defn- patch-paths
   "Return a vector of {:url ... :cache-path ...} for each patch in a report.
-  Resolves URLs from the report's :base-dir or :bark-path, cache paths from :source."
+  Resolves URLs from the report's :base-dir or :base-url, cache paths from :source."
   [report]
   (when-let [ps (seq (:patches report))]
     (let [base       (or (:base-dir report)
-                         (when-let [bp (:bark-path report)]
+                         (when-let [bp (:base-url report)]
                            (if (str/ends-with? bp "/") bp (str bp "/"))))
           src-name   (or (:source report) "default")]
       (mapv (fn [p]
@@ -769,6 +781,121 @@
               (println " " (report->line r show-type? show-src?))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Report (triage summary)
+;; ---------------------------------------------------------------------------
+
+(def ^:private default-report-config
+  {:sections    ["overview" "stale-patches" "stale-bugs" "active-threads" "recent" "owned"]
+   :stale-days  14
+   :recent-days 7
+   :top-n       10})
+
+(defn- report-age-days
+  "Days since report was posted. Returns nil on parse failure."
+  [report]
+  (let [ms (parse-date-ms (:date-raw report))]
+    (when (pos? ms)
+      (long (/ (- (System/currentTimeMillis) ms) 86400000)))))
+
+(defn- section-header [title]
+  (let [rule (apply str (repeat (max 0 (- 50 (count title) 3)) "─"))]
+    (str "── " title " " rule)))
+
+(defn- report-one-liner
+  "Format a report as a concise one-line string for report output."
+  [report & {:keys [prefix]}]
+  (str (when prefix (format "%s  " prefix))
+       (truncate (:subject report "(no subject)") 60)
+       "  " (:from-name report (:from report "?"))))
+
+(defn- section-overview [all-reports _rcfg]
+  (let [open    (remove :closed all-reports)
+        closed  (filter :closed all-reports)
+        by-type (frequencies (map :type open))
+        by-reason (frequencies (map #(:close-reason % "resolved") closed))
+        flags   (map #(:flags (report-flags+score %)) open)
+        acked   (count (filter #(= (first %) \A) flags))
+        owned   (count (filter #(= (second %) \O) flags))
+        neither (count (filter #(= % "---") flags))
+        open-parts   (str/join ", " (for [[t n] (sort-by val > by-type)] (str t ": " n)))
+        closed-parts (str/join ", " (for [[r n] (sort-by val > by-reason)] (str r ": " n)))]
+    (str (section-header "Overview") "\n"
+         "  Open: " (count open) " | " open-parts "\n"
+         "Closed: " (count closed) " | " closed-parts "\n"
+         "Status: not acked: " neither ", acked: " acked ", owned: " owned "\n")))
+
+(defn- section-stale [type-filter reports rcfg]
+  (let [days   (:stale-days rcfg 14)
+        top-n  (:top-n rcfg 10)
+        label  (str "Stale " type-filter " (>" days " days, not acked, up to " top-n ")")
+        stale  (->> reports
+                    (filter #(= (:type %) type-filter))
+                    (remove :acked)
+                    (filter #(when-let [d (report-age-days %)] (> d days)))
+                    (sort-by report-age-days >)
+                    (take top-n))]
+    (when (seq stale)
+      (str (section-header label) "\n"
+           (str/join "\n" (map #(report-one-liner % :prefix (format "%3dd" (report-age-days %))) stale))
+           "\n"))))
+
+(defn- section-active-threads [reports rcfg]
+  (let [top-n  (:top-n rcfg 10)
+        active (->> reports
+                    (filter #(> (:replies % 0) 0))
+                    (sort-by :replies >)
+                    (take top-n))]
+    (when (seq active)
+      (str (section-header (str "Active threads (most replies, up to " top-n ")")) "\n"
+           (str/join "\n" (map #(report-one-liner % :prefix (format "%3d replies" (:replies % 0))) active))
+           "\n"))))
+
+(defn- section-recent [reports rcfg]
+  (let [days     (:recent-days rcfg 7)
+        cutoff   (- (System/currentTimeMillis) (* days 86400000))
+        recent   (->> reports
+                      (filter #(> (parse-date-ms (:date-raw %)) cutoff))
+                      (sort-by #(parse-date-ms (:date-raw %)) >))]
+    (when (seq recent)
+      (str (section-header (str "Recent (last " days " days)")) "\n"
+           (str/join "\n" (map #(report-one-liner % :prefix (date-only (:date %))) recent))
+           "\n"))))
+
+(defn- section-owned [reports _rcfg email]
+  (when email
+    (let [e     (str/lower-case email)
+          owned (->> reports
+                     (remove :closed)
+                     (filter #(when-let [o (:owned %)]
+                                (= (str/lower-case o) e)))
+                     (sort-by #(parse-date-ms (:date-raw %)) >))]
+      (when (seq owned)
+        (str (section-header "Owned (your open reports)") "\n"
+             (str/join "\n" (map #(report-one-liner % :prefix (date-only (:date %))) owned))
+           "\n")))))
+
+(def ^:private report-section-fns
+  {"overview"       (fn [reports rcfg _email] (section-overview reports rcfg))
+   "stale-patches"  (fn [reports rcfg _email] (section-stale "patch" reports rcfg))
+   "stale-bugs"     (fn [reports rcfg _email] (section-stale "bug" reports rcfg))
+   "active-threads" (fn [reports rcfg _email] (section-active-threads reports rcfg))
+   "recent"         (fn [reports rcfg _email] (section-recent reports rcfg))
+   "owned"          (fn [reports rcfg email]  (section-owned reports rcfg email))})
+
+(defn- generate-report
+  "Produce a triage report from loaded reports."
+  [config reports]
+  (let [rcfg     (merge default-report-config (:report config))
+        email    (:email config)
+        sections (:sections rcfg)
+        open     (remove :closed reports)]
+    (println)
+    (doseq [s sections]
+      (when-let [f (report-section-fns s)]
+        (when-let [out (f (if (= s "overview") reports open) rcfg email)]
+          (println out))))))
+
+;; ---------------------------------------------------------------------------
 ;; CLI
 ;; ---------------------------------------------------------------------------
 
@@ -793,6 +920,41 @@
 
       (some #{"update"} args)
       (update-sources-cache!)
+
+      (some #{"report"} args)
+      (let [rargs  (remove #{"report"} args)
+            [opts _]
+            (loop [opts {} [a & more :as remaining] rargs]
+              (cond
+                (nil? a)                        [opts nil]
+                (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
+                (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
+                (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
+                (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
+                (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
+                (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
+                (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
+                :else                           [opts remaining]))
+            email      (or (:email opts) (:email config))
+            mine?      (:mine? opts)
+            closed?    (:closed? opts)
+            src-filter (:source-filter opts)
+            apply-filters
+            (fn [{:keys [reports]}]
+              {:reports (cond->> reports
+                          src-filter          (filter #(= (:source %) src-filter))
+                          (and mine? email)   (filter #(involves-email? % email)))})
+            _ (when (and mine? (not email))
+                (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
+            raw-result
+            (case (:data-src opts)
+              :file      (load-from-file (:path opts))
+              :url       (load-from-url (:url opts))
+              :urls-file (load-from-urls-file (:urls-path opts))
+              (load-from-sources))
+            {:keys [reports]} (apply-filters raw-result)
+            cfg (cond-> config email (assoc :email email))]
+        (generate-report cfg reports))
 
       (some #{"-l" "--list-sources"} args)
       (list-sources!)

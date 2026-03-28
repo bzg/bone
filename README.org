@@ -37,6 +37,7 @@ Create =~/.config/bone/config.edn=:
 * Usage
 
 : bone [options]
+: bone report [options]
 : bone clear
 : bone update
 
@@ -54,6 +55,29 @@ Create =~/.config/bone/config.edn=:
 | =-m=, =--mine=           | Show only reports involving your email           |
 | =-c=, =--closed=         | Include closed reports                           |
 | =-=                    | Read JSON from stdin                             |
+
+** Triage report
+
+=bone report= prints a text triage report to stdout.  It accepts the
+same filtering options as interactive mode (=-f=, =-u=, =-m=, =-c=, etc.).
+
+The report includes the following sections: overview, stale patches,
+stale bugs, active threads, recent reports, and owned reports.
+
+The report can be configured in =config.edn= under the =:report= key:
+
+#+begin_src clojure
+{:report {:sections    ["overview" "stale-patches" "stale-bugs"
+                        "active-threads" "recent" "owned"]
+          :stale-days  14   ;; threshold for "stale" (default: 14)
+          :recent-days 7    ;; threshold for "recent" (default: 7)
+          :top-n       10}} ;; max items per section (default: 10)
+#+end_src
+
+- =:sections= — list of sections to include in the report.
+- =:stale-days= — number of days after which a report is considered stale.
+- =:recent-days= — number of days to look back for recent reports.
+- =:top-n= — maximum number of items shown in stale and active-threads sections (=recent= and =owned= are not capped).
 
 ** Source management
 
