@@ -24,7 +24,7 @@
 ;;   -n, --source NAME        Filter by source name
 ;;   -m, --mine               Show only reports involving your email
 ;;   -c, --closed             Include closed reports
-;;   -a, --add-source PATH    Add a reports.json source
+;;   -a, --add-source PATH    Add a reports.json source (URL or path)
 ;;   -                        Read JSON from stdin
 ;;
 ;; By default, bone shows all open reports from configured sources.
@@ -45,9 +45,6 @@
 (def config-path
   (str (System/getProperty "user.home") "/.config/bone/config.edn"))
 
-(def sources-path
-  (str (System/getProperty "user.home") "/.config/bone/sources.json"))
-
 (def cache-dir
   (str (System/getProperty "user.home") "/.config/bone/cache"))
 
@@ -67,37 +64,37 @@
       {})))
 
 (defn- load-sources
-  "Load sources.json — a JSON array of URL or file path strings."
+  "Load :sources from config.edn — a vector of {:url ... :repo ...} maps."
   []
-  (let [f (io/file sources-path)]
-    (if (.exists f)
-      (json/parse-string (slurp f))
-      [])))
+  (vec (:sources (load-config))))
 
 (defn- save-sources! [sources]
-  (.mkdirs (.getParentFile (io/file sources-path)))
-  (spit sources-path (json/generate-string (vec (distinct sources)))))
+  (let [config  (load-config)
+        deduped (vec (vals (reduce (fn [m s] (assoc m (:url s) s)) {} sources)))
+        updated (assoc config :sources deduped)]
+    (.mkdirs (.getParentFile (io/file config-path)))
+    (spit config-path (pr-str updated))))
 
-(defn- add-source! [src]
+(defn- add-source! [url]
   (let [sources (load-sources)]
-    (if (some #{src} sources)
-      (println (str "Already registered: " src))
-      (do (save-sources! (conj sources src))
-          (println (str "Added: " src))))))
+    (if (some #(= (:url %) url) sources)
+      (println (str "Already registered: " url))
+      (do (save-sources! (conj sources {:url url}))
+          (println (str "Added: " url))))))
 
-(defn- remove-source! [src]
+(defn- remove-source! [url]
   (let [sources (load-sources)]
-    (if (some #{src} sources)
-      (do (save-sources! (remove #{src} sources))
-          (println (str "Removed: " src)))
-      (println (str "Not found: " src)))))
+    (if (some #(= (:url %) url) sources)
+      (do (save-sources! (remove #(= (:url %) url) sources))
+          (println (str "Removed: " url)))
+      (println (str "Not found: " url)))))
 
 (defn- list-sources! []
   (let [sources (load-sources)]
     (if (empty? sources)
       (println "No sources configured. Use --add-source URL_OR_PATH to add one.")
-      (doseq [s sources]
-        (println (str "  " s))))))
+      (doseq [{:keys [url repo]} sources]
+        (println (str "  " url (when repo (str "  (repo: " repo ")"))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Data loading
@@ -231,13 +228,13 @@
   (let [sources (load-sources)]
     (when (empty? sources)
       (throw (ex-info "No sources configured." {})))
-    (doseq [src sources]
+    (doseq [{:keys [url]} sources]
       (try
-        (cache-write! src (fetch-source-body src))
-        (println (str "  Updated: " src))
+        (cache-write! url (fetch-source-body url))
+        (println (str "  Updated: " url))
         (catch Exception e
           (binding [*out* *err*]
-            (println (str "  [warn] Failed to update " src ": " (.getMessage e)))))))))
+            (println (str "  [warn] Failed to update " url ": " (.getMessage e)))))))))
 
 (defn- load-from-sources
   "Load and merge reports from all configured sources."
@@ -249,12 +246,12 @@
                            "Or use:        bone -f FILE | -u URL | -")
                       {})))
     (merge-results
-     (keep (fn [src]
+     (keep (fn [{:keys [url]}]
              (try
-               (load-one-source-cached src)
+               (load-one-source-cached url)
                (catch Exception e
                  (binding [*out* *err*]
-                   (println (str "  [warn] Failed to load " src ": " (.getMessage e))))
+                   (println (str "  [warn] Failed to load " url ": " (.getMessage e))))
                  nil)))
            sources))))
 
@@ -853,7 +850,7 @@
                 :url       (load-from-url (:url opts))
                 :urls-file (load-from-urls-file (:urls-path opts))
                 :stdin     (load-from-stdin)
-                ;; No explicit source → read from sources.json
+                ;; No explicit source → read from config.edn :sources
                 (load-from-sources))
               {:keys [reports]} (apply-filters raw-result)
               reload-fn (when (nil? data-src)

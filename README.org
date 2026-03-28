@@ -21,12 +21,18 @@ Create =~/.config/bone/config.edn=:
 {:email        "you@example.com"
  :text-browser "w3m"          ;; "w3m", "lynx" or "links"
  :diff-pager   "delta"        ;; "delta", "bat" or "diff-so-fancy"
- }
+ :sources      [{:url  "https://example.com/reports.json"
+                 :repo "https://example.com/repo"}
+                {:url  "/path/to/reports.json"
+                 :repo "/path/to/repo"}]}
 #+end_src
 
 - =:email= — your email address, used by =-m= to filter reports involving you.
 - =:text-browser= — terminal browser for viewing reports on =RET=.  When unset, bone probes for =w3m=, =lynx=, =links=, then falls back to =xdg-open=.
 - =:diff-pager= — pager for viewing patches on =C-v=.  When unset, bone probes for =delta=, =bat=, then falls back to =$PAGER= or =less=.
+- =:sources= — vector of report sources.  Each source is a map with:
+  - =:url= — URL or local path to the BARK =reports.json=.
+  - =:repo= — (optional) public URL or local path of the associated code repository.
 
 * Usage
 
@@ -57,7 +63,7 @@ Create =~/.config/bone/config.edn=:
 | =-r=, =--remove-source URL_OR_PATH= | Remove a source           |
 | =-l=, =--list-sources=              | List configured sources   |
 
-Sources are stored in =~/.config/bone/sources.json=.
+Sources are stored in =~/.config/bone/config.edn= under the =:sources= key.
 
 ** Cache management
 
@@ -118,8 +124,7 @@ Update cached reports and browse only yours:
 
 | Path                          | Purpose                   |
 |-------------------------------+---------------------------|
-| =~/.config/bone/config.edn=     | User configuration        |
-| =~/.config/bone/sources.json=   | Registered report sources |
+| =~/.config/bone/config.edn=     | User configuration and sources |
 | =~/.config/bone/cache/patches/= | Cached patches            |
 | =~/.config/bone/cache/reports/= | Cached reports.json files |
 
