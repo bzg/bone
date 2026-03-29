@@ -101,7 +101,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def min-bark-format "0.2.4")
+(def min-bark-format "0.3.0")
 
 (defn- version-< [a b]
   (loop [as (str/split a #"\.")
@@ -326,6 +326,17 @@
       (.between java.time.temporal.ChronoUnit/DAYS
                 (java.time.LocalDate/now)
                 (java.time.LocalDate/parse dl))
+      (catch Exception _ nil))))
+
+(defn- expiry-days
+  "Days from now to the report's :expiry (yyyy-mm-dd).
+  Negative = past expiry. Returns nil when no expiry."
+  [report]
+  (when-let [ex (:expiry report)]
+    (try
+      (.between java.time.temporal.ChronoUnit/DAYS
+                (java.time.LocalDate/now)
+                (java.time.LocalDate/parse ex))
       (catch Exception _ nil))))
 
 (defn- deadline-col
@@ -785,7 +796,7 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private default-report-config
-  {:sections    ["overview" "stale-patches" "stale-bugs" "active-threads" "recent" "owned"]
+  {:sections    ["overview" "stale-patches" "stale-bugs" "active-threads" "expiring" "recent" "owned"]
    :stale-days  14
    :recent-days 7
    :top-n       10})
@@ -861,6 +872,22 @@
            (str/join "\n" (map #(report-one-liner % :prefix (date-only (:date %))) recent))
            "\n"))))
 
+(defn- section-expiring [reports rcfg]
+  (let [days  (:expiry-days rcfg 7)
+        top-n (:top-n rcfg 10)
+        label (str "Expiring soon (within " days " days, up to " top-n ")")
+        expiring (->> reports
+                      (keep (fn [r]
+                              (when-let [d (expiry-days r)]
+                                (when (<= 0 d days)
+                                  (assoc r ::exp-days d)))))
+                      (sort-by ::exp-days)
+                      (take top-n))]
+    (when (seq expiring)
+      (str (section-header label) "\n"
+           (str/join "\n" (map #(report-one-liner % :prefix (format "%3dd left" (::exp-days %))) expiring))
+           "\n"))))
+
 (defn- section-owned [reports _rcfg email]
   (when email
     (let [e     (str/lower-case email)
@@ -879,6 +906,7 @@
    "stale-patches"  (fn [reports rcfg _email] (section-stale "patch" reports rcfg))
    "stale-bugs"     (fn [reports rcfg _email] (section-stale "bug" reports rcfg))
    "active-threads" (fn [reports rcfg _email] (section-active-threads reports rcfg))
+   "expiring"       (fn [reports rcfg _email] (section-expiring reports rcfg))
    "recent"         (fn [reports rcfg _email] (section-recent reports rcfg))
    "owned"          (fn [reports rcfg email]  (section-owned reports rcfg email))})
 
