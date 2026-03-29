@@ -203,8 +203,10 @@
 (defn- source->cache-file
   "Deterministic cache filename for a source URL/path."
   [src]
-  (let [safe (str/replace src #"[^a-zA-Z0-9._-]" "_")]
-    (str reports-cache-dir "/" (subs safe 0 (min 200 (count safe))) ".json")))
+  (let [h (format "%08x" (hash src))
+        safe (str/replace src #"[^a-zA-Z0-9._-]" "_")
+        prefix (subs safe 0 (min 80 (count safe)))]
+    (str reports-cache-dir "/" prefix "-" h ".json")))
 
 (defn- cache-read
   "Read cached reports.json for a source. Returns nil if not cached."
@@ -536,8 +538,9 @@
         (process/shell {:in input :out :string :continue true}
                        "fzf" "--prompt" "sort by> " "--no-sort" "--reverse")]
     (when (zero? exit)
-      (let [selected (str/trim out)]
-        (.indexOf ^java.util.List labels selected)))))
+      (let [selected (str/trim out)
+            idx (.indexOf ^java.util.List labels selected)]
+        (when (>= idx 0) idx)))))
 
 (defn- sort-reports [reports sort-idx]
   (let [[_ key-fn cmp] (nth sort-options sort-idx)]
@@ -799,6 +802,7 @@
   {:sections    ["overview" "stale-patches" "stale-bugs" "active-threads" "expiring" "recent" "owned"]
    :stale-days  14
    :recent-days 7
+   :expiry-days 7
    :top-n       10})
 
 (defn- report-age-days
@@ -936,6 +940,67 @@
         idx (first (keep-indexed #(when (flags %2) (inc %1)) av))]
     (when idx (nth av idx nil))))
 
+(defn- parse-opts
+  "Parse CLI options from an argument sequence. Returns [opts remaining-args]."
+  [args]
+  (loop [opts {} [a & more :as remaining] args]
+    (cond
+      (nil? a)                        [opts nil]
+      (= a "-")                       [(assoc opts :data-src :stdin) nil]
+      (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
+      (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
+      (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
+      (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
+      (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
+      (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (parse-long (first more))) (rest more))
+      (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (parse-long (first more))) (rest more))
+      (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
+      (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
+      :else                           [opts remaining])))
+
+(defn- validate-opts!
+  "Validate parsed options. Throws on missing flag arguments or invalid values."
+  [opts]
+  (when (and (= (:data-src opts) :file) (nil? (:path opts)))
+    (throw (ex-info "Missing argument for --file" {})))
+  (when (and (= (:data-src opts) :url) (nil? (:url opts)))
+    (throw (ex-info "Missing argument for --url" {})))
+  (when (and (= (:data-src opts) :urls-file) (nil? (:urls-path opts)))
+    (throw (ex-info "Missing argument for --urls-file" {})))
+  (when (and (contains? opts :email) (nil? (:email opts)))
+    (throw (ex-info "Missing argument for --email" {})))
+  (when (and (contains? opts :source-filter) (nil? (:source-filter opts)))
+    (throw (ex-info "Missing argument for --source" {})))
+  (when (and (contains? opts :min-priority) (nil? (:min-priority opts)))
+    (throw (ex-info "Missing or invalid argument for --min-priority" {})))
+  (when (and (:min-priority opts) (not (#{1 2 3} (:min-priority opts))))
+    (throw (ex-info (str "Invalid --min-priority: " (:min-priority opts) " (must be 1, 2, or 3)") {})))
+  (when (and (contains? opts :min-score) (nil? (:min-score opts)))
+    (throw (ex-info "Missing or invalid argument for --min-score" {})))
+  (when (and (:min-score opts) (not (<= 0 (:min-score opts) 7)))
+    (throw (ex-info (str "Invalid --min-score: " (:min-score opts) " (must be 0–7)") {})))
+  opts)
+
+(defn- load-data
+  "Load reports from the source specified in opts."
+  [opts]
+  (case (:data-src opts)
+    :file      (load-from-file (:path opts))
+    :url       (load-from-url (:url opts))
+    :urls-file (load-from-urls-file (:urls-path opts))
+    :stdin     (load-from-stdin)
+    (load-from-sources)))
+
+(defn- filter-reports
+  "Apply CLI filters to a reports vector."
+  [reports {:keys [source-filter mine? email min-priority min-score closed?]}]
+  (cond->> reports
+    source-filter        (filter #(= (:source %) source-filter))
+    (and mine? email)    (filter #(involves-email? % email))
+    min-priority         (filter #(>= (:priority % 0) min-priority))
+    min-score            (filter #(>= (:score (report-flags+score %)) min-score))
+    (not closed?)        (remove :closed)))
+
 (defn -main [& args]
   (let [args   (seq (or (seq args) *command-line-args*))
         config (load-config)]
@@ -950,38 +1015,14 @@
       (update-sources-cache!)
 
       (some #{"report"} args)
-      (let [rargs  (remove #{"report"} args)
-            [opts _]
-            (loop [opts {} [a & more :as remaining] rargs]
-              (cond
-                (nil? a)                        [opts nil]
-                (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
-                (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
-                (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
-                (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
-                (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
-                (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
-                (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
-                :else                           [opts remaining]))
-            email      (or (:email opts) (:email config))
-            mine?      (:mine? opts)
-            closed?    (:closed? opts)
-            src-filter (:source-filter opts)
-            apply-filters
-            (fn [{:keys [reports]}]
-              {:reports (cond->> reports
-                          src-filter          (filter #(= (:source %) src-filter))
-                          (and mine? email)   (filter #(involves-email? % email)))})
-            _ (when (and mine? (not email))
-                (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
-            raw-result
-            (case (:data-src opts)
-              :file      (load-from-file (:path opts))
-              :url       (load-from-url (:url opts))
-              :urls-file (load-from-urls-file (:urls-path opts))
-              (load-from-sources))
-            {:keys [reports]} (apply-filters raw-result)
-            cfg (cond-> config email (assoc :email email))]
+      (let [[opts _] (parse-opts (remove #{"report"} args))
+            opts     (validate-opts! opts)
+            email    (or (:email opts) (:email config))
+            opts     (assoc opts :email email)
+            _        (when (and (:mine? opts) (not email))
+                       (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
+            reports  (filter-reports (:reports (load-data opts)) opts)
+            cfg      (cond-> config email (assoc :email email))]
         (generate-report cfg reports))
 
       (some #{"-l" "--list-sources"} args)
@@ -998,54 +1039,16 @@
         (println "Usage: bone -r URL_OR_PATH"))
 
       :else
-      (let [[opts _]
-            (loop [opts {} [a & more :as remaining] args]
-              (cond
-                (nil? a)                        [opts nil]
-                (= a "-")                       [(assoc opts :data-src :stdin) nil]
-                (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
-                (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
-                (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
-                (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
-                (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
-                (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (parse-long (first more))) (rest more))
-                (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (parse-long (first more))) (rest more))
-                (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
-                (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
-                :else                           [opts remaining]))
-            email        (or (:email opts) (:email config))
-            mine?        (:mine? opts)
-            closed?      (:closed? opts)
-            min-priority (:min-priority opts)
-            min-score    (:min-score opts)]
-        (when (and mine? (not email))
-          (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
-        (when (and min-priority (not (#{1 2 3} min-priority)))
-          (throw (ex-info (str "Invalid --min-priority: " min-priority " (must be 1, 2, or 3)") {})))
-        (when (and min-score (not (<= 0 min-score 7)))
-          (throw (ex-info (str "Invalid --min-score: " min-score " (must be 0–7)") {})))
-        (let [data-src    (:data-src opts)
-              src-filter  (:source-filter opts)
-              apply-filters
-              (fn [{:keys [reports]}]
-                {:reports (cond->> reports
-                            src-filter              (filter #(= (:source %) src-filter))
-                            (and mine? email)       (filter #(involves-email? % email))
-                            min-priority            (filter #(>= (:priority % 0) min-priority))
-                            min-score               (filter #(>= (:score (report-flags+score %)) min-score))
-                            (not closed?)           (remove :closed))})
-              raw-result
-              (case data-src
-                :file      (load-from-file (:path opts))
-                :url       (load-from-url (:url opts))
-                :urls-file (load-from-urls-file (:urls-path opts))
-                :stdin     (load-from-stdin)
-                ;; No explicit source → read from config.edn :sources
-                (load-from-sources))
-              {:keys [reports]} (apply-filters raw-result)
-              reload-fn (when (nil? data-src)
-                          #(apply-filters (load-from-sources)))]
-          (display-reports! config reports :reload-fn reload-fn))))))
+      (let [[opts _] (parse-opts args)
+            opts     (validate-opts! opts)
+            email    (or (:email opts) (:email config))
+            opts     (assoc opts :email email)
+            _        (when (and (:mine? opts) (not email))
+                       (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
+            reports  (filter-reports (:reports (load-data opts)) opts)
+            reload-fn (when (nil? (:data-src opts))
+                        #(filter-reports (:reports (load-from-sources)) opts))]
+        (display-reports! config reports :reload-fn reload-fn)))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
