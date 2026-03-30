@@ -152,6 +152,13 @@ Update cached reports and browse only yours:
 | =~/.config/bone/cache/patches/= | Cached patches            |
 | =~/.config/bone/cache/reports/= | Cached reports.json files |
 
+* Contributing
+
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[BUG\] bone: <SHORT EXPLICIT BUG DESCRIPTION>][bug report]]
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[PATCH\] bone: <COMMIT SUMMARY>][patch]] (please use =git format-patch=)
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[FR\] bone: <FEATURE REQUEST>][feature request]]
+- Share any [[mailto:~bzg/barkyard@lists.sr.ht?subject=bone: <ANYTHING>][other question or idea]]
+
 * Support the Clojure(script) ecosystem
 
 If you like Clojure(script), please consider supporting maintainers by
