@@ -154,10 +154,10 @@ Update cached reports and browse only yours:
 
 * Contributing
 
-- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[BUG\] bone: <SHORT EXPLICIT BUG DESCRIPTION>][bug report]]
-- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[PATCH\] bone: <COMMIT SUMMARY>][patch]] (please use =git format-patch=)
-- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[FR\] bone: <FEATURE REQUEST>][feature request]]
-- Share any [[mailto:~bzg/barkyard@lists.sr.ht?subject=bone: <ANYTHING>][other question or idea]]
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][bug report]] with =[BUG] bone: <SHORT EXPLICIT BUG DESCRIPTION>=
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][patch]] with =[PATCH] bone: <COMMIT SUMMARY>=
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht][feature request]] with =[FR] bone: <FEATURE REQUEST>=
+- Share any [[mailto:~bzg/barkyard@lists.sr.ht][other question or idea]]
 
 You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[https://liberapay.com/bzg/][liberapay]].
 
