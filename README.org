@@ -159,6 +159,8 @@ Update cached reports and browse only yours:
 - Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[FR\] bone: <FEATURE REQUEST>][feature request]]
 - Share any [[mailto:~bzg/barkyard@lists.sr.ht?subject=bone: <ANYTHING>][other question or idea]]
 
+You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[https://liberapay.com/bzg/][liberapay]].
+
 * Support the Clojure(script) ecosystem
 
 If you like Clojure(script), please consider supporting maintainers by
