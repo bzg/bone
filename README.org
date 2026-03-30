@@ -1,4 +1,4 @@
-#+title: 🦴 BONE — BARK's Own Nifty Explorer
+#+title: BONE — BARK's Own Nifty Explorer
 #+author: Bastien Guerry
 
 *bone* (what you get when you stop barking) is a standalone [[https://github.com/babashka/babashka][Babashka]]
@@ -151,6 +151,11 @@ Update cached reports and browse only yours:
 | =~/.config/bone/config.edn=     | User configuration and sources |
 | =~/.config/bone/cache/patches/= | Cached patches            |
 | =~/.config/bone/cache/reports/= | Cached reports.json files |
+
+* Support the Clojure(script) ecosystem
+
+If you like Clojure(script), please consider supporting maintainers by
+donating to [[https://clojuriststogether.org][clojuriststogether.org]].
 
 * License
 
