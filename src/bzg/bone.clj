@@ -77,7 +77,7 @@
 
 (defn- save-sources! [sources]
   (let [config  (load-config)
-        deduped (vec (vals (reduce (fn [m s] (assoc m (:url s) s)) {} sources)))
+        deduped (->> sources (reduce (fn [m s] (assoc m (:url s) s)) {}) vals vec)
         updated (assoc config :sources deduped)]
     (.mkdirs (.getParentFile (io/file config-path)))
     (spit config-path (pr-str updated))))
@@ -193,15 +193,14 @@
   "Inject :base-dir into each report from a source path."
   [result src]
   (if-let [base (source-base-dir src)]
-    (update result :reports (partial mapv #(assoc % :base-dir base)))
+    (update result :reports (fn [rs] (mapv #(assoc % :base-dir base) rs)))
     result))
 
 (defn- inject-base-url
   "Inject :base-url into each report from a source URL, when not already set."
   [result src]
   (if-let [base (source-base-url src)]
-    (update result :reports
-            (partial mapv #(if (:base-url %) % (assoc % :base-url base))))
+    (update result :reports (fn [rs] (mapv #(if (:base-url %) % (assoc % :base-url base)) rs)))
     result))
 
 (defn- load-from-file [path]
@@ -260,11 +259,13 @@
 (defn- load-one-source-cached
   "Load reports from cache if available, otherwise fetch and cache."
   [src]
-  (if-let [cached (cache-read src)]
-    (-> (unwrap-envelope cached) (inject-base-dir src) (inject-base-url src))
-    (let [body (fetch-source-body src)]
-      (cache-write! src body)
-      (-> (unwrap-envelope (load-json-string body)) (inject-base-dir src) (inject-base-url src)))))
+  (let [data (or (cache-read src)
+                 (let [body (fetch-source-body src)]
+                   (cache-write! src body)
+                   (load-json-string body)))]
+    (-> (unwrap-envelope data)
+        (inject-base-dir src)
+        (inject-base-url src))))
 
 (defn- update-sources-cache!
   "Fetch all configured sources and update cache."
@@ -349,32 +350,21 @@
     (str "[" v "] ")
     ""))
 
-(defn- deadline-days
-  "Days from now to the report's :deadline (yyyy-mm-dd).
-  Negative = past deadline. Returns nil when no deadline."
-  [report]
-  (when-let [dl (:deadline report)]
+(defn- days-until
+  "Days from now to the report's date field (yyyy-mm-dd).
+  Negative = past. Returns nil when field is absent."
+  [report field]
+  (when-let [d (get report field)]
     (try
       (.between java.time.temporal.ChronoUnit/DAYS
                 (java.time.LocalDate/now)
-                (java.time.LocalDate/parse dl))
-      (catch Exception _ nil))))
-
-(defn- expiry-days
-  "Days from now to the report's :expiry (yyyy-mm-dd).
-  Negative = past expiry. Returns nil when no expiry."
-  [report]
-  (when-let [ex (:expiry report)]
-    (try
-      (.between java.time.temporal.ChronoUnit/DAYS
-                (java.time.LocalDate/now)
-                (java.time.LocalDate/parse ex))
+                (java.time.LocalDate/parse d))
       (catch Exception _ nil))))
 
 (defn- deadline-col
   "Format the deadline column: days as string, or empty."
   [report]
-  (if-let [d (deadline-days report)] (str d) ""))
+  (if-let [d (days-until report :deadline)] (str d) ""))
 
 (defn- display-type
   "Map a BARK report type to its short display form."
@@ -397,11 +387,11 @@
         cr (:close-reason report)]
     {:flags (str (if a? "A" "-")
                  (if o? "O" "-")
-                 (cond (= cr "canceled") "C"
-                       (= cr "resolved") "R"
-                       (= cr "expired")  "E"
-                       c?                "R"
-                       :else             "-"))
+                 (case cr
+                   "canceled" "C"
+                   "resolved" "R"
+                   "expired"  "E"
+                   (if c? "R" "-")))
      :score (+ (if a? 1 0) (if o? 2 0) (if c? 0 4))}))
 
 (def ^:private column-aliases
@@ -442,21 +432,22 @@
   (str/join "\t" (report-columns report show-type? show-src? skip)))
 
 (defn- extra-str [report]
-  (let [parts (remove nil?
-                      [(:source report)
-                       (:version report)
-                       (:topic report)
-                       (:patch-seq report)
-                       (when-let [sources (seq (:patch-source report))]
-                         (str "src:" (str/join "," sources)))
-                       (when-let [ps (seq (:patches report))]
-                         (str "📎" (count ps)))
-                       (when-let [s (:series report)]
-                         (str "series:" (:received s) "/" (:expected s)
-                              (when (:closed s) " closed")))
-                       (when-let [related (seq (:related report))]
-                         (str "→" (str/join "," (distinct (map (comp display-type :type) related)))))])]
-    (when (seq parts) (str/join " " parts))))
+  (->> [(:source report)
+        (:version report)
+        (:topic report)
+        (:patch-seq report)
+        (when-let [sources (seq (:patch-source report))]
+          (str "src:" (str/join "," sources)))
+        (when-let [ps (seq (:patches report))]
+          (str "📎" (count ps)))
+        (when-let [s (:series report)]
+          (str "series:" (:received s) "/" (:expected s)
+               (when (:closed s) " closed")))
+        (when-let [related (seq (:related report))]
+          (str "→" (str/join "," (distinct (map (comp display-type :type) related)))))]
+       (keep identity)
+       seq
+       (str/join " ")))
 
 (defn- report->line
   "Format a report as a plain text line."
@@ -490,9 +481,9 @@
     (catch Exception _ false)))
 
 (def ^:private text-browser-cmds
-  {"w3m"   ["w3m" "-o" "confirm_qq=false"]
-   "lynx"  ["lynx"]
-   "links" ["links"]})
+  [["w3m"   ["w3m" "-o" "confirm_qq=false"]]
+   ["lynx"  ["lynx"]]
+   ["links" ["links"]]])
 
 (defn- platform-opener []
   (let [os (str/lower-case (System/getProperty "os.name"))]
@@ -507,28 +498,10 @@
   falls back to platform opener."
   [config]
   (or (when-let [b (:text-browser config)]
-        (text-browser-cmds b))
+        (some (fn [[cmd v]] (when (= cmd b) v)) text-browser-cmds))
       (some (fn [[cmd v]] (when (command-available? cmd) v))
             text-browser-cmds)
       (platform-opener)))
-
-(defn- patch-paths
-  "Return a vector of {:url ... :cache-path ...} for each patch in a report.
-  Resolves URLs from the report's :base-dir or :base-url, cache paths from :source."
-  [report]
-  (when-let [ps (seq (:patches report))]
-    (let [base       (or (:base-dir report)
-                         (when-let [bp (:base-url report)]
-                           (if (str/ends-with? bp "/") bp (str bp "/"))))
-          src-name   (or (:source report) "default")]
-      (mapv (fn [p]
-              (let [file (:file p)
-                    ;; Strip leading "../" segments so cache stays flat under patches-cache-dir
-                    cache-file (str/replace-first file #"^(\.\./?)+" "")]
-                {:url        (if base (str base "patches/" file) file)
-                 :cache-path (str patches-cache-dir "/" src-name "/" cache-file)
-                 :filename   (:patch/filename p (:file p))}))
-            ps))))
 
 (defn- attachment-paths
   "Return a vector of {:url ... :cache-path ...} for attachments of a given kind.
@@ -546,13 +519,22 @@
                  :cache-path (str cache-dir "/" src-name "/" cache-file)}))
             atts))))
 
+(defn- patch-paths
+  "Return a vector of {:url ... :cache-path ... :filename ...} for each patch in a report.
+  Delegates to attachment-paths, then adds :filename from patch metadata."
+  [report]
+  (when-let [paths (attachment-paths report :patches "patches" patches-cache-dir)]
+    (mapv (fn [path patch]
+            (assoc path :filename (:patch/filename patch (:file patch))))
+          paths (:patches report))))
+
 (defn- event-paths [report] (attachment-paths report :events "events" events-cache-dir))
 (defn- text-paths  [report] (attachment-paths report :texts  "text"  texts-cache-dir))
 
 (def ^:private diff-pager-cmds
-  {"delta"          ["delta" "--paging" "always"]
-   "bat"            ["bat" "--style=plain" "--language=diff" "--paging=always"]
-   "diff-so-fancy"  ["diff-so-fancy"]})
+  [["delta"          ["delta" "--paging" "always"]]
+   ["bat"            ["bat" "--style=plain" "--language=diff" "--paging=always"]]
+   ["diff-so-fancy"  ["diff-so-fancy"]]])
 
 (def ^:private stdin-diff-pagers
   "Pagers that read from stdin rather than a file argument."
@@ -563,9 +545,9 @@
   Honors :diff-pager from config, then probes delta/bat, falls back to $PAGER/less."
   [config]
   (or (when-let [p (:diff-pager config)]
-        (diff-pager-cmds p))
-      (some (fn [[cmd v]] (when (command-available? cmd) v))
-            (dissoc diff-pager-cmds "diff-so-fancy"))
+        (some (fn [[cmd v]] (when (= cmd p) v)) diff-pager-cmds))
+      (some (fn [[cmd v]] (when (and (not= cmd "diff-so-fancy") (command-available? cmd)) v))
+            diff-pager-cmds)
       [(or (System/getenv "PAGER") "less")]))
 
 ;; ---------------------------------------------------------------------------
@@ -575,30 +557,28 @@
 (defn- parse-date-ms
   "Parse a date-raw string to epoch millis for sorting. Returns 0 on failure."
   [s]
-  (if (and s (not (str/blank? s)))
-    (try
-      ;; Java Date.toString() format: "Sat Mar 07 04:10:11 CET 2026"
-      (let [fmt (java.text.SimpleDateFormat. "EEE MMM dd HH:mm:ss z yyyy"
-                                             java.util.Locale/ENGLISH)]
-        (.getTime (.parse fmt s)))
-      (catch Exception _
-        ;; Try ISO-ish format: "2026-03-07..."
-        (try
-          (.toEpochMilli (java.time.Instant/parse s))
-          (catch Exception _
-            ;; Try date-only format: "2026-03-07"
-            (try
-              (.toEpochMilli (.toInstant (.atStartOfDay (java.time.LocalDate/parse s) (java.time.ZoneOffset/UTC))))
-              (catch Exception _ 0))))))
-    0))
+  (if (or (nil? s) (str/blank? s))
+    0
+    (or (try (.getTime (.parse (java.text.SimpleDateFormat.
+                                "EEE MMM dd HH:mm:ss z yyyy"
+                                java.util.Locale/ENGLISH) s))
+             (catch Exception _ nil))
+        (try (.toEpochMilli (java.time.Instant/parse s))
+             (catch Exception _ nil))
+        (try (-> (java.time.LocalDate/parse s)
+                 (.atStartOfDay java.time.ZoneOffset/UTC)
+                 .toInstant
+                 .toEpochMilli)
+             (catch Exception _ nil))
+        0)))
 
 (def sort-options
   [["date (newest)"    (fn [r] (- (parse-date-ms (:date-raw r))))               compare]
    ["date (oldest)"    (fn [r] (parse-date-ms (:date-raw r)))                   compare]
    ["priority (high)"  (fn [r] (- (:priority r 0)))                              compare]
    ["status (active)"  (fn [r] (- (:score (report-flags+score r))))              compare]
-   ["deadline (closest)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))          compare]
-   ["deadline (farthest)" (fn [r] (- (or (deadline-days r) Integer/MIN_VALUE)))       compare]
+   ["deadline (closest)"  (fn [r] (or (days-until r :deadline) Integer/MAX_VALUE))          compare]
+   ["deadline (farthest)" (fn [r] (- (or (days-until r :deadline) Integer/MIN_VALUE)))       compare]
    ["replies (most)"   (fn [r] (- (:replies r 0)))                               compare]
    ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
@@ -801,6 +781,23 @@
          (when-not (or (empty? all-topics) (= active-topics (set all-topics)))
            (str " topic:" (str/join "," (sort active-topics)))))))
 
+(defn- column-headers
+  "Return tab-joined header string for report columns."
+  [show-type? show-src? skip]
+  (str/join "\t"
+            (concat
+             (when (and show-type? (not (skip "type")))   ["Type"])
+             (when (and show-src?  (not (skip "source"))) ["Source"])
+             (when-not (skip "priority") ["P"])
+             (when-not (skip "deadline") ["D"])
+             (when-not (skip "flags")    ["Flags"])
+             (when-not (skip "replies")  ["#"])
+             (when-not (skip "author")   ["Author"])
+             (when-not (skip "owner")    ["Owner"])
+             (when-not (skip "date")     ["Date"])
+             (when-not (skip "att")      ["Att"])
+             ["Subject"])))
+
 (defn- show-related!
   "Show related reports for the selected report in a nested fzf.
   Resolves related message-ids against the mid-index to display full report rows.
@@ -811,19 +808,7 @@
       (when (seq resolved)
         (let [resolved (vec resolved)
           skip   (normalize-skip-columns skip)
-          header (str/join "\t"
-                           (concat
-                            (when (and show-type? (not (skip "type")))   ["Type"])
-                            (when (and show-src?  (not (skip "source"))) ["Source"])
-                            (when-not (skip "priority") ["P"])
-                            (when-not (skip "deadline") ["D"])
-                            (when-not (skip "flags")    ["Flags"])
-                            (when-not (skip "replies")  ["#"])
-                            (when-not (skip "author")   ["Author"])
-                            (when-not (skip "owner")    ["Owner"])
-                            (when-not (skip "date")     ["Date"])
-                            (when-not (skip "att")      ["Att"])
-                            ["Subject"]))
+          header (column-headers show-type? show-src? skip)
           rows     (mapv #(report->row % show-type? show-src? skip) resolved)
           aligned  (tabulate (cons header rows))
           input    (str/join "\n" aligned)
@@ -844,6 +829,7 @@
                        "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
                        "--bind" "ctrl-x:abort"
                        "--bind" "esc:abort")
+        true
         (finally
           (.delete (io/file dispatch-path)))))))))
 
@@ -914,19 +900,7 @@
                     all-sources (vec (distinct (keep :source reports)))
                     all-topics  (vec (distinct (keep :topic reports)))
                     visible     (filter-visible reports state all-types all-sources all-topics)
-                    header      (str/join "\t"
-                                          (concat
-                                           (when (and show-type? (not (skip-columns "type")))   ["Type"])
-                                           (when (and show-src?  (not (skip-columns "source"))) ["Source"])
-                                           (when-not (skip-columns "priority") ["P"])
-                                           (when-not (skip-columns "deadline") ["D"])
-                                           (when-not (skip-columns "flags")    ["Flags"])
-                                           (when-not (skip-columns "replies")  ["#"])
-                                           (when-not (skip-columns "author")   ["Author"])
-                                           (when-not (skip-columns "owner")    ["Owner"])
-                                           (when-not (skip-columns "date")     ["Date"])
-                                           (when-not (skip-columns "att")      ["Att"])
-                                           ["Subject"]))
+                    header      (column-headers show-type? show-src? skip-columns)
                     rows        (mapv #(report->row % show-type? show-src? skip-columns) visible)
                     aligned     (tabulate (cons header rows))
                     input       (str/join "\n" aligned)
@@ -1061,7 +1035,7 @@
         label (str "Expiring soon (within " days " days, up to " top-n ")")
         expiring (->> reports
                       (keep (fn [r]
-                              (when-let [d (expiry-days r)]
+                              (when-let [d (days-until r :expiry)]
                                 (when (<= 0 d days)
                                   (assoc r ::exp-days d)))))
                       (sort-by ::exp-days)
@@ -1181,6 +1155,17 @@
     min-score            (filter #(>= (:score (report-flags+score %)) min-score))
     (not closed?)        (remove :closed)))
 
+(defn- prepare-opts
+  "Parse, validate, and enrich CLI options with email from config."
+  [args config]
+  (let [[opts _] (parse-opts args)
+        opts     (validate-opts! opts)
+        email    (or (:email opts) (:email config))
+        opts     (assoc opts :email email)]
+    (when (and (:mine? opts) (not email))
+      (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
+    opts))
+
 (defn -main [& args]
   (let [args   (seq (or (seq args) *command-line-args*))
         config (load-config)]
@@ -1195,14 +1180,9 @@
       (update-sources-cache!)
 
       (some #{"report"} args)
-      (let [[opts _] (parse-opts (remove #{"report"} args))
-            opts     (validate-opts! opts)
-            email    (or (:email opts) (:email config))
-            opts     (assoc opts :email email)
-            _        (when (and (:mine? opts) (not email))
-                       (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
-            reports  (filter-reports (:reports (load-data opts)) opts)
-            cfg      (cond-> config email (assoc :email email))]
+      (let [opts    (prepare-opts (remove #{"report"} args) config)
+            reports (filter-reports (:reports (load-data opts)) opts)
+            cfg     (cond-> config (:email opts) (assoc :email (:email opts)))]
         (generate-report cfg reports))
 
       (some #{"-l" "--list-sources"} args)
@@ -1219,13 +1199,8 @@
         (println "Usage: bone -r URL_OR_PATH"))
 
       :else
-      (let [[opts _] (parse-opts args)
-            opts     (validate-opts! opts)
-            email    (or (:email opts) (:email config))
-            opts     (assoc opts :email email)
-            _        (when (and (:mine? opts) (not email))
-                       (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
-            reports  (filter-reports (:reports (load-data opts)) opts)
+      (let [opts      (prepare-opts args config)
+            reports   (filter-reports (:reports (load-data opts)) opts)
             reload-fn (when (nil? (:data-src opts))
                         #(filter-reports (:reports (load-from-sources)) opts))]
         (display-reports! config reports
