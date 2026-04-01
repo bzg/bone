@@ -795,13 +795,9 @@
   Supports the same keybindings as the main fzf view."
   [selected-report mid-index config show-type? show-src? show-owner?]
   (when-let [rels (seq (:related selected-report))]
-    (let [resolved (mapv (fn [rel]
-                           (or (get mid-index (:message-id rel))
-                               {:type    (:type rel "")
-                                :subject (str (:message-id rel ""))
-                                :from    "?"
-                                :date    ""}))
-                         rels)
+    (let [resolved (keep #(get mid-index (:message-id %)) rels)]
+      (when (seq resolved)
+        (let [resolved (vec resolved)
           header   (str/join "\t"
                              (concat
                               (when show-type? ["Type"])
@@ -830,7 +826,8 @@
                        "--bind" "ctrl-x:abort"
                        "--bind" "esc:abort")
         (finally
-          (.delete (io/file dispatch-path)))))))
+          (.delete (io/file dispatch-path)))))))))
+
 
 (defn- handle-fzf-key
   "Handle an fzf --expect key. Returns updated state."
@@ -857,8 +854,9 @@
                    state))
       "ctrl-x" (assoc state :types nil :sources nil :topics nil)
       "ctrl-/" (do (if (and selected-report (seq (:related selected-report)))
-                     (show-related! selected-report mid-index config
-                                    show-type? show-src? show-owner?)
+                     (or (show-related! selected-report mid-index config
+                                        show-type? show-src? show-owner?)
+                         (println "  No related reports in loaded data."))
                      (println "  No related reports."))
                    (cond-> state sel-idx (assoc :cursor-pos sel-idx)))
       "ctrl-u" (if reload-fn
