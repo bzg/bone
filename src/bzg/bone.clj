@@ -140,6 +140,22 @@
     (when-let [parent (.getParent (io/file (strip-file-scheme src)))]
       (str parent "/"))))
 
+(defn- source-base-url
+  "Derive a base URL from an HTTP source URL.  BARK serves the JSON from a
+  `reports/` subdirectory while attachments (patches/, events/, texts/) are
+  siblings of `reports/`.  So we strip the filename, then strip `reports/`
+  when present.
+  E.g. \"https://example.org/tracker/reports/all.json\" => \"https://example.org/tracker/\"
+       \"https://example.org/data.json\"                => \"https://example.org/\"
+  Returns nil for non-HTTP sources."
+  [src]
+  (when (url? src)
+    (when-let [i (str/last-index-of src "/")]
+      (let [dir (subs src 0 (inc i))]
+        (if (str/ends-with? dir "/reports/")
+          (subs dir 0 (- (count dir) (count "reports/")))
+          dir)))))
+
 (defn- fetch-source-body
   "Fetch raw JSON body string from a source (URL or file path)."
   [src]
@@ -180,13 +196,21 @@
     (update result :reports (partial mapv #(assoc % :base-dir base)))
     result))
 
+(defn- inject-base-url
+  "Inject :base-url into each report from a source URL, when not already set."
+  [result src]
+  (if-let [base (source-base-url src)]
+    (update result :reports
+            (partial mapv #(if (:base-url %) % (assoc % :base-url base))))
+    result))
+
 (defn- load-from-file [path]
   (when-not (.exists (io/file path))
     (throw (ex-info (str "File not found: " path) {:path path})))
   (inject-base-dir (unwrap-envelope (load-json-string (slurp path))) path))
 
 (defn- load-from-url [url]
-  (unwrap-envelope (load-json-string (fetch-source-body url))))
+  (inject-base-url (unwrap-envelope (load-json-string (fetch-source-body url))) url))
 
 (defn- load-from-stdin []
   (unwrap-envelope (load-json-string (slurp *in*))))
@@ -237,10 +261,10 @@
   "Load reports from cache if available, otherwise fetch and cache."
   [src]
   (if-let [cached (cache-read src)]
-    (inject-base-dir (unwrap-envelope cached) src)
+    (-> (unwrap-envelope cached) (inject-base-dir src) (inject-base-url src))
     (let [body (fetch-source-body src)]
       (cache-write! src body)
-      (inject-base-dir (unwrap-envelope (load-json-string body)) src))))
+      (-> (unwrap-envelope (load-json-string body)) (inject-base-dir src) (inject-base-url src)))))
 
 (defn- update-sources-cache!
   "Fetch all configured sources and update cache."
@@ -511,7 +535,7 @@
             atts))))
 
 (defn- event-paths [report] (attachment-paths report :events "events" events-cache-dir))
-(defn- text-paths  [report] (attachment-paths report :texts  "texts"  texts-cache-dir))
+(defn- text-paths  [report] (attachment-paths report :texts  "text"  texts-cache-dir))
 
 (def ^:private diff-pager-cmds
   {"delta"          ["delta" "--paging" "always"]
