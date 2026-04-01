@@ -52,6 +52,12 @@
 (def patches-cache-dir
   (str cache-dir "/patches"))
 
+(def events-cache-dir
+  (str cache-dir "/events"))
+
+(def texts-cache-dir
+  (str cache-dir "/texts"))
+
 (def reports-cache-dir
   (str cache-dir "/reports"))
 
@@ -101,7 +107,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def min-bark-format "0.3.0")
+(def min-bark-format "0.6.0")
 
 (defn- version-< [a b]
   (loop [as (str/split a #"\.")
@@ -346,6 +352,11 @@
   [report]
   (if-let [d (deadline-days report)] (str d) ""))
 
+(defn- display-type
+  "Map a BARK report type to its short display form."
+  [t]
+  (case t "announcement" "announce" t))
+
 (defn- truncate
   "Truncate string s to at most n characters."
   [s n]
@@ -371,22 +382,28 @@
 
 (defn- report-columns
   "Return a vector of column values for a report."
-  [report show-type? show-src?]
+  [report show-type? show-src? show-owner?]
   (concat
-   (when show-type? [(:type report "")])
+   (when show-type? [(display-type (:type report ""))])
    (when show-src?  [(truncate (:source report "") 10)])
    [(case (:priority report 0) 3 "A" 2 "B" 1 "C" " ")
     (deadline-col report)
     (:flags (report-flags+score report))
     (str (:replies report 0))
-    (:from report "?")
-    (date-only (:date report))
+    (truncate (:from report "?") 15)]
+   (when show-owner? [(truncate (:owned report "") 15)])
+   [(date-only (:date report))
+    (str (when (seq (:patches report)) "+")
+         (when (seq (:events report))  "@")
+         (when (seq (:texts report))   "#")
+         (when (:awaiting report)      "?")
+         (when (seq (:related report)) "~"))
     (str (vote-cookie report) (:subject report "(no subject)"))]))
 
 (defn- report->row
   "Format a report as a tab-separated row for fzf display."
-  [report show-type? show-src?]
-  (str/join "\t" (report-columns report show-type? show-src?)))
+  [report show-type? show-src? show-owner?]
+  (str/join "\t" (report-columns report show-type? show-src? show-owner?)))
 
 (defn- extra-str [report]
   (let [parts (remove nil?
@@ -402,13 +419,13 @@
                          (str "series:" (:received s) "/" (:expected s)
                               (when (:closed s) " closed")))
                        (when-let [related (seq (:related report))]
-                         (str "→" (str/join "," (distinct (map :type related)))))])]
+                         (str "→" (str/join "," (distinct (map (comp display-type :type) related)))))])]
     (when (seq parts) (str/join " " parts))))
 
 (defn- report->line
   "Format a report as a plain text line."
-  [report show-type? show-src?]
-  (let [line (str/join "  " (report-columns report show-type? show-src?))]
+  [report show-type? show-src? show-owner?]
+  (let [line (str/join "  " (report-columns report show-type? show-src? show-owner?))]
     (if-let [e (extra-str report)]
       (str line " " e)
       line)))
@@ -477,6 +494,25 @@
                  :filename   (:patch/filename p (:file p))}))
             ps))))
 
+(defn- attachment-paths
+  "Return a vector of {:url ... :cache-path ...} for attachments of a given kind.
+  `kind` is the report key (:events or :texts), `subdir` the URL/cache subdirectory."
+  [report kind subdir cache-dir]
+  (when-let [atts (seq (get report kind))]
+    (let [base       (or (:base-dir report)
+                         (when-let [bp (:base-url report)]
+                           (if (str/ends-with? bp "/") bp (str bp "/"))))
+          src-name   (or (:source report) "default")]
+      (mapv (fn [a]
+              (let [file       (:file a)
+                    cache-file (str/replace-first file #"^(\.\./?)+" "")]
+                {:url        (if base (str base subdir "/" file) file)
+                 :cache-path (str cache-dir "/" src-name "/" cache-file)}))
+            atts))))
+
+(defn- event-paths [report] (attachment-paths report :events "events" events-cache-dir))
+(defn- text-paths  [report] (attachment-paths report :texts  "texts"  texts-cache-dir))
+
 (def ^:private diff-pager-cmds
   {"delta"          ["delta" "--paging" "always"]
    "bat"            ["bat" "--style=plain" "--language=diff" "--paging=always"]
@@ -513,7 +549,11 @@
         ;; Try ISO-ish format: "2026-03-07..."
         (try
           (.toEpochMilli (java.time.Instant/parse s))
-          (catch Exception _ 0))))
+          (catch Exception _
+            ;; Try date-only format: "2026-03-07"
+            (try
+              (.toEpochMilli (.toInstant (.atStartOfDay (java.time.LocalDate/parse s) (java.time.ZoneOffset/UTC))))
+              (catch Exception _ 0))))))
     0))
 
 (def sort-options
@@ -521,13 +561,17 @@
    ["date (oldest)"    (fn [r] (parse-date-ms (:date-raw r)))                   compare]
    ["priority (high)"  (fn [r] (- (:priority r 0)))                              compare]
    ["status (active)"  (fn [r] (- (:score (report-flags+score r))))              compare]
-   ["deadline (soon)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))          compare]
+   ["deadline (closest)"  (fn [r] (or (deadline-days r) Integer/MAX_VALUE))          compare]
+   ["deadline (farthest)" (fn [r] (- (or (deadline-days r) Integer/MIN_VALUE)))       compare]
    ["replies (most)"   (fn [r] (- (:replies r 0)))                               compare]
    ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
                                  (if (pos? total) (- (/ (double sum) total)) 0.0)))
     compare]
-   ["type"             (fn [r] (:type r ""))                                     compare]
-   ["author"           (fn [r] (str/lower-case (:from r "")))                    compare]])
+   ["activity (recent)" (fn [r] (- (parse-date-ms (:last-activity r))))           compare]
+   ["activity (oldest)" (fn [r] (parse-date-ms (:last-activity r)))               compare]
+   ["awaiting (recent)" (fn [r] (if (:awaiting r) (- (parse-date-ms (:date-raw r))) Long/MAX_VALUE)) compare]
+   ["awaiting (oldest)" (fn [r] (if (:awaiting r) (parse-date-ms (:date-raw r)) Long/MAX_VALUE))     compare]
+   ["type"             (fn [r] (display-type (:type r "")))                       compare]])
 
 (defn- pick-sort!
   "Let user pick a sort order via fzf. Returns index or nil."
@@ -576,7 +620,8 @@
              "  Ctrl-p                     Move to the previous line"
              "  Enter                      View report in terminal browser"
              "  Ctrl-o                     Open report in system browser"
-             "  Ctrl-v                     View patch (fetched to cache)"
+             "  Ctrl-v                     View attachment (patch, ics, txt)"
+             "  Ctrl-/                     Show related reports"
              "  Ctrl-s                     Change sort order"
              "  Ctrl-b                     Filter by source"
              "  Ctrl-r                     Filter by report type"
@@ -596,13 +641,14 @@
 
 (defn- write-dispatch-script!
   "Write a temp shell script that maps fzf line numbers to actions.
-  The script takes two args: ACTION (open|patch|browse) and LINE_NUMBER.
-  Patches are fetched lazily on first view."
+  The script takes two args: ACTION (open|view|browse) and LINE_NUMBER.
+  Attachments are fetched lazily on first view."
   [dispatch-path config visible]
   (let [browse  (browse-cmd config)
         pager   (patch-pager config)
         stdin?  (stdin-diff-pagers (first pager))
         dsf?    (= "diff-so-fancy" (first pager))
+        plain-pager (or (System/getenv "PAGER") "less")
         sb      (StringBuilder.)]
     (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
     ;; Lazy fetch helper: bone_fetch URL CACHE_PATH
@@ -627,7 +673,9 @@
     (.append sb "case \"$ACTION:$N\" in\n")
     (doseq [[n report] (map-indexed vector visible)]
       (let [url  (:archived-at report)
-            ps   (patch-paths report)]
+            ps   (patch-paths report)
+            es   (event-paths report)
+            ts   (text-paths report)]
         ;; open action (text browser / enter)
         (when url
           (.append sb (str "  open:" n ")\n"))
@@ -639,26 +687,60 @@
           (let [opener (platform-opener)]
             (.append sb (str "    " (str/join " " (map shell-escape (conj opener url))) "\n")))
           (.append sb "    ;;\n"))
-        ;; patch action — lazy fetch + page
-        (when (seq ps)
-          (.append sb (str "  patch:" n ")\n"))
-          (if (= 1 (count ps))
-            (let [{purl :url cp :cache-path} (first ps)]
-              (.append sb (str "    bone_fetch " (shell-escape purl) " " (shell-escape cp) "\n"))
-              (.append sb (str "    " (page-cmd-str pager stdin? dsf? (shell-escape cp)) "\n")))
-            ;; Multiple patches — let user pick via fzf, then fetch + page
-            (let [labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) ps)]
-              (.append sb (str "    PATCH=$(printf "
-                               (shell-escape (str/join "\\n" labels))
-                               " | fzf --prompt 'patch> ' --no-sort --reverse)\n"))
-              (.append sb "    [ -z \"$PATCH\" ] && exit 0\n")
-              (.append sb "    case \"$PATCH\" in\n")
-              (doseq [[label {purl :url cp :cache-path}] (map vector labels ps)]
-                (.append sb (str "      " (shell-escape label) ")\n"))
-                (.append sb (str "        bone_fetch " (shell-escape purl) " " (shell-escape cp) "\n"))
-                (.append sb (str "        " (page-cmd-str pager stdin? dsf? (shell-escape cp)) "\n"))
-                (.append sb "        ;;\n"))
-              (.append sb "    esac\n")))
+        ;; view action — view any attachment (patch, ics, txt)
+        (let [groups (cond-> []
+                       (seq ps) (conj {:label "patch" :items ps :diff? true})
+                       (seq es) (conj {:label "event" :items es :diff? false})
+                       (seq ts) (conj {:label "text"  :items ts :diff? false}))]
+          (when (seq groups)
+            (.append sb (str "  view:" n ")\n"))
+            (let [emit-fetch-and-page
+                  (fn [{:keys [url cache-path]} diff?]
+                    (str "    bone_fetch " (shell-escape url) " " (shell-escape cache-path) "\n"
+                         "    " (if diff?
+                                 (page-cmd-str pager stdin? dsf? (shell-escape cache-path))
+                                 (str (shell-escape plain-pager) " " (shell-escape cache-path)))
+                         "\n"))
+                  emit-pick-from
+                  (fn [{:keys [label items diff?]}]
+                    (let [file-labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) items)]
+                      (if (= 1 (count items))
+                        (emit-fetch-and-page (first items) diff?)
+                        (str "    FILE=$(printf "
+                             (shell-escape (str/join "\\n" file-labels))
+                             " | fzf --prompt " (shell-escape (str label "> ")) " --no-sort --reverse)\n"
+                             "    [ -z \"$FILE\" ] && exit 0\n"
+                             "    case \"$FILE\" in\n"
+                             (str/join
+                              (for [[fl item] (map vector file-labels items)]
+                                (str "      " (shell-escape fl) ")\n"
+                                     "    " (emit-fetch-and-page item diff?)
+                                     "        ;;\n")))
+                             "    esac\n"))))]
+              (if (= 1 (count groups))
+                (.append sb (emit-pick-from (first groups)))
+                ;; Multiple attachment types — let user pick the kind first
+                (do (.append sb (str "    KIND=$(printf "
+                                     (shell-escape (str/join "\\n" (map :label groups)))
+                                     " | fzf --prompt 'view> ' --no-sort --reverse)\n"))
+                    (.append sb "    [ -z \"$KIND\" ] && exit 0\n")
+                    (.append sb "    case \"$KIND\" in\n")
+                    (doseq [{:keys [label] :as group} groups]
+                      (.append sb (str "      " (shell-escape label) ")\n"))
+                      (.append sb (emit-pick-from group))
+                      (.append sb "        ;;\n"))
+                    (.append sb "    esac\n"))))
+            (.append sb "    ;;\n")))
+        ;; related action — show related reports
+        (when-let [rels (seq (:related report))]
+          (.append sb (str "  related:" n ")\n"))
+          (let [lines (map (fn [r]
+                             (str (display-type (:type r ""))
+                                  "  " (:message-id r "")
+                                  (when-let [a (:archived-at r)] (str "  " a))))
+                           rels)
+                text  (str/join "\\n" (map #(str/replace % "'" "'\\''") lines))]
+            (.append sb (str "    printf '" text "\\n' | " plain-pager "\n")))
           (.append sb "    ;;\n"))))
     (.append sb "esac\n")
     (spit dispatch-path (str sb))
@@ -680,7 +762,7 @@
         active-sources (or sources (set all-sources))
         active-topics  (or topics (set all-topics))]
     (->> reports
-         (filter #(contains? active-types (:type %)))
+         (filter #(contains? active-types (display-type (:type %))))
          (filter #(or (empty? all-sources)
                       (contains? active-sources (:source %))))
          (filter #(or (empty? all-topics)
@@ -726,8 +808,8 @@
       "ctrl-x" (assoc state :types nil :sources nil :topics nil)
       "ctrl-u" (if reload-fn
                  (do (println "  Updating cache...")
-                     (when (fs/exists? patches-cache-dir)
-                       (fs/delete-tree patches-cache-dir))
+                     (doseq [d [patches-cache-dir events-cache-dir texts-cache-dir]]
+                       (when (fs/exists? d) (fs/delete-tree d)))
                      (update-sources-cache!)
                      (let [{new-reports :reports} (reload-fn)]
                        (assoc state
@@ -742,9 +824,10 @@
   "Display reports interactively with fzf, or as plain text lines.
   reload-fn, when non-nil, is called on ctrl-u to refresh the cache and
   return a new {:reports ...} map."
-  [config reports & {:keys [reload-fn]}]
-  (let [show-type? true
-        show-src?  (multiple-sources? reports)
+  [config reports & {:keys [reload-fn show-owner?]}]
+  (let [show-type?  true
+        show-src?   (multiple-sources? reports)
+        show-owner? (or show-owner? (:show-owner config))
         dispatch-path (str (System/getProperty "java.io.tmpdir")
                            "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
     (if (empty? reports)
@@ -753,7 +836,7 @@
         (try
           (loop [{:keys [reports sort-idx] :as state}
                  {:reports reports :sort-idx 0 :types nil :sources nil :topics nil}]
-            (let [all-types   (vec (distinct (map :type reports)))
+            (let [all-types   (vec (distinct (map (comp display-type :type) reports)))
                   all-sources (vec (distinct (keep :source reports)))
                   all-topics  (vec (distinct (keep :topic reports)))
                   visible     (filter-visible reports state all-types all-sources all-topics)
@@ -761,8 +844,10 @@
                                         (concat
                                          (when show-type? ["Type"])
                                          (when show-src?  ["Source"])
-                                         ["P" "D" "Flags" "#" "From" "Date" "Subject"]))
-                  rows        (mapv #(report->row % show-type? show-src?) visible)
+                                         ["P" "D" "Flags" "#" "Author"]
+                                         (when show-owner? ["Owner"])
+                                         ["Date" "Att" "Subject"]))
+                  rows        (mapv #(report->row % show-type? show-src? show-owner?) visible)
                   aligned     (tabulate (cons header rows))
                   input       (str/join "\n" aligned)
                   _           (write-dispatch-script! dispatch-path config visible)
@@ -776,7 +861,8 @@
                                  "--expect" (str/join "," loop-keys)
                                  "--bind" (str "enter:execute(" dispatch-path " open {n})")
                                  "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                                 "--bind" (str "ctrl-v:execute(" dispatch-path " patch {n})")
+                                 "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
+                                 "--bind" (str "ctrl-/:execute(" dispatch-path " related {n})")
                                  "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
                                  "--bind" "ctrl-n:down"
                                  "--bind" "ctrl-p:up")]
@@ -792,7 +878,7 @@
         ;; Plain text fallback
         (do (println (count reports) "report(s):\n")
             (doseq [r reports]
-              (println " " (report->line r show-type? show-src?))))))))
+              (println " " (report->line r show-type? show-src? show-owner?))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Report (triage summary)
@@ -832,7 +918,7 @@
         acked   (count (filter #(= (first %) \A) flags))
         owned   (count (filter #(= (second %) \O) flags))
         neither (count (filter #(= % "---") flags))
-        open-parts   (str/join ", " (for [[t n] (sort-by val > by-type)] (str t ": " n)))
+        open-parts   (str/join ", " (for [[t n] (sort-by val > by-type)] (str (display-type t) ": " n)))
         closed-parts (str/join ", " (for [[r n] (sort-by val > by-reason)] (str r ": " n)))]
     (str (section-header "Overview") "\n"
          "  Open: " (count open) " | " open-parts "\n"
@@ -956,6 +1042,7 @@
       (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (parse-long (first more))) (rest more))
       (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
       (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
+      (#{"-o" "--show-owner"} a)      (recur (assoc opts :show-owner? true) more)
       :else                           [opts remaining])))
 
 (defn- validate-opts!
@@ -1048,7 +1135,9 @@
             reports  (filter-reports (:reports (load-data opts)) opts)
             reload-fn (when (nil? (:data-src opts))
                         #(filter-reports (:reports (load-from-sources)) opts))]
-        (display-reports! config reports :reload-fn reload-fn)))))
+        (display-reports! config reports
+                         :reload-fn reload-fn
+                         :show-owner? (:show-owner? opts))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
