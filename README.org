@@ -1,5 +1,7 @@
-#+title: BONE — BARK's Own Nifty Explorer
+#+title: bone — BARK's Own Nifty Explorer
 #+author: Bastien Guerry
+
+[[https://img.shields.io/badge/versioning-intver.org-blue.svg?style=for-the-badge]]
 
 *bone* (what you get when you stop barking) is a standalone [[https://github.com/babashka/babashka][Babashka]]
 script for browsing [[https://codeberg.org/bzg/bark][BARK]] reports. When [[https://github.com/junegunn/fzf][fzf]] is available, bone lets you
@@ -28,11 +30,15 @@ Create =~/.config/bone/config.edn=:
 #+end_src
 
 - =:email= — your email address, used by =-m= to filter reports involving you.
-- =:text-browser= — terminal browser for viewing reports on =RET=.  When unset, bone probes for =w3m=, =lynx=, =links=, then falls back to =xdg-open=.
-- =:diff-pager= — pager for viewing patches on =C-v=.  When unset, bone probes for =delta=, =bat=, then falls back to =$PAGER= or =less=.
-- =:sources= — vector of report sources.  Each source is a map with:
+- =:text-browser= — terminal browser for viewing reports on =RET=. When
+  unset, bone probes for =w3m=, =lynx=, =links=, then falls back to
+  =xdg-open=.
+- =:diff-pager= — pager for viewing patches on =C-v=. When unset, bone
+  probes for =delta=, =bat=, then falls back to =$PAGER= or =less=.
+- =:sources= — vector of report sources. Each source is a map with:
   - =:url= — URL or local path to the BARK =reports.json=.
-  - =:repo= — (optional) public URL or local path of the associated code repository.
+  - =:repo= — (optional) public URL or local path of the associated code
+    repository.
 
 * Usage
 
@@ -160,6 +166,14 @@ Update cached reports and browse only yours:
 - Share any [[mailto:~bzg/barkyard@lists.sr.ht][other question or idea]]
 
 You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[https://liberapay.com/bzg/][liberapay]].
+
+* Intentional Versioning
+
+This project uses [[https://intver.org][Intentional Versioning]], here are the three audiences:
+
+- =x= : end users who browse BARK reports with bone
+- =y= : external packagers
+- =z= : contributors to the codebase
 
 * Support the Clojure(script) ecosystem
 
