@@ -404,30 +404,42 @@
                        :else             "-"))
      :score (+ (if a? 1 0) (if o? 2 0) (if c? 0 4))}))
 
+(def ^:private column-aliases
+  "Short aliases for column names."
+  {"p" "priority", "d" "deadline", "#" "replies"})
+
+(defn- normalize-column [col]
+  (get column-aliases col col))
+
+(defn- normalize-skip-columns [skip]
+  (set (map normalize-column (or skip #{}))))
+
 (defn- report-columns
-  "Return a vector of column values for a report."
-  [report show-type? show-src? show-owner?]
-  (concat
-   (when show-type? [(display-type (:type report ""))])
-   (when show-src?  [(truncate (:source report "") 10)])
-   [(case (:priority report 0) 3 "A" 2 "B" 1 "C" " ")
-    (deadline-col report)
-    (:flags (report-flags+score report))
-    (str (:replies report 0))
-    (truncate (:from report "?") 15)]
-   (when show-owner? [(truncate (:owned report "") 15)])
-   [(date-only (:date report))
-    (str (when (seq (:patches report)) "+")
-         (when (seq (:events report))  "@")
-         (when (seq (:texts report))   "#")
-         (when (:awaiting report)      "?")
-         (when (seq (:related report)) "~"))
-    (str (vote-cookie report) (:subject report "(no subject)"))]))
+  "Return a vector of column values for a report.
+  skip is a set of column names to hide (e.g. #{\"owner\" \"att\"})."
+  [report show-type? show-src? skip]
+  (let [skip (normalize-skip-columns skip)]
+    (concat
+     (when (and show-type? (not (skip "type")))   [(display-type (:type report ""))])
+     (when (and show-src?  (not (skip "source"))) [(truncate (:source report "") 10)])
+     (when-not (skip "priority") [(case (:priority report 0) 3 "A" 2 "B" 1 "C" " ")])
+     (when-not (skip "deadline") [(deadline-col report)])
+     (when-not (skip "flags")    [(:flags (report-flags+score report))])
+     (when-not (skip "replies")  [(str (:replies report 0))])
+     (when-not (skip "author")   [(truncate (:from report "?") 15)])
+     (when-not (skip "owner")    [(truncate (:owned report "") 15)])
+     (when-not (skip "date")     [(date-only (:date report))])
+     (when-not (skip "att")      [(str (when (seq (:patches report)) "+")
+                                       (when (seq (:events report))  "@")
+                                       (when (seq (:texts report))   "#")
+                                       (when (:awaiting report)      "?")
+                                       (when (seq (:related report)) "~"))])
+     [(str (vote-cookie report) (:subject report "(no subject)"))])))
 
 (defn- report->row
   "Format a report as a tab-separated row for fzf display."
-  [report show-type? show-src? show-owner?]
-  (str/join "\t" (report-columns report show-type? show-src? show-owner?)))
+  [report show-type? show-src? skip]
+  (str/join "\t" (report-columns report show-type? show-src? skip)))
 
 (defn- extra-str [report]
   (let [parts (remove nil?
@@ -448,8 +460,8 @@
 
 (defn- report->line
   "Format a report as a plain text line."
-  [report show-type? show-src? show-owner?]
-  (let [line (str/join "  " (report-columns report show-type? show-src? show-owner?))]
+  [report show-type? show-src? skip]
+  (let [line (str/join "  " (report-columns report show-type? show-src? skip))]
     (if-let [e (extra-str report)]
       (str line " " e)
       line)))
@@ -793,19 +805,26 @@
   "Show related reports for the selected report in a nested fzf.
   Resolves related message-ids against the mid-index to display full report rows.
   Supports the same keybindings as the main fzf view."
-  [selected-report mid-index config show-type? show-src? show-owner?]
+  [selected-report mid-index config show-type? show-src? skip]
   (when-let [rels (seq (:related selected-report))]
     (let [resolved (keep #(get mid-index (:message-id %)) rels)]
       (when (seq resolved)
         (let [resolved (vec resolved)
-          header   (str/join "\t"
-                             (concat
-                              (when show-type? ["Type"])
-                              (when show-src?  ["Source"])
-                              ["P" "D" "Flags" "#" "Author"]
-                              (when show-owner? ["Owner"])
-                              ["Date" "Att" "Subject"]))
-          rows     (mapv #(report->row % show-type? show-src? show-owner?) resolved)
+          skip   (normalize-skip-columns skip)
+          header (str/join "\t"
+                           (concat
+                            (when (and show-type? (not (skip "type")))   ["Type"])
+                            (when (and show-src?  (not (skip "source"))) ["Source"])
+                            (when-not (skip "priority") ["P"])
+                            (when-not (skip "deadline") ["D"])
+                            (when-not (skip "flags")    ["Flags"])
+                            (when-not (skip "replies")  ["#"])
+                            (when-not (skip "author")   ["Author"])
+                            (when-not (skip "owner")    ["Owner"])
+                            (when-not (skip "date")     ["Date"])
+                            (when-not (skip "att")      ["Att"])
+                            ["Subject"]))
+          rows     (mapv #(report->row % show-type? show-src? skip) resolved)
           aligned  (tabulate (cons header rows))
           input    (str/join "\n" aligned)
           dispatch-path (str (System/getProperty "java.io.tmpdir")
@@ -832,7 +851,7 @@
 (defn- handle-fzf-key
   "Handle an fzf --expect key. Returns updated state."
   [key-used state all-types all-sources all-topics reload-fn
-   & {:keys [selected-report sel-idx mid-index config show-type? show-src? show-owner?]}]
+   & {:keys [selected-report sel-idx mid-index config show-type? show-src? skip-columns]}]
   (let [{:keys [reports sort-idx]} state
         state (dissoc state :cursor-pos)]
     (case key-used
@@ -855,7 +874,7 @@
       "ctrl-x" (assoc state :types nil :sources nil :topics nil)
       "ctrl-/" (do (if (and selected-report (seq (:related selected-report)))
                      (or (show-related! selected-report mid-index config
-                                        show-type? show-src? show-owner?)
+                                        show-type? show-src? skip-columns)
                          (println "  No related reports in loaded data."))
                      (println "  No related reports."))
                    (cond-> state sel-idx (assoc :cursor-pos sel-idx)))
@@ -875,10 +894,10 @@
   "Display reports interactively with fzf, or as plain text lines.
   reload-fn, when non-nil, is called on ctrl-u to refresh the cache and
   return a new {:reports ...} map."
-  [config reports & {:keys [reload-fn show-owner?]}]
-  (let [show-type?  true
-        show-src?   (multiple-sources? reports)
-        show-owner? (or show-owner? (:show-owner config))
+  [config reports & {:keys [reload-fn skip-columns]}]
+  (let [show-type?   true
+        show-src?    (multiple-sources? reports)
+        skip-columns (normalize-skip-columns (or skip-columns (:skip-columns config)))
         dispatch-path (str (System/getProperty "java.io.tmpdir")
                            "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
     (if (empty? reports)
@@ -897,12 +916,18 @@
                     visible     (filter-visible reports state all-types all-sources all-topics)
                     header      (str/join "\t"
                                           (concat
-                                           (when show-type? ["Type"])
-                                           (when show-src?  ["Source"])
-                                           ["P" "D" "Flags" "#" "Author"]
-                                           (when show-owner? ["Owner"])
-                                           ["Date" "Att" "Subject"]))
-                    rows        (mapv #(report->row % show-type? show-src? show-owner?) visible)
+                                           (when (and show-type? (not (skip-columns "type")))   ["Type"])
+                                           (when (and show-src?  (not (skip-columns "source"))) ["Source"])
+                                           (when-not (skip-columns "priority") ["P"])
+                                           (when-not (skip-columns "deadline") ["D"])
+                                           (when-not (skip-columns "flags")    ["Flags"])
+                                           (when-not (skip-columns "replies")  ["#"])
+                                           (when-not (skip-columns "author")   ["Author"])
+                                           (when-not (skip-columns "owner")    ["Owner"])
+                                           (when-not (skip-columns "date")     ["Date"])
+                                           (when-not (skip-columns "att")      ["Att"])
+                                           ["Subject"]))
+                    rows        (mapv #(report->row % show-type? show-src? skip-columns) visible)
                     aligned     (tabulate (cons header rows))
                     input       (str/join "\n" aligned)
                     _           (write-dispatch-script! dispatch-path config visible)
@@ -940,13 +965,13 @@
                                            :config config
                                            :show-type? show-type?
                                            :show-src? show-src?
-                                           :show-owner? show-owner?))))))
+                                           :skip-columns skip-columns))))))
           (finally
             (.delete (io/file dispatch-path))))
         ;; Plain text fallback
         (do (println (count reports) "report(s):\n")
             (doseq [r reports]
-              (println " " (report->line r show-type? show-src? show-owner?))))))))
+              (println " " (report->line r show-type? show-src? skip-columns))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Report (triage summary)
@@ -1110,7 +1135,7 @@
       (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (some-> (first more) parse-long)) (rest more))
       (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
       (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
-      (#{"-O" "--show-owner"} a)      (recur (assoc opts :show-owner? true) more)
+      (#{"-S" "--skip-columns"} a)    (recur (assoc opts :skip-columns (str/split (first more) #",")) (rest more))
       :else                           [opts remaining])))
 
 (defn- validate-opts!
@@ -1205,7 +1230,7 @@
                         #(filter-reports (:reports (load-from-sources)) opts))]
         (display-reports! config reports
                          :reload-fn reload-fn
-                         :show-owner? (:show-owner? opts))))))
+                         :skip-columns (:skip-columns opts))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
