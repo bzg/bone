@@ -715,7 +715,7 @@
         (let [groups (cond-> []
                        (seq ps) (conj {:label "patch" :items ps :diff? true})
                        (seq es) (conj {:label "event" :items es :diff? false})
-                       (seq ts) (conj {:label "text"  :items ts :diff? false}))]
+                       (seq ts) (conj {:label " text" :items ts :diff? false}))]
           (when (seq groups)
             (.append sb (str "  view:" n ")\n"))
             (let [emit-fetch-and-page
@@ -725,47 +725,28 @@
                                  (page-cmd-str pager stdin? dsf? (shell-escape cache-path))
                                  (str (shell-escape plain-pager) " " (shell-escape cache-path)))
                          "\n"))
-                  emit-pick-from
-                  (fn [{:keys [label items diff?]}]
-                    (let [file-labels (mapv (fn [{:keys [url]}] (last (str/split url #"/"))) items)]
-                      (if (= 1 (count items))
-                        (emit-fetch-and-page (first items) diff?)
-                        (str "    FILE=$(printf "
-                             (shell-escape (str/join "\\n" file-labels))
-                             " | fzf --prompt " (shell-escape (str label "> ")) " --no-sort --reverse)\n"
-                             "    [ -z \"$FILE\" ] && exit 0\n"
-                             "    case \"$FILE\" in\n"
-                             (str/join
-                              (for [[fl item] (map vector file-labels items)]
-                                (str "      " (shell-escape fl) ")\n"
-                                     "    " (emit-fetch-and-page item diff?)
-                                     "        ;;\n")))
-                             "    esac\n"))))]
-              (if (= 1 (count groups))
-                (.append sb (emit-pick-from (first groups)))
-                ;; Multiple attachment types — let user pick the kind first
-                (do (.append sb (str "    KIND=$(printf "
-                                     (shell-escape (str/join "\\n" (map :label groups)))
-                                     " | fzf --prompt 'view> ' --no-sort --reverse)\n"))
-                    (.append sb "    [ -z \"$KIND\" ] && exit 0\n")
-                    (.append sb "    case \"$KIND\" in\n")
-                    (doseq [{:keys [label] :as group} groups]
-                      (.append sb (str "      " (shell-escape label) ")\n"))
-                      (.append sb (emit-pick-from group))
-                      (.append sb "        ;;\n"))
-                    (.append sb "    esac\n"))))
-            (.append sb "    ;;\n")))
-        ;; related action — show related reports
-        (when-let [rels (seq (:related report))]
-          (.append sb (str "  related:" n ")\n"))
-          (let [lines (map (fn [r]
-                             (str (display-type (:type r ""))
-                                  "  " (:message-id r "")
-                                  (when-let [a (:archived-at r)] (str "  " a))))
-                           rels)
-                text  (str/join "\\n" (map #(str/replace % "'" "'\\''") lines))]
-            (.append sb (str "    printf '" text "\\n' | " plain-pager "\n")))
-          (.append sb "    ;;\n"))))
+]
+              (if (and (= 1 (count groups)) (= 1 (count (:items (first groups)))))
+                ;; Single attachment — no picker needed
+                (emit-fetch-and-page (first (:items (first groups))) (:diff? (first groups)))
+                ;; Flatten all attachments into one picker with "label: filename" entries
+                (let [entries (for [{:keys [label items diff?]} groups
+                                    item items]
+                                {:label (str label ": " (last (str/split (:url item) #"/")))
+                                 :item item
+                                 :diff? diff?})
+                      entry-labels (mapv :label entries)]
+                  (.append sb (str "    PICK=$(printf "
+                                   (shell-escape (str/join "\\n" entry-labels))
+                                   " | fzf --prompt 'view> ' --no-sort --reverse)\n"))
+                  (.append sb "    [ -z \"$PICK\" ] && exit 0\n")
+                  (.append sb "    case \"$PICK\" in\n")
+                  (doseq [{:keys [label item diff?]} entries]
+                    (.append sb (str "      " (shell-escape label) ")\n"))
+                    (.append sb (str "    " (emit-fetch-and-page item diff?)))
+                    (.append sb "        ;;\n"))
+                  (.append sb "    esac\n"))))
+            (.append sb "    ;;\n")))))
     (.append sb "esac\n")
     (spit dispatch-path (str sb))
     (.setExecutable (io/file dispatch-path) true)
@@ -776,7 +757,7 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private loop-keys
-  #{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u"})
+  #{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u" "ctrl-/"})
 
 (defn- filter-visible
   "Apply active type/source/topic filters to reports."
@@ -808,10 +789,55 @@
          (when-not (or (empty? all-topics) (= active-topics (set all-topics)))
            (str " topic:" (str/join "," (sort active-topics)))))))
 
+(defn- show-related!
+  "Show related reports for the selected report in a nested fzf.
+  Resolves related message-ids against the mid-index to display full report rows.
+  Supports the same keybindings as the main fzf view."
+  [selected-report mid-index config show-type? show-src? show-owner?]
+  (when-let [rels (seq (:related selected-report))]
+    (let [resolved (mapv (fn [rel]
+                           (or (get mid-index (:message-id rel))
+                               {:type    (:type rel "")
+                                :subject (str (:message-id rel ""))
+                                :from    "?"
+                                :date    ""}))
+                         rels)
+          header   (str/join "\t"
+                             (concat
+                              (when show-type? ["Type"])
+                              (when show-src?  ["Source"])
+                              ["P" "D" "Flags" "#" "Author"]
+                              (when show-owner? ["Owner"])
+                              ["Date" "Att" "Subject"]))
+          rows     (mapv #(report->row % show-type? show-src? show-owner?) resolved)
+          aligned  (tabulate (cons header rows))
+          input    (str/join "\n" aligned)
+          dispatch-path (str (System/getProperty "java.io.tmpdir")
+                             "/bone-related-" (System/currentTimeMillis) ".sh")]
+      (try
+        (write-dispatch-script! dispatch-path config resolved)
+        (process/shell {:in input :out :string :continue true}
+                       "fzf" "--header-lines" "1"
+                       "--header" (str "~ " (count resolved) " related to: "
+                                      (truncate (:subject selected-report "(no subject)") 60)
+                                      " [Ctrl-x: back]")
+                       "--no-sort" "--reverse" "--no-hscroll"
+                       "--prompt" "related~ "
+                       "--bind" (str "enter:execute(" dispatch-path " open {n})")
+                       "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
+                       "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
+                       "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
+                       "--bind" "ctrl-x:abort"
+                       "--bind" "esc:abort")
+        (finally
+          (.delete (io/file dispatch-path)))))))
+
 (defn- handle-fzf-key
   "Handle an fzf --expect key. Returns updated state."
-  [key-used state all-types all-sources all-topics reload-fn]
-  (let [{:keys [reports sort-idx]} state]
+  [key-used state all-types all-sources all-topics reload-fn
+   & {:keys [selected-report sel-idx mid-index config show-type? show-src? show-owner?]}]
+  (let [{:keys [reports sort-idx]} state
+        state (dissoc state :cursor-pos)]
     (case key-used
       "ctrl-s" (if-let [idx (pick-sort!)]
                  (assoc state :reports (sort-reports reports idx) :sort-idx idx)
@@ -830,12 +856,15 @@
                    (assoc state :topics new-topics)
                    state))
       "ctrl-x" (assoc state :types nil :sources nil :topics nil)
+      "ctrl-/" (do (if (and selected-report (seq (:related selected-report)))
+                     (show-related! selected-report mid-index config
+                                    show-type? show-src? show-owner?)
+                     (println "  No related reports."))
+                   (cond-> state sel-idx (assoc :cursor-pos sel-idx)))
       "ctrl-u" (if reload-fn
                  (do (println "  Updating cache...")
-                     (doseq [d [patches-cache-dir events-cache-dir texts-cache-dir]]
-                       (when (fs/exists? d) (fs/delete-tree d)))
                      (update-sources-cache!)
-                     (let [{new-reports :reports} (reload-fn)]
+                     (let [new-reports (reload-fn)]
                        (assoc state
                               :reports (sort-reports new-reports sort-idx)
                               :types nil :sources nil :topics nil)))
@@ -860,43 +889,60 @@
         (try
           (loop [{:keys [reports sort-idx] :as state}
                  {:reports reports :sort-idx 0 :types nil :sources nil :topics nil}]
-            (let [all-types   (vec (distinct (map (comp display-type :type) reports)))
-                  all-sources (vec (distinct (keep :source reports)))
-                  all-topics  (vec (distinct (keep :topic reports)))
-                  visible     (filter-visible reports state all-types all-sources all-topics)
-                  header      (str/join "\t"
-                                        (concat
-                                         (when show-type? ["Type"])
-                                         (when show-src?  ["Source"])
-                                         ["P" "D" "Flags" "#" "Author"]
-                                         (when show-owner? ["Owner"])
-                                         ["Date" "Att" "Subject"]))
-                  rows        (mapv #(report->row % show-type? show-src? show-owner?) visible)
-                  aligned     (tabulate (cons header rows))
-                  input       (str/join "\n" aligned)
-                  _           (write-dispatch-script! dispatch-path config visible)
-                  {:keys [exit out]}
-                  (process/shell {:in input :out :string :continue true}
-                                 "fzf" "--header-lines" "1"
-                                 "--header" (status-header sort-idx state
-                                                           all-types all-sources all-topics)
-                                 "--no-sort" "--reverse" "--no-hscroll"
-                                 "--prompt" "report> "
-                                 "--expect" (str/join "," loop-keys)
-                                 "--bind" (str "enter:execute(" dispatch-path " open {n})")
-                                 "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                                 "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
-                                 "--bind" (str "ctrl-/:execute(" dispatch-path " related {n})")
-                                 "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
-                                 "--bind" "ctrl-n:down"
-                                 "--bind" "ctrl-p:up")]
-              (let [lines    (when (seq (str/trim out))
-                               (str/split-lines (str/trim out)))
-                    key-used (first lines)]
-                (when (or (zero? exit) (loop-keys key-used))
-                  (recur (handle-fzf-key key-used state
-                                         all-types all-sources all-topics
-                                         reload-fn))))))
+            (let [mid-index (into {} (keep (fn [r]
+                                             (when-let [mid (:message-id r)]
+                                               [mid r])))
+                                     reports)
+                  all-types   (vec (distinct (map (comp display-type :type) reports)))
+                    all-sources (vec (distinct (keep :source reports)))
+                    all-topics  (vec (distinct (keep :topic reports)))
+                    visible     (filter-visible reports state all-types all-sources all-topics)
+                    header      (str/join "\t"
+                                          (concat
+                                           (when show-type? ["Type"])
+                                           (when show-src?  ["Source"])
+                                           ["P" "D" "Flags" "#" "Author"]
+                                           (when show-owner? ["Owner"])
+                                           ["Date" "Att" "Subject"]))
+                    rows        (mapv #(report->row % show-type? show-src? show-owner?) visible)
+                    aligned     (tabulate (cons header rows))
+                    input       (str/join "\n" aligned)
+                    _           (write-dispatch-script! dispatch-path config visible)
+                    cursor-pos  (:cursor-pos state)
+                    fzf-args    (cond-> ["fzf" "--header-lines" "1"
+                                         "--header" (status-header sort-idx state
+                                                                   all-types all-sources all-topics)
+                                         "--no-sort" "--reverse" "--no-hscroll"
+                                         "--prompt" "report> "
+                                         "--expect" (str/join "," loop-keys)
+                                         "--bind" (str "enter:execute(" dispatch-path " open {n})")
+                                         "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
+                                         "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
+                                         "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
+                                         "--bind" "ctrl-n:down"
+                                         "--bind" "ctrl-p:up"]
+                                  cursor-pos (conj "--bind" (str "load:pos(" (inc cursor-pos) ")")))
+                    {:keys [exit out]}
+                    (apply process/shell {:in input :out :string :continue true} fzf-args)]
+                (let [lines      (when (seq (str/trim out))
+                                   (str/split-lines (str/trim out)))
+                      key-used   (first lines)
+                      selected   (second lines)
+                      sel-idx    (when selected
+                                   (some (fn [i] (when (= (nth aligned (inc i)) selected) i))
+                                         (range (count visible))))
+                      sel-report (when sel-idx (nth visible sel-idx))]
+                  (when (or (zero? exit) (loop-keys key-used))
+                    (recur (handle-fzf-key key-used state
+                                           all-types all-sources all-topics
+                                           reload-fn
+                                           :selected-report sel-report
+                                           :sel-idx sel-idx
+                                           :mid-index mid-index
+                                           :config config
+                                           :show-type? show-type?
+                                           :show-src? show-src?
+                                           :show-owner? show-owner?))))))
           (finally
             (.delete (io/file dispatch-path))))
         ;; Plain text fallback
@@ -1062,11 +1108,11 @@
       (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
       (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
       (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
-      (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (parse-long (first more))) (rest more))
-      (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (parse-long (first more))) (rest more))
+      (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (some-> (first more) parse-long)) (rest more))
+      (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (some-> (first more) parse-long)) (rest more))
       (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
       (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
-      (#{"-o" "--show-owner"} a)      (recur (assoc opts :show-owner? true) more)
+      (#{"-O" "--show-owner"} a)      (recur (assoc opts :show-owner? true) more)
       :else                           [opts remaining])))
 
 (defn- validate-opts!
