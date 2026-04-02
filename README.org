@@ -171,9 +171,9 @@ You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[ht
 
 This project uses [[https://intver.org][Intentional Versioning]], here are the three audiences:
 
-- =x= : end users who browse BARK reports with bone
-- =y= : external packagers
-- =z= : contributors to the codebase
+- =Users= : end users who browse BARK reports with bone
+- =Integrators= : external packagers
+- =Maintainers= : maintainers of the codebase
 
 * Support the Clojure(script) ecosystem
 
