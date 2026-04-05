@@ -20,7 +20,7 @@ Assuming [[https://github.com/babashka/bbin][bbin]] is installed:
 Create =~/.config/bone/config.edn=:
 
 #+begin_src clojure
-{:email        "you@example.com"
+{:my-addresses ["you@example.com" "alias@example.com"]
  :text-browser "w3m"          ;; "w3m", "lynx" or "links"
  :diff-pager   "delta"        ;; "delta", "bat" or "diff-so-fancy"
  :sources      [{:url  "https://example.com/reports.json"
@@ -29,7 +29,8 @@ Create =~/.config/bone/config.edn=:
                  :repo "/path/to/repo"}]}
 #+end_src
 
-- =:email= — your email address, used by =-m= to filter reports involving you.
+- =:my-addresses= — your email address(es), used by =-m= to filter reports
+  involving you. Can be a single string or a vector of strings.
 - =:text-browser= — terminal browser for viewing reports on =RET=. When
   unset, bone probes for =w3m=, =lynx=, =links=, then falls back to
   =xdg-open=.
@@ -39,6 +40,9 @@ Create =~/.config/bone/config.edn=:
   - =:url= — URL or local path to the BARK =reports.json=.
   - =:repo= — (optional) public URL or local path of the associated code
     repository.
+- =:skip-columns= — vector of column names to hide by default (e.g.
+  =["priority" "score"]=).
+- =:report= — configuration for =bone report= (see [[*Triage report][Triage report]]).
 
 * Usage
 
@@ -49,18 +53,19 @@ Create =~/.config/bone/config.edn=:
 
 ** Options
 
-| Option               | Description                                      |
-|----------------------+--------------------------------------------------|
-| =-f=, =--file FILE=      | Read reports from a JSON file                    |
-| =-u=, =--url URL=        | Fetch reports from a URL                         |
-| =-U=, =--urls-file FILE= | Fetch and merge from URLs listed in FILE         |
-| =-e=, =--email EMAIL=    | Your email (overrides config)                    |
-| =-n=, =--source NAME=    | Filter by source name                            |
-| =-p=, =--min-priority N= | Only show reports with priority >= N (1, 2 or 3) |
-| =-s=, =--min-status N=   | Only show reports with status >= N (1–7)         |
-| =-m=, =--mine=           | Show only reports involving your email           |
-| =-c=, =--closed=         | Include closed reports                           |
-| =-=                    | Read JSON from stdin                             |
+| Option                    | Description                                       |
+|---------------------------+---------------------------------------------------|
+| =-f=, =--file FILE=           | Read reports from a JSON file                     |
+| =-u=, =--url URL=             | Fetch reports from a URL                          |
+| =-U=, =--urls-file FILE=      | Fetch and merge from URLs listed in FILE          |
+| =-M=, =--my-addresses EMAILS= | Your email(s), comma-separated (overrides config) |
+| =-n=, =--source NAME=         | Filter by source name                             |
+| =-p=, =--min-priority N=      | Only show reports with priority >= N (1, 2 or 3)  |
+| =-s=, =--min-score N=         | Only show reports with score >= N (0–7)           |
+| =-S=, =--skip-columns COLS=   | Columns to hide, comma-separated                  |
+| =-m=, =--mine=                | Show only reports involving your address(es)      |
+| =-c=, =--closed=              | Include closed reports                            |
+| =-=                         | Read JSON from stdin                              |
 
 ** Triage report
 
@@ -87,9 +92,9 @@ The report can be configured in =config.edn= under the =:report= key:
 
 ** Source management
 
-| Command                      | Description               |
-|------------------------------+---------------------------|
-| =-a=, =--add-source URL_OR_PATH= | Add a reports.json source |
+| Command                         | Description               |
+|---------------------------------+---------------------------|
+| =-a=, =--add-source URL_OR_PATH=    | Add a reports.json source |
 | =-r=, =--remove-source URL_OR_PATH= | Remove a source           |
 | =-l=, =--list-sources=              | List configured sources   |
 
@@ -102,9 +107,9 @@ Sources are stored in =~/.config/bone/config.edn= under the =:sources= key.
 | =clear=   | Empty the cache                       |
 | =update=  | Fetch/update reports from all sources |
 
-By default, bone reads cached reports if available.  If no cache
-exists, it fetches from sources once and caches the result.  Use
-=bone update= to refresh.
+By default, bone reads cached reports if available. If no cache
+exists, it fetches from sources once and caches the result. Use =bone
+update= to refresh.
 
 ** Interactive keys (fzf)
 
@@ -152,11 +157,11 @@ Update cached reports and browse only yours:
 
 * Files
 
-| Path                          | Purpose                   |
-|-------------------------------+---------------------------|
+| Path                          | Purpose                        |
+|-------------------------------+--------------------------------|
 | =~/.config/bone/config.edn=     | User configuration and sources |
-| =~/.config/bone/cache/patches/= | Cached patches            |
-| =~/.config/bone/cache/reports/= | Cached reports.json files |
+| =~/.config/bone/cache/patches/= | Cached patches                 |
+| =~/.config/bone/cache/reports/= | Cached reports.json files      |
 
 * Contributing
 

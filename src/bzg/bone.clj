@@ -7,7 +7,7 @@
 ;; Displays via fzf (with detail on selection) or plain text fallback.
 ;;
 ;; Configuration (~/.config/bone/config.edn):
-;;   {:email "you@example.com"}
+;;   {:my-addresses ["you@example.com" "alias@example.com"]}
 ;;
 ;; Usage:
 ;;   bone.clj [options]
@@ -19,13 +19,17 @@
 ;;   -f, --file FILE          Read reports from a JSON file
 ;;   -u, --url  URL           Fetch reports from a URL
 ;;   -U, --urls-file FILE     Fetch & merge reports from URLs listed in FILE
-;;   -e, --email EMAIL        Your email (overrides config)
+;;   -M, --my-addresses EMAILS Your email(s), comma-separated (overrides config)
 ;;   -p, --min-priority 1-3   Only show reports with priority >= N
 ;;   -s, --min-score 0-7     Only show reports with status score >= N
 ;;   -n, --source NAME        Filter by source name
-;;   -m, --mine               Show only reports involving your email
+;;   -S, --skip-columns COLS  Columns to hide, comma-separated
+;;   -m, --mine               Show only reports involving your address(es)
 ;;   -c, --closed             Include closed reports
 ;;   -a, --add-source PATH    Add a reports.json source (URL or path)
+;;   -r, --remove-source PATH Remove a reports.json source
+;;   -l, --list-sources       List configured sources
+;;   -h, --help               Show help
 ;;   -                        Read JSON from stdin
 ;;
 ;; By default, bone shows all open reports from configured sources.
@@ -304,11 +308,19 @@
 ;; Filtering
 ;; ---------------------------------------------------------------------------
 
+(defn- normalize-addresses
+  "Coerce :my-addresses (a string or vector of strings) into a set of
+  lower-cased addresses."
+  [v]
+  (when v
+    (let [xs (if (string? v) [v] v)]
+      (into #{} (map str/lower-case) xs))))
+
 (defn- involves-email?
-  "True when the report involves the given email address."
-  [report email]
-  (let [e (str/lower-case email)]
-    (some #(when % (= (str/lower-case %) e))
+  "True when the report involves any of the given email addresses."
+  [report addresses]
+  (let [addrs (if (set? addresses) addresses (normalize-addresses addresses))]
+    (some #(when % (contains? addrs (str/lower-case %)))
           [(:from report)
            (:acked report) (:owned report) (:closed report)
            (:acked-proxy report) (:owned-proxy report) (:closed-proxy report)])))
@@ -1045,13 +1057,13 @@
            (str/join "\n" (map #(report-one-liner % :prefix (format "%3dd left" (::exp-days %))) expiring))
            "\n"))))
 
-(defn- section-owned [reports _rcfg email]
-  (when email
-    (let [e     (str/lower-case email)
+(defn- section-owned [reports _rcfg addresses]
+  (when (seq addresses)
+    (let [addrs (if (set? addresses) addresses (normalize-addresses addresses))
           owned (->> reports
                      (remove :closed)
                      (filter #(when-let [o (:owned %)]
-                                (= (str/lower-case o) e)))
+                                (contains? addrs (str/lower-case o))))
                      (sort-by #(parse-date-ms (:date-raw %)) >))]
       (when (seq owned)
         (str (section-header "Owned (your open reports)") "\n"
@@ -1059,25 +1071,25 @@
            "\n")))))
 
 (def ^:private report-section-fns
-  {"overview"       (fn [reports rcfg _email] (section-overview reports rcfg))
-   "stale-patches"  (fn [reports rcfg _email] (section-stale "patch" reports rcfg))
-   "stale-bugs"     (fn [reports rcfg _email] (section-stale "bug" reports rcfg))
-   "active-threads" (fn [reports rcfg _email] (section-active-threads reports rcfg))
-   "expiring"       (fn [reports rcfg _email] (section-expiring reports rcfg))
-   "recent"         (fn [reports rcfg _email] (section-recent reports rcfg))
-   "owned"          (fn [reports rcfg email]  (section-owned reports rcfg email))})
+  {"overview"       (fn [reports rcfg _addrs] (section-overview reports rcfg))
+   "stale-patches"  (fn [reports rcfg _addrs] (section-stale "patch" reports rcfg))
+   "stale-bugs"     (fn [reports rcfg _addrs] (section-stale "bug" reports rcfg))
+   "active-threads" (fn [reports rcfg _addrs] (section-active-threads reports rcfg))
+   "expiring"       (fn [reports rcfg _addrs] (section-expiring reports rcfg))
+   "recent"         (fn [reports rcfg _addrs] (section-recent reports rcfg))
+   "owned"          (fn [reports rcfg addrs]  (section-owned reports rcfg addrs))})
 
 (defn- generate-report
   "Produce a triage report from loaded reports."
   [config reports]
-  (let [rcfg     (merge default-report-config (:report config))
-        email    (:email config)
-        sections (:sections rcfg)
+  (let [rcfg      (merge default-report-config (:report config))
+        addresses (normalize-addresses (:my-addresses config))
+        sections  (:sections rcfg)
         open     (remove :closed reports)]
     (println)
     (doseq [s sections]
       (when-let [f (report-section-fns s)]
-        (when-let [out (f (if (= s "overview") reports open) rcfg email)]
+        (when-let [out (f (if (= s "overview") reports open) rcfg addresses)]
           (println out))))))
 
 ;; ---------------------------------------------------------------------------
@@ -1103,7 +1115,7 @@
       (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
       (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
       (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
-      (#{"-e" "--email"} a)           (recur (assoc opts :email (first more)) (rest more))
+      (#{"-M" "--my-addresses"} a)    (recur (assoc opts :my-addresses (str/split (first more) #",")) (rest more))
       (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
       (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (some-> (first more) parse-long)) (rest more))
       (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (some-> (first more) parse-long)) (rest more))
@@ -1121,8 +1133,8 @@
     (throw (ex-info "Missing argument for --url" {})))
   (when (and (= (:data-src opts) :urls-file) (nil? (:urls-path opts)))
     (throw (ex-info "Missing argument for --urls-file" {})))
-  (when (and (contains? opts :email) (nil? (:email opts)))
-    (throw (ex-info "Missing argument for --email" {})))
+  (when (and (contains? opts :my-addresses) (nil? (:my-addresses opts)))
+    (throw (ex-info "Missing argument for --my-addresses" {})))
   (when (and (contains? opts :source-filter) (nil? (:source-filter opts)))
     (throw (ex-info "Missing argument for --source" {})))
   (when (and (contains? opts :min-priority) (nil? (:min-priority opts)))
@@ -1147,10 +1159,10 @@
 
 (defn- filter-reports
   "Apply CLI filters to a reports vector."
-  [reports {:keys [source-filter mine? email min-priority min-score closed?]}]
+  [reports {:keys [source-filter mine? my-addresses min-priority min-score closed?]}]
   (cond->> reports
-    source-filter        (filter #(= (:source %) source-filter))
-    (and mine? email)    (filter #(involves-email? % email))
+    source-filter              (filter #(= (:source %) source-filter))
+    (and mine? my-addresses)   (filter #(involves-email? % my-addresses))
     min-priority         (filter #(>= (:priority % 0) min-priority))
     min-score            (filter #(>= (:score (report-flags+score %)) min-score))
     (not closed?)        (remove :closed)))
@@ -1160,10 +1172,11 @@
   [args config]
   (let [[opts _] (parse-opts args)
         opts     (validate-opts! opts)
-        email    (or (:email opts) (:email config))
-        opts     (assoc opts :email email)]
-    (when (and (:mine? opts) (not email))
-      (throw (ex-info "No email configured. Set :email in ~/.config/bone/config.edn or use -e EMAIL." {})))
+        addrs    (or (:my-addresses opts) (:my-addresses config))
+        addrs    (when addrs (if (string? addrs) [addrs] addrs))
+        opts     (assoc opts :my-addresses addrs)]
+    (when (and (:mine? opts) (not (seq addrs)))
+      (throw (ex-info "No address configured. Set :my-addresses in ~/.config/bone/config.edn or use -M EMAIL[,EMAIL,...]." {})))
     opts))
 
 (defn -main [& args]
@@ -1182,7 +1195,7 @@
       (some #{"report"} args)
       (let [opts    (prepare-opts (remove #{"report"} args) config)
             reports (filter-reports (:reports (load-data opts)) opts)
-            cfg     (cond-> config (:email opts) (assoc :email (:email opts)))]
+            cfg     (cond-> config (:my-addresses opts) (assoc :my-addresses (:my-addresses opts)))]
         (generate-report cfg reports))
 
       (some #{"-l" "--list-sources"} args)
