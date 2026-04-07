@@ -732,7 +732,7 @@
 ]
               (if (and (= 1 (count groups)) (= 1 (count (:items (first groups)))))
                 ;; Single attachment — no picker needed
-                (emit-fetch-and-page (first (:items (first groups))) (:diff? (first groups)))
+                (.append sb (emit-fetch-and-page (first (:items (first groups))) (:diff? (first groups))))
                 ;; Flatten all attachments into one picker with "label: filename" entries
                 (let [entries (for [{:keys [label items diff?]} groups
                                     item items]
