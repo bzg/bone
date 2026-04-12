@@ -41,7 +41,8 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [babashka.cli :as cli]))
 
 ;; ---------------------------------------------------------------------------
 ;; Config
@@ -1096,53 +1097,59 @@
 ;; CLI
 ;; ---------------------------------------------------------------------------
 
-(defn- usage [] (println usage-text))
+(def ^:private cli-spec
+  {:file          {:alias :f :coerce :string :desc "Read reports from a JSON file" :ref "<FILE>"}
+   :url           {:alias :u :coerce :string :desc "Fetch reports from a URL" :ref "<URL>"}
+   :urls-file     {:alias :U :coerce :string :desc "Fetch reports from URLs listed in FILE" :ref "<FILE>"}
+   :my-addresses  {:alias :M :coerce :string :desc "Override email address(es) (comma-separated)" :ref "<EMAILS>"}
+   :source        {:alias :n :coerce :string :desc "Filter by source name" :ref "<NAME>"}
+   :min-priority  {:alias :p :coerce :long   :desc "Filter by minimum priority (1-3)"}
+   :min-score     {:alias :s :coerce :long   :desc "Filter by minimum score (0-7)"}
+   :mine          {:alias :m :coerce :boolean :desc "Show only your reports"}
+   :closed        {:alias :c :coerce :boolean :desc "Include closed reports"}
+   :skip-columns  {:alias :S :coerce :string :desc "Hide columns (comma-separated)" :ref "<COLS>"}
+   :list-sources  {:alias :l :coerce :boolean :desc "List configured sources"}
+   :add-source    {:alias :a :coerce :string :desc "Add a source" :ref "<URL>"}
+   :remove-source {:alias :r :coerce :string :desc "Remove a source" :ref "<URL>"}
+   :help          {:alias :h :coerce :boolean :desc "Show this help"}})
 
-(defn- next-arg
-  "Return the argument following the first occurrence of a flag in args."
-  [args flags]
-  (let [av  (vec args)
-        idx (first (keep-indexed #(when (flags %2) (inc %1)) av))]
-    (when idx (nth av idx nil))))
+(defn- usage []
+  (println "Usage: bone [COMMAND] [OPTIONS]")
+  (println)
+  (println "Commands:")
+  (println "  update          Update the sources cache")
+  (println "  clear           Clear the cache")
+  (println "  report          Generate a triage summary")
+  (println)
+  (println "Options:")
+  (println (cli/format-opts {:spec cli-spec}))
+  (println "  -               Read reports from stdin"))
 
 (defn- parse-opts
-  "Parse CLI options from an argument sequence. Returns [opts remaining-args]."
+  "Parse CLI options from an argument sequence. Returns [cmd opts]."
   [args]
-  (loop [opts {} [a & more :as remaining] args]
-    (cond
-      (nil? a)                        [opts nil]
-      (= a "-")                       [(assoc opts :data-src :stdin) nil]
-      (#{"-f" "--file"} a)            (recur (assoc opts :data-src :file :path (first more)) (rest more))
-      (#{"-u" "--url"} a)             (recur (assoc opts :data-src :url  :url  (first more)) (rest more))
-      (#{"-U" "--urls-file"} a)       (recur (assoc opts :data-src :urls-file :urls-path (first more)) (rest more))
-      (#{"-M" "--my-addresses"} a)    (recur (assoc opts :my-addresses (str/split (first more) #",")) (rest more))
-      (#{"-n" "--source"} a)          (recur (assoc opts :source-filter (first more)) (rest more))
-      (#{"-p" "--min-priority"} a)    (recur (assoc opts :min-priority (some-> (first more) parse-long)) (rest more))
-      (#{"-s" "--min-score"} a)       (recur (assoc opts :min-score (some-> (first more) parse-long)) (rest more))
-      (#{"-m" "--mine"} a)            (recur (assoc opts :mine? true) more)
-      (#{"-c" "--closed"} a)          (recur (assoc opts :closed? true) more)
-      (#{"-S" "--skip-columns"} a)    (recur (assoc opts :skip-columns (str/split (first more) #",")) (rest more))
-      :else                           [opts remaining])))
+  (let [stdin?  (some #{"-"} args)
+        args    (remove #{"-"} args)
+        subcmds #{"clear" "update" "report"}
+        cmd     (first (filter subcmds args))
+        args    (remove subcmds args)
+        opts    (cli/parse-opts args {:spec cli-spec})
+        opts    (cond
+                  stdin?          (assoc opts :data-src :stdin)
+                  (:file opts)    (assoc opts :data-src :file)
+                  (:url opts)     (assoc opts :data-src :url)
+                  (:urls-file opts) (assoc opts :data-src :urls-file)
+                  :else           opts)
+        opts    (cond-> opts
+                  (:my-addresses opts) (update :my-addresses #(str/split % #","))
+                  (:skip-columns opts) (update :skip-columns #(str/split % #",")))]
+    [cmd opts]))
 
 (defn- validate-opts!
-  "Validate parsed options. Throws on missing flag arguments or invalid values."
+  "Validate parsed options. Throws on invalid values."
   [opts]
-  (when (and (= (:data-src opts) :file) (nil? (:path opts)))
-    (throw (ex-info "Missing argument for --file" {})))
-  (when (and (= (:data-src opts) :url) (nil? (:url opts)))
-    (throw (ex-info "Missing argument for --url" {})))
-  (when (and (= (:data-src opts) :urls-file) (nil? (:urls-path opts)))
-    (throw (ex-info "Missing argument for --urls-file" {})))
-  (when (and (contains? opts :my-addresses) (nil? (:my-addresses opts)))
-    (throw (ex-info "Missing argument for --my-addresses" {})))
-  (when (and (contains? opts :source-filter) (nil? (:source-filter opts)))
-    (throw (ex-info "Missing argument for --source" {})))
-  (when (and (contains? opts :min-priority) (nil? (:min-priority opts)))
-    (throw (ex-info "Missing or invalid argument for --min-priority" {})))
   (when (and (:min-priority opts) (not (#{1 2 3} (:min-priority opts))))
     (throw (ex-info (str "Invalid --min-priority: " (:min-priority opts) " (must be 1, 2, or 3)") {})))
-  (when (and (contains? opts :min-score) (nil? (:min-score opts)))
-    (throw (ex-info "Missing or invalid argument for --min-score" {})))
   (when (and (:min-score opts) (not (<= 0 (:min-score opts) 7)))
     (throw (ex-info (str "Invalid --min-score: " (:min-score opts) " (must be 0–7)") {})))
   opts)
@@ -1151,74 +1158,55 @@
   "Load reports from the source specified in opts."
   [opts]
   (case (:data-src opts)
-    :file      (load-from-file (:path opts))
+    :file      (load-from-file (:file opts))
     :url       (load-from-url (:url opts))
-    :urls-file (load-from-urls-file (:urls-path opts))
+    :urls-file (load-from-urls-file (:urls-file opts))
     :stdin     (load-from-stdin)
     (load-from-sources)))
 
 (defn- filter-reports
   "Apply CLI filters to a reports vector."
-  [reports {:keys [source-filter mine? my-addresses min-priority min-score closed?]}]
+  [reports {:keys [source mine my-addresses min-priority min-score closed]}]
   (cond->> reports
-    source-filter              (filter #(= (:source %) source-filter))
-    (and mine? my-addresses)   (filter #(involves-email? % my-addresses))
-    min-priority         (filter #(>= (:priority % 0) min-priority))
-    min-score            (filter #(>= (:score (report-flags+score %)) min-score))
-    (not closed?)        (remove :closed)))
+    source                     (filter #(= (:source %) source))
+    (and mine my-addresses)    (filter #(involves-email? % my-addresses))
+    min-priority               (filter #(>= (:priority % 0) min-priority))
+    min-score                  (filter #(>= (:score (report-flags+score %)) min-score))
+    (not closed)               (remove :closed)))
 
-(defn- prepare-opts
-  "Parse, validate, and enrich CLI options with email from config."
-  [args config]
-  (let [[opts _] (parse-opts args)
-        opts     (validate-opts! opts)
-        addrs    (or (:my-addresses opts) (:my-addresses config))
-        addrs    (when addrs (if (string? addrs) [addrs] addrs))
-        opts     (assoc opts :my-addresses addrs)]
-    (when (and (:mine? opts) (not (seq addrs)))
+(defn- enrich-opts
+  "Validate and enrich parsed CLI options with email from config."
+  [opts config]
+  (let [opts  (validate-opts! opts)
+        addrs (or (:my-addresses opts) (:my-addresses config))
+        addrs (when addrs (if (string? addrs) [addrs] addrs))
+        opts  (assoc opts :my-addresses addrs)]
+    (when (and (:mine opts) (not (seq addrs)))
       (throw (ex-info "No address configured. Set :my-addresses in ~/.config/bone/config.edn or use -M EMAIL[,EMAIL,...]." {})))
     opts))
 
 (defn -main [& args]
-  (let [args   (seq (or (seq args) *command-line-args*))
-        config (load-config)]
+  (let [args       (seq (or (seq args) *command-line-args*))
+        config     (load-config)
+        [cmd opts] (parse-opts args)]
     (cond
-      (some #{"-h" "--help"} args)
-      (usage)
-
-      (some #{"clear"} args)
-      (clear-cache!)
-
-      (some #{"update"} args)
-      (update-sources-cache!)
-
-      (some #{"report"} args)
-      (let [opts    (prepare-opts (remove #{"report"} args) config)
-            reports (filter-reports (:reports (load-data opts)) opts)
-            cfg     (cond-> config (:my-addresses opts) (assoc :my-addresses (:my-addresses opts)))]
-        (generate-report cfg reports))
-
-      (some #{"-l" "--list-sources"} args)
-      (list-sources!)
-
-      (some #{"-a" "--add-source"} args)
-      (if-let [src (next-arg args #{"-a" "--add-source"})]
-        (add-source! src)
-        (println "Usage: bone -a URL_OR_PATH"))
-
-      (some #{"-r" "--remove-source"} args)
-      (if-let [src (next-arg args #{"-r" "--remove-source"})]
-        (remove-source! src)
-        (println "Usage: bone -r URL_OR_PATH"))
-
-      :else
-      (let [opts      (prepare-opts args config)
-            reports   (filter-reports (:reports (load-data opts)) opts)
-            reload-fn (when (nil? (:data-src opts))
-                        #(filter-reports (:reports (load-from-sources)) opts))]
-        (display-reports! config reports
-                         :reload-fn reload-fn
-                         :skip-columns (:skip-columns opts))))))
+      (:help opts)           (usage)
+      (= cmd "clear")        (clear-cache!)
+      (= cmd "update")       (update-sources-cache!)
+      (= cmd "report")       (let [opts    (enrich-opts opts config)
+                                    reports (filter-reports (:reports (load-data opts)) opts)
+                                    cfg     (cond-> config (:my-addresses opts) (assoc :my-addresses (:my-addresses opts)))]
+                                (generate-report cfg reports))
+      (:list-sources opts)   (list-sources!)
+      (:add-source opts)     (add-source! (:add-source opts))
+      (:remove-source opts)  (remove-source! (:remove-source opts))
+      :else                  (let [opts      (enrich-opts opts config)
+                                    reports   (filter-reports (:reports (load-data opts)) opts)
+                                    reload-fn (when (nil? (:data-src opts))
+                                                #(filter-reports (:reports (load-from-sources)) opts))]
+                                (display-reports! config reports
+                                                  :reload-fn reload-fn
+                                                  :skip-columns (:skip-columns opts))))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
