@@ -112,7 +112,7 @@
 ;; Data loading
 ;; ---------------------------------------------------------------------------
 
-(def min-bark-format "0.6.0")
+(def min-bark-format "0.8.0")
 
 (defn- version-< [a b]
   (loop [as (str/split a #"\.")
@@ -572,11 +572,7 @@
   [s]
   (if (or (nil? s) (str/blank? s))
     0
-    (or (try (.getTime (.parse (java.text.SimpleDateFormat.
-                                "EEE MMM dd HH:mm:ss z yyyy"
-                                java.util.Locale/ENGLISH) s))
-             (catch Exception _ nil))
-        (try (.toEpochMilli (java.time.Instant/parse s))
+    (or (try (.toEpochMilli (java.time.Instant/parse s))
              (catch Exception _ nil))
         (try (-> (java.time.LocalDate/parse s)
                  (.atStartOfDay java.time.ZoneOffset/UTC)
