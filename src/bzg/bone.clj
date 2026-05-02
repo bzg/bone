@@ -314,17 +314,18 @@
 ;; across re-fetches and globally unique.
 ;; ---------------------------------------------------------------------------
 
-(def state-org-path
-  (str (System/getProperty "user.home") "/.config/bone/state.org"))
+(def state-edn-path
+  (str (System/getProperty "user.home") "/.config/bone/state.edn"))
+
+(def todo-org-path
+  "Where `bone todo` writes the exported Org file."
+  (str (System/getProperty "user.home") "/.config/bone/todo.org"))
 
 (def ^:private org-header
   "#+TITLE: bone state\n#+TODO: TODO STICKY | DONE\n\n")
 
 (def ^:private flag->keyword
   {:todo "TODO" :sticky "STICKY" :done "DONE"})
-
-(def ^:private keyword->flag
-  {"TODO" :todo "STICKY" :sticky "DONE" :done})
 
 (def ^:private org-ts-fmt
   (java.time.format.DateTimeFormatter/ofPattern
@@ -347,56 +348,24 @@
                (catch Exception _ nil))
           (str "[" s "]"))))
 
-(defn- parse-org-timestamp
-  "Parse '[YYYY-MM-DD Day HH:MM]' back to ISO-8601. Returns nil on failure."
-  [s]
-  (when s
-    (try
-      (when-let [[_ d t] (re-find #"\[(\d{4}-\d{2}-\d{2})(?:\s+\w+)?\s+(\d{2}:\d{2})\]" s)]
-        (-> (java.time.LocalDateTime/parse (str d "T" t))
-            (.atZone (java.time.ZoneId/systemDefault))
-            .toInstant str))
-      (catch Exception _ nil))))
-
-(defn- parse-org-state
-  "Parse a state.org body into {message-id {:flag ... :read-at ... :subject ...
-  :type ... :author ... :created-org ...}}. Tolerant: skips entries without a
-  :MESSAGE-ID: property."
-  [body]
-  (let [chunks (rest (str/split (str "\n" body) #"\n\* "))]
-    (reduce
-     (fn [acc chunk]
-       (let [[headline & rest-lines] (str/split-lines chunk)
-             [_ kw title tag] (re-find
-                               #"^(?:(TODO|STICKY|DONE)\s+)?(.+?)(?:\s+:([\w@:]+):)?\s*$"
-                               (or headline ""))
-             props (reduce (fn [m line]
-                             (if-let [[_ k v] (re-find #"^\s*:([A-Z][A-Z-]*):\s*(.*?)\s*$" line)]
-                               (assoc m k v) m))
-                           {} rest-lines)
-             mid (get props "MESSAGE-ID")]
-         (if mid
-           (assoc acc mid
-                  (cond-> {:flag (keyword->flag kw)
-                           :subject title}
-                    tag                   (assoc :type (first (str/split tag #":")))
-                    (get props "AUTHOR")  (assoc :author (get props "AUTHOR"))
-                    (get props "CREATED") (assoc :created-org (get props "CREATED"))
-                    (get props "READ-AT") (assoc :read-at (parse-org-timestamp
-                                                           (get props "READ-AT")))))
-           acc)))
-     {} chunks)))
-
 (defn- load-state []
-  (let [f (io/file state-org-path)]
+  (let [f (io/file state-edn-path)]
     (if (.exists f)
-      (try (parse-org-state (slurp f))
+      (try (edn/read-string (slurp f))
            (catch Exception e
              (binding [*out* *err*]
-               (println (str "Warning: cannot parse " state-org-path ": "
+               (println (str "Warning: cannot parse " state-edn-path ": "
                              (.getMessage e) " — using empty state.")))
              {}))
       {})))
+
+(defn- save-state! [state]
+  (.mkdirs (.getParentFile (io/file state-edn-path)))
+  ;; Newline per entry for hand-edit friendliness without depending on pprint.
+  (spit state-edn-path
+        (str "{"
+             (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) state))
+             "}\n")))
 
 (defn- type->tag
   "Convert a report type ('patch', 'bug', ...) to ':patch:'. Returns nil for
@@ -405,15 +374,15 @@
   (when (and t (re-matches #"[a-zA-Z][\w-]*" (str t)))
     (str ":" (str/lower-case t) ":")))
 
-(defn- render-entry [mid {:keys [flag read-at author subject type created-org created]}]
+(defn- render-entry [mid {:keys [flag read-at author subject type created]}]
   (let [kw (flag->keyword flag)
         tag (type->tag type)]
     (str "* " (when kw (str kw " ")) (or subject "(no subject)")
          (when tag (str "    " tag)) "\n"
          "  :PROPERTIES:\n"
          "  :MESSAGE-ID: " mid "\n"
-         (when (or created-org created)
-           (str "  :CREATED:    " (or created-org (format-org-timestamp created)) "\n"))
+         (when created
+           (str "  :CREATED:    " (format-org-timestamp created) "\n"))
          (when author
            (str "  :AUTHOR:     " author "\n"))
          (when read-at
@@ -421,13 +390,18 @@
          "  :END:\n")))
 
 (defn- render-org-state [state]
-  (let [entries (sort-by (fn [[_ v]] (or (:created-org v) "")) #(compare %2 %1) state)]
+  (let [entries (sort-by (fn [[_ v]] (or (:created v) "")) #(compare %2 %1) state)]
     (str org-header
          (str/join "\n" (map (fn [[mid v]] (render-entry mid v)) entries)))))
 
-(defn- save-state! [state]
-  (.mkdirs (.getParentFile (io/file state-org-path)))
-  (spit state-org-path (render-org-state state)))
+(defn- write-todo-org!
+  "Generate todo.org from the current state.edn, restricted to entries flagged
+  :todo. :sticky and :read entries are skipped. Returns [path n-todos]."
+  [out-path]
+  (let [todos (into {} (filter (fn [[_ v]] (= :todo (:flag v))) (load-state)))]
+    (.mkdirs (.getParentFile (io/file out-path)))
+    (spit out-path (render-org-state todos))
+    [out-path (count todos)]))
 
 (defn- author-string [report]
   (let [n (:from-name report) e (:from report)]
@@ -438,39 +412,31 @@
 
 (defn- enrich-entry
   "Build/refresh metadata for a state entry from a report. Only fields that
-  are non-nil in `report` are written, so hand-edited subjects/authors in
-  state.org are preserved when the source report is missing those fields."
+  are non-nil in `report` are written, so hand-edited subjects/authors are
+  preserved when the source report is missing those fields."
   [existing report]
-  (let [base (cond-> existing
-               (:subject report)      (assoc :subject (:subject report))
-               (:type report)         (assoc :type    (:type report))
-               (author-string report) (assoc :author  (author-string report)))]
-    (if-let [d (:date report)]
-      ;; Live date overrides any cached :created-org (keeps round-trip stable
-      ;; when the report falls out of view).
-      (-> base (assoc :created d) (dissoc :created-org))
-      base)))
+  (cond-> existing
+    (:subject report)      (assoc :subject (:subject report))
+    (:type report)         (assoc :type    (:type report))
+    (author-string report) (assoc :author  (author-string report))
+    (:date report)         (assoc :created (:date report))))
 
 (defn- apply-transition
-  "Apply an action ∈ #{:read :todo :sticky :clear} to the state.
-   :todo and :sticky toggle off when the current flag already matches.
-   :clear removes the entry entirely (back to implicit unread+unflagged).
-   Entries that end up with neither :flag nor :read-at are dissoc'd.
-   :done is recognised by the parser/writer for hand-edited files but no
-   keybinding produces it from the UI."
+  "Apply an action ∈ #{:read :todo :sticky} to the state. All three actions
+  toggle off when the corresponding state is already set. Entries that end up
+  with neither :flag nor :read-at are dissoc'd."
   [state action mid report]
-  (cond
-    (nil? mid)        state
-    (= action :clear) (dissoc state mid)
-    :else
+  (if (nil? mid)
+    state
     (let [base      (enrich-entry (or (get state mid) {}) report)
-          cur-flag  (:flag base)
           new-entry (case action
-                      :read   (assoc base :read-at (iso-now))
-                      :todo   (if (= cur-flag :todo)
+                      :read   (if (:read-at base)
+                                (dissoc base :read-at)
+                                (assoc base :read-at (iso-now)))
+                      :todo   (if (= (:flag base) :todo)
                                 (dissoc base :flag)
                                 (assoc base :flag :todo))
-                      :sticky (if (= cur-flag :sticky)
+                      :sticky (if (= (:flag base) :sticky)
                                 (dissoc base :flag)
                                 (assoc base :flag :sticky)))]
       (if (and (nil? (:flag new-entry)) (nil? (:read-at new-entry)))
@@ -479,27 +445,38 @@
 
 (defn- visible-by-state?
   "Show a report given the local state and the active view mode.
-   :default — hide read items unless flagged :todo/:sticky.
-   :todo    — only :todo.
-   :sticky  — :todo and :sticky.
-   :all     — everything."
+   :default and :all → everything (the :read items are dropped upstream by
+   `startup-filter` for :default; once the session is loaded, marking an
+   item :read keeps it visible until the next reload).
+   :todo   → only :todo.
+   :sticky → :todo and :sticky."
   [state report view]
-  (let [s     (get state (:message-id report))
-        flag  (:flag s)
-        read? (some? (:read-at s))]
+  (let [flag (:flag (get state (:message-id report)))]
     (case view
-      :all     true
-      :todo    (= flag :todo)
-      :sticky  (#{:todo :sticky} flag)
-      :default (or (not read?) (#{:todo :sticky} flag)))))
+      :todo   (= flag :todo)
+      :sticky (#{:todo :sticky} flag)
+      true)))
 
 (defn- mark-prefix
-  "Single-character prefix for the leftmost column."
+  "Single-character prefix for the leftmost column.
+  Flag wins over read-at: a :todo+read item shows '!', not 'r'."
   [state mid]
-  (case (:flag (get state mid))
-    :todo   "!"
-    :sticky "*"
-    " "))
+  (let [s (get state mid)]
+    (case (:flag s)
+      :todo   "!"
+      :sticky "*"
+      (if (:read-at s) "r" " "))))
+
+(defn- startup-filter
+  "Apply the :default-mode startup filter: drop reports the user has marked
+  :read with no active flag. Other view modes pass through unchanged."
+  [reports user-state view-mode]
+  (if (= view-mode :default)
+    (remove (fn [r]
+              (let [s (get user-state (:message-id r))]
+                (and (:read-at s) (nil? (:flag s)))))
+            reports)
+    reports))
 
 ;; --- Session helpers (used by --internal-* subcommands) ---
 
@@ -990,10 +967,9 @@
     "  Ctrl-b / Ctrl-r / Ctrl-t   Filter by source / type / topic"
     "  Ctrl-x                     Remove all filters"
     "  Ctrl-u                     Update cache and reload"
-    "  Alt-,                      Toggle :todo (column shows '!')"
+    "  Alt-!                      Toggle :todo (column shows '!')"
     "  Alt-*                      Toggle :sticky (column shows '*')"
-    "  Alt-;                      Mark as :read (hide from default view)"
-    "  Alt-_                      Clear all marks on item"
+    "  Alt-Enter                  Toggle :read (column shows 'r'; hidden at next launch unless --all)"
     "  Ctrl-h                     Show this help"
     ""
     "Columns:"
@@ -1268,16 +1244,15 @@
           (do (println "  Updating cache...")
               (update-sources-cache!)
               (let [session     (read-session session-path)
-                    new-reports (reload-fn)]
+                    view        (or (:view-mode session) :default)
+                    filtered    (startup-filter (reload-fn) (load-state) view)]
                 (write-session! session-path
                                 (assoc session
-                                       :reports     (sort-reports new-reports
-                                                                  (:sort-idx session 0))
+                                       :reports     (sort-reports filtered (:sort-idx session 0))
                                        :all-types   (vec (distinct
-                                                          (map (comp display-type :type)
-                                                               new-reports)))
-                                       :all-sources (vec (distinct (keep :source new-reports)))
-                                       :all-topics  (vec (distinct (keep :topic new-reports)))
+                                                          (map (comp display-type :type) filtered)))
+                                       :all-sources (vec (distinct (keep :source filtered)))
+                                       :all-topics  (vec (distinct (keep :topic filtered)))
                                        :types nil :sources nil :topics nil))))
           (println "  Cache update not available for this data source."))
         nil)
@@ -1319,10 +1294,11 @@
         (try
           ;; Build initial session, write the help text once.
           (spit help-path usage-text)
-          (let [all-types   (vec (distinct (map (comp display-type :type) reports)))
-                all-sources (vec (distinct (keep :source reports)))
-                all-topics  (vec (distinct (keep :topic reports)))
-                sorted      (sort-reports reports 0)]
+          (let [filtered    (startup-filter reports (load-state) view-mode)
+                all-types   (vec (distinct (map (comp display-type :type) filtered)))
+                all-sources (vec (distinct (keep :source filtered)))
+                all-topics  (vec (distinct (keep :topic filtered)))
+                sorted      (sort-reports filtered 0)]
             (write-session! session-path
                             {:reports      sorted
                              :sort-idx     0
@@ -1356,10 +1332,9 @@
                                        "--bind" (str "ctrl-h:" exec-action "(" dispatch-path " help)")
                                        "--bind" "ctrl-n:down"
                                        "--bind" "ctrl-p:up"
-                                       "--bind" (mark-bind "alt-," "todo")
+                                       "--bind" (mark-bind "alt-!" "todo")
                                        "--bind" (mark-bind "alt-*" "sticky")
-                                       "--bind" (mark-bind "alt-;" "read")
-                                       "--bind" (mark-bind "alt-_" "clear")
+                                       "--bind" (mark-bind "alt-enter" "read")
                                        "--bind" (picker-bind "ctrl-s" "--internal-pick-sort")
                                        "--bind" (picker-bind "ctrl-r" "--internal-pick-types")
                                        "--bind" (picker-bind "ctrl-b" "--internal-pick-sources")
@@ -1559,16 +1534,16 @@
   (println "  update          Update the sources cache")
   (println "  clear           Clear the cache")
   (println "  report          Generate a triage summary")
+  (println "  todo            Export marked items to ~/.config/bone/todo.org")
   (println)
   (println "Options:")
   (println (cli/format-opts {:spec cli-spec}))
   (println "  -               Read reports from stdin")
   (println)
-  (println "Local marks (kept in ~/.config/bone/state.org):")
-  (println "  Alt-,  toggle :todo (always shown, '!' prefix)")
-  (println "  Alt-*  toggle :sticky (always shown, '*' prefix)")
-  (println "  Alt-;  mark as :read (hidden from default view)")
-  (println "  Alt-_  clear all marks")
+  (println "Local marks (kept in ~/.config/bone/state.edn):")
+  (println "  Alt-!  toggle :todo   (column '!')")
+  (println "  Alt-*  toggle :sticky (column '*')")
+  (println "  Alt-Enter toggle :read (column 'r'; hidden at next launch unless --all)")
   (println "  Ctrl-h inside fzf shows the full keymap."))
 
 (defn- parse-opts
@@ -1576,7 +1551,7 @@
   [args]
   (let [stdin?  (some #{"-"} args)
         args    (remove #{"-"} args)
-        subcmds #{"clear" "update" "report"}
+        subcmds #{"clear" "update" "report" "todo"}
         cmd     (first (filter subcmds args))
         args    (remove subcmds args)
         opts    (cli/parse-opts args {:spec cli-spec})
@@ -1660,6 +1635,9 @@
                                     reports (filter-reports (:reports (load-data opts)) opts)
                                     cfg     (cond-> config (:my-addresses opts) (assoc :my-addresses (:my-addresses opts)))]
                                 (generate-report cfg reports))
+      (= cmd "todo")         (let [[out n] (write-todo-org! todo-org-path)]
+                                (println (str "Wrote " out " (" n " todo"
+                                              (when (not= n 1) "s") ")")))
       (:list-sources opts)   (list-sources!)
       (:add-source opts)     (add-source! (:add-source opts))
       (:remove-source opts)  (remove-source! (:remove-source opts))
