@@ -147,7 +147,7 @@
 
 (defn- source-base-url
   "Derive a base URL from an HTTP source URL.  BARK serves the JSON from a
-  `reports/` subdirectory while attachments (patches/, events/, texts/) are
+  `reports/` subdirectory while attachments (patches/, events/, text/) are
   siblings of `reports/`.  So we strip the filename, then strip `reports/`
   when present.
   E.g. \"https://example.org/tracker/reports/all.json\" => \"https://example.org/tracker/\"
@@ -391,7 +391,11 @@
   (let [f (io/file state-org-path)]
     (if (.exists f)
       (try (parse-org-state (slurp f))
-           (catch Exception _ {}))
+           (catch Exception e
+             (binding [*out* *err*]
+               (println (str "Warning: cannot parse " state-org-path ": "
+                             (.getMessage e) " — using empty state.")))
+             {}))
       {})))
 
 (defn- type->tag
@@ -433,37 +437,42 @@
           :else nil)))
 
 (defn- enrich-entry
-  "Build/refresh metadata for a state entry from a report."
+  "Build/refresh metadata for a state entry from a report. Only fields that
+  are non-nil in `report` are written, so hand-edited subjects/authors in
+  state.org are preserved when the source report is missing those fields."
   [existing report]
-  (cond-> (merge existing
-                 {:subject (:subject report)
-                  :type    (:type report)
-                  :author  (author-string report)})
-    (:date report)     (assoc :created (:date report))
-    ;; Don't overwrite a :created-org parsed back from the file unless we have
-    ;; a live :date — keeps round-trip stable when the report is gone.
-    (:date report)     (dissoc :created-org)))
+  (let [base (cond-> existing
+               (:subject report)      (assoc :subject (:subject report))
+               (:type report)         (assoc :type    (:type report))
+               (author-string report) (assoc :author  (author-string report)))]
+    (if-let [d (:date report)]
+      ;; Live date overrides any cached :created-org (keeps round-trip stable
+      ;; when the report falls out of view).
+      (-> base (assoc :created d) (dissoc :created-org))
+      base)))
 
 (defn- apply-transition
-  "Apply an action ∈ #{:read :unread :todo :sticky :done :clear} to the state.
+  "Apply an action ∈ #{:read :todo :sticky :clear} to the state.
    :todo and :sticky toggle off when the current flag already matches.
    :clear removes the entry entirely (back to implicit unread+unflagged).
-   Entries that end up with neither :flag nor :read-at are dissoc'd."
+   Entries that end up with neither :flag nor :read-at are dissoc'd.
+   :done is recognised by the parser/writer for hand-edited files but no
+   keybinding produces it from the UI."
   [state action mid report]
-  (if (= action :clear)
-    (dissoc state mid)
-    (let [base       (enrich-entry (or (get state mid) {}) report)
-          cur-flag   (:flag base)
-          new-entry  (case action
-                       :read   (assoc base :read-at (iso-now))
-                       :unread (dissoc base :read-at)
-                       :todo   (if (= cur-flag :todo)
-                                 (dissoc base :flag)
-                                 (assoc base :flag :todo))
-                       :sticky (if (= cur-flag :sticky)
-                                 (dissoc base :flag)
-                                 (assoc base :flag :sticky))
-                       :done   (assoc base :flag :done :read-at (iso-now)))]
+  (cond
+    (nil? mid)        state
+    (= action :clear) (dissoc state mid)
+    :else
+    (let [base      (enrich-entry (or (get state mid) {}) report)
+          cur-flag  (:flag base)
+          new-entry (case action
+                      :read   (assoc base :read-at (iso-now))
+                      :todo   (if (= cur-flag :todo)
+                                (dissoc base :flag)
+                                (assoc base :flag :todo))
+                      :sticky (if (= cur-flag :sticky)
+                                (dissoc base :flag)
+                                (assoc base :flag :sticky)))]
       (if (and (nil? (:flag new-entry)) (nil? (:read-at new-entry)))
         (dissoc state mid)
         (assoc state mid new-entry)))))
@@ -559,18 +568,19 @@
   and emits the (re-filtered) aligned list to stdout for fzf to consume.
   Args: SESSION-PATH [N ACTION]."
   [session-path n-str action-str]
-  (let [session (read-session session-path)]
-    (when (and n-str action-str)
-      (when-let [n (try (Long/parseLong n-str) (catch Exception _ nil))]
-        (let [pre-state   (load-state)
-              pre-visible (session-visible session pre-state)]
-          (when-let [target (nth pre-visible n nil)]
-            (save-state! (apply-transition pre-state
-                                           (keyword action-str)
-                                           (:message-id target)
-                                           target))))))
-    (let [aligned (session-render session (load-state))]
-      (println (str/join "\n" aligned)))))
+  (let [session    (read-session session-path)
+        pre-state  (load-state)
+        post-state (or (when (and n-str action-str)
+                         (when-let [n (try (Long/parseLong n-str) (catch Exception _ nil))]
+                           (when-let [target (nth (session-visible session pre-state) n nil)]
+                             (let [s (apply-transition pre-state
+                                                       (keyword action-str)
+                                                       (:message-id target)
+                                                       target)]
+                               (save-state! s)
+                               s))))
+                       pre-state)]
+    (println (str/join "\n" (session-render session post-state)))))
 
 (declare pick-sort!)
 (declare pick-multi!)
@@ -775,6 +785,12 @@
     (zero? (:exit (process/shell {:out :string :err :string :continue true} "fzf" "--version")))
     (catch Exception _ false)))
 
+(defn- tmp-path
+  "Build /tmp/bone-<tag>-<ts><ext> for a temp file. Pass a single shared
+  timestamp when several related files must be cleaned up together."
+  [tag ts ext]
+  (str (System/getProperty "java.io.tmpdir") "/bone-" tag "-" ts ext))
+
 (defn- tabulate
   "Align tab-separated rows into fixed-width columns."
   [rows]
@@ -878,37 +894,42 @@
         0)))
 
 (def sort-options
-  ;; Each key-fn is (fn [report user-state] -> sortable). user-state is ignored
-  ;; by all but the "marked" entry, which sorts :todo first, :sticky second,
-  ;; then everything else, with newest-first as tie-break.
-  [["date (newest)"    (fn [r _] (- (parse-date-ms (:date-raw r))))               compare]
-   ["date (oldest)"    (fn [r _] (parse-date-ms (:date-raw r)))                   compare]
-   ["priority (high)"  (fn [r _] (- (:priority r 0)))                              compare]
-   ["status (active)"  (fn [r _] (- (:score (report-flags+score r))))              compare]
-   ["deadline (closest)"  (fn [r _] (or (days-until r :deadline) Integer/MAX_VALUE))          compare]
-   ["deadline (farthest)" (fn [r _] (- (or (days-until r :deadline) Integer/MIN_VALUE)))       compare]
-   ["replies (most)"   (fn [r _] (- (:replies r 0)))                               compare]
+  ;; Each entry: [label key-fn cmp ?needs-state]. key-fn takes [report state],
+  ;; but only the entry tagged needs-state pays the cost of loading state.org.
+  [["date (newest)"    (fn [r _] (- (parse-date-ms (:date-raw r))))                              compare]
+   ["date (oldest)"    (fn [r _] (parse-date-ms (:date-raw r)))                                  compare]
+   ["priority (high)"  (fn [r _] (- (:priority r 0)))                                            compare]
+   ["status (active)"  (fn [r _] (- (:score (report-flags+score r))))                            compare]
+   ["deadline (closest)"  (fn [r _] (or (days-until r :deadline) Integer/MAX_VALUE))             compare]
+   ["deadline (farthest)" (fn [r _] (- (or (days-until r :deadline) Integer/MIN_VALUE)))         compare]
+   ["replies (most)"   (fn [r _] (- (:replies r 0)))                                             compare]
    ["votes"            (fn [r _] (let [[sum total] (parse-votes (:votes r))]
-                                   (if (pos? total) (- (/ (double sum) total)) 0.0)))
-    compare]
-   ["activity (recent)" (fn [r _] (- (parse-date-ms (:last-activity r))))           compare]
-   ["activity (oldest)" (fn [r _] (parse-date-ms (:last-activity r)))               compare]
+                                   (if (pos? total) (- (/ (double sum) total)) 0.0)))            compare]
+   ["activity (recent)" (fn [r _] (- (parse-date-ms (:last-activity r))))                        compare]
+   ["activity (oldest)" (fn [r _] (parse-date-ms (:last-activity r)))                            compare]
    ["awaiting (recent)" (fn [r _] (if (:awaiting r) (- (parse-date-ms (:date-raw r))) Long/MAX_VALUE)) compare]
-   ["awaiting (oldest)" (fn [r _] (if (:awaiting r) (parse-date-ms (:date-raw r)) Long/MAX_VALUE))     compare]
-   ["type"              (fn [r _] (display-type (:type r "")))                      compare]
+   ["awaiting (oldest)" (fn [r _] (if (:awaiting r) (parse-date-ms (:date-raw r)) Long/MAX_VALUE))    compare]
+   ["type"              (fn [r _] (display-type (:type r "")))                                   compare]
    ["marked (todo, sticky first)"
     (fn [r state]
       (let [flag (:flag (get state (:message-id r)))
-            ;; 0 = :todo, 1 = :sticky, 2 = anything else.
             group (case flag :todo 0 :sticky 1 2)]
         [group (- (parse-date-ms (:date-raw r)))]))
-    compare]])
+    compare :needs-state]])
+
+(def ^:private tmux? (some? (System/getenv "TMUX")))
+
+(def ^:private exec-action
+  ;; In tmux, use execute-silent so the main list stays drawn while the
+  ;; dispatched action shows in a popup. Outside tmux, fall back to execute
+  ;; (which releases fzf's screen for fullscreen less, etc.).
+  (if tmux? "execute-silent" "execute"))
 
 (def ^:private picker-window-args
   ;; Inside tmux 3.3+, fzf can open in a popup overlaying the current pane,
   ;; so the main list stays visible behind. Outside tmux, fall back to an
   ;; inline 40% bottom strip.
-  (if (System/getenv "TMUX")
+  (if tmux?
     ["--tmux" "bottom,40%"]
     ["--height" "40%"]))
 
@@ -927,8 +948,8 @@
         (when (>= idx 0) idx)))))
 
 (defn- sort-reports [reports sort-idx]
-  (let [user-state     (load-state)
-        [_ key-fn cmp] (nth sort-options sort-idx)]
+  (let [[_ key-fn cmp needs] (nth sort-options sort-idx)
+        user-state           (when (= needs :needs-state) (load-state))]
     (sort-by #(key-fn % user-state) cmp reports)))
 
 (defn- pick-multi!
@@ -957,46 +978,108 @@
   (str "'" (str/replace s "'" "'\\''") "'"))
 
 (def ^:private usage-text
-  (str/join "\n"
-            ["  Ctrl-n                     Move to the next line"
-             "  Ctrl-p                     Move to the previous line"
-             "  Enter                      View report in terminal browser"
-             "  Ctrl-o                     Open report in system browser"
-             "  Ctrl-v                     View attachment (patch, ics, txt)"
-             "  Ctrl-/                     Show related reports"
-             "  Ctrl-s                     Change sort order"
-             "  Ctrl-b                     Filter by source"
-             "  Ctrl-r                     Filter by report type"
-             "  Ctrl-t                     Filter by topic"
-             "  Ctrl-x                     Remove all filters"
-             "  Ctrl-u                     Update cache and reload"
-             "  ,                          Toggle :todo (column shows '!')"
-             "  *                          Toggle :sticky (column shows '*')"
-             "  ;                          Mark as :read (hide from default view)"
-             "  _                          Clear all marks on item"
-             "  Ctrl-h                     Show this help"]))
+  (str/join
+   "\n"
+   ["Keys:"
+    "  Ctrl-n / Ctrl-p            Move to next / previous line"
+    "  Enter                      View report in terminal browser"
+    "  Ctrl-o                     Open report in system browser"
+    "  Ctrl-v                     View attachment (patch, ics, txt)"
+    "  Ctrl-/                     Show related reports"
+    "  Ctrl-s                     Change sort order"
+    "  Ctrl-b / Ctrl-r / Ctrl-t   Filter by source / type / topic"
+    "  Ctrl-x                     Remove all filters"
+    "  Ctrl-u                     Update cache and reload"
+    "  Alt-,                      Toggle :todo (column shows '!')"
+    "  Alt-*                      Toggle :sticky (column shows '*')"
+    "  Alt-;                      Mark as :read (hide from default view)"
+    "  Alt-_                      Clear all marks on item"
+    "  Ctrl-h                     Show this help"
+    ""
+    "Columns:"
+    "  !       Local mark: '!' = :todo, '*' = :sticky"
+    "  P       Priority: A = high, B = medium, C = low"
+    "  D       Days until deadline (negative = past)"
+    "  Flags   (A)cked (O)wned (C)anceled/(R)esolved/(E)xpired"
+    "  #       Number of replies"
+    "  Att     '+' patches, '@' events, '#' texts, '?' awaiting reply, '~' related"]))
 
 (defn- page-cmd-str
-  "Return a shell command string to page a file, given pager config."
+  "Return a shell command string to page a file, given pager config.
+  Inside a tmux popup we:
+   - drop -F (so a short patch doesn't auto-quit and flash the popup closed),
+   - drop -X (so less uses the alt-screen and the content sits at the top),
+   - append '+g' to scroll to line 1 at startup. Pipe-mode less can otherwise
+     leave the cursor at the end of the streamed content, and any user-set
+     LESS=+G would also park us at the bottom.
+  delta and bat run their own internal less; we use their --pager option to
+  force our exact invocation so flags actually take effect."
   [pager stdin? dsf? file-var]
-  (if stdin?
-    (if dsf?
-      (str "cat " file-var " | diff-so-fancy | less -RFX")
-      (str (str/join " " (map shell-escape pager)) " < " file-var))
-    (str (str/join " " (map shell-escape pager)) " " file-var)))
+  (let [pname      (first pager)
+        less-cmd   (if tmux? "less -R +g" "less -RFX")
+        ;; Force delta/bat to spawn OUR less invocation; otherwise their
+        ;; hardcoded -RXF (and any user $LESS) wins and -R may be lost.
+        pager-vec  (if (and tmux? (#{"delta" "bat"} pname))
+                     (concat pager ["--pager" less-cmd])
+                     pager)]
+    (if stdin?
+      (if dsf?
+        (str "cat " file-var " | diff-so-fancy | " less-cmd)
+        (str (str/join " " (map shell-escape pager-vec)) " < " file-var))
+      (str (str/join " " (map shell-escape pager-vec)) " " file-var))))
 
 (defn- write-dispatch-script!
   "Write a temp shell script that maps fzf line numbers to actions.
-  The script takes two args: ACTION (open|view|browse) and LINE_NUMBER.
-  Attachments are fetched lazily on first view."
-  [dispatch-path config visible]
+  The script takes two args: ACTION (open|view|browse|help) and LINE_NUMBER.
+  Attachments are fetched lazily on first view.
+  help-path is a file containing the keymap text shown by Ctrl-h.
+  When invoked inside tmux, actions that produce visible output (`help` and
+  any `view:N` for a report that has attachments) re-exec the script inside
+  a `tmux display-popup`, so the main list stays visible behind. Branches
+  that would be silent (e.g. C-v on a report with no attachments) bypass the
+  popup entirely — no flash."
+  [dispatch-path help-path config visible]
   (let [browse  (browse-cmd config)
         pager   (patch-pager config)
         stdin?  (stdin-diff-pagers (first pager))
         dsf?    (= "diff-so-fancy" (first pager))
         plain-pager (or (System/getenv "PAGER") "less")
-        sb      (StringBuilder.)]
+        sb      (StringBuilder.)
+        hf      (shell-escape help-path)
+        self    (shell-escape dispatch-path)
+        ;; help fits this many lines (text + a couple for the less prompt).
+        help-rows (+ 4 (count (str/split-lines usage-text)))
+        ;; Per-N indices for actions that produce output worth popping.
+        view-ns (->> visible
+                     (map-indexed vector)
+                     (keep (fn [[n r]]
+                             (when (or (seq (patch-paths r))
+                                       (seq (event-paths r))
+                                       (seq (text-paths r)))
+                               n))))
+        open-ns (->> visible
+                     (map-indexed vector)
+                     (keep (fn [[n r]] (when (:archived-at r) n))))]
     (.append sb "#!/bin/sh\nACTION=\"$1\"\nN=\"$2\"\n")
+    ;; Tmux-popup wrapper. Only wraps actions that will actually produce
+    ;; output, so a no-op (e.g. C-v on a report with no attachments) doesn't
+    ;; flash an empty popup. Help uses an exact-fit height; view/open use a
+    ;; generous one (browsers often need room).
+    (.append sb (str "if [ -n \"$TMUX\" ] && [ -z \"$BONE_IN_POPUP\" ]; then\n"
+                     "  case \"$ACTION:$N\" in\n"
+                     "    help:*)\n"
+                     "      exec tmux display-popup -E -h " help-rows " -w 90% -y S \\\n"
+                     "        \"BONE_IN_POPUP=1 sh " self " help\" ;;\n"
+                     (when (seq view-ns)
+                       (str "    " (str/join "|" (map #(str "view:" %) view-ns)) ")\n"
+                            "      exec tmux display-popup -E -h 90% -w 90% -y S \\\n"
+                            "        \"BONE_IN_POPUP=1 sh " self " view '$N'\" ;;\n"))
+                     (when (seq open-ns)
+                       (str "    " (str/join "|" (map #(str "open:" %) open-ns)) ")\n"
+                            "      exec tmux display-popup -E -h 90% -w 90% -y S \\\n"
+                            "        \"BONE_IN_POPUP=1 sh " self " open '$N'\" ;;\n"))
+                     "  esac\n"
+                     "fi\n"))
     ;; Lazy fetch helper: bone_fetch URL CACHE_PATH
     (.append sb (str/join "\n"
                           ["bone_fetch() {"
@@ -1011,9 +1094,7 @@
                            "}"
                            ""]))
     (.append sb (str "if [ \"$ACTION\" = \"help\" ]; then\n"
-                     "  cat <<'BONE_HELP' | less -R\n"
-                     usage-text "\n"
-                     "BONE_HELP\n"
+                     "  less -R " hf "\n"
                      "  exit 0\n"
                      "fi\n"))
     (.append sb "case \"$ACTION:$N\" in\n")
@@ -1040,14 +1121,18 @@
                        (seq ts) (conj {:label " text" :items ts :diff? false}))]
           (when (seq groups)
             (.append sb (str "  view:" n ")\n"))
-            (let [emit-fetch-and-page
+            (let [plain-page
+                  ;; LESS env covers the case where $PAGER is something other
+                  ;; than less; explicit args win when it IS less.
+                  (fn [path] (str (when tmux? "LESS='-R +g' ")
+                                  (shell-escape plain-pager) " " path))
+                  emit-fetch-and-page
                   (fn [{:keys [url cache-path]} diff?]
                     (str "    bone_fetch " (shell-escape url) " " (shell-escape cache-path) "\n"
                          "    " (if diff?
-                                 (page-cmd-str pager stdin? dsf? (shell-escape cache-path))
-                                 (str (shell-escape plain-pager) " " (shell-escape cache-path)))
-                         "\n"))
-]
+                                  (page-cmd-str pager stdin? dsf? (shell-escape cache-path))
+                                  (plain-page (shell-escape cache-path)))
+                         "\n"))]
               (if (and (= 1 (count groups)) (= 1 (count (:items (first groups)))))
                 ;; Single attachment — no picker needed
                 (.append sb (emit-fetch-and-page (first (:items (first groups))) (:diff? (first groups))))
@@ -1084,21 +1169,6 @@
   #{"ctrl-u" "ctrl-/"})
 
 (def ^:private expect-keys (str/join "," loop-keys))
-
-(defn- filter-visible
-  "Apply active type/source/topic filters to reports."
-  [reports {:keys [types sources topics]}
-   all-types all-sources all-topics]
-  (let [active-types   (or types (set all-types))
-        active-sources (or sources (set all-sources))
-        active-topics  (or topics (set all-topics))]
-    (->> reports
-         (filter #(contains? active-types (display-type (:type %))))
-         (filter #(or (empty? all-sources)
-                      (contains? active-sources (:source %))))
-         (filter #(or (empty? all-topics)
-                      (and (nil? topics) (nil? (:topic %)))
-                      (contains? active-topics (:topic %)))))))
 
 (defn- status-header
   "Build the fzf --header string showing current sort and active filters."
@@ -1141,42 +1211,36 @@
   (when-let [rels (seq (:related selected-report))]
     (let [resolved (keep #(get mid-index (:message-id %)) rels)]
       (when (seq resolved)
-        (let [resolved (vec resolved)
-          skip   (normalize-skip-columns skip)
-          header (column-headers show-type? show-src? skip)
-          rows     (mapv #(report->row % show-type? show-src? skip user-state) resolved)
-          aligned  (tabulate (cons header rows))
-          input    (str/join "\n" aligned)
-          dispatch-path (str (System/getProperty "java.io.tmpdir")
-                             "/bone-related-" (System/currentTimeMillis) ".sh")]
-      (try
-        (write-dispatch-script! dispatch-path config resolved)
-        (process/shell {:in input :out :string :continue true}
-                       "fzf" "--header-lines" "1"
-                       "--header" (str "~ " (count resolved) " related to: "
-                                      (truncate (:subject selected-report "(no subject)") 60)
-                                      " [Ctrl-x: back]")
-                       "--no-sort" "--reverse" "--no-hscroll"
-                       "--prompt" "related~ "
-                       "--bind" (str "enter:execute(" dispatch-path " open {n})")
-                       "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                       "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
-                       "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
-                       "--bind" "ctrl-x:abort"
-                       "--bind" "esc:abort")
-        true
-        (finally
-          (.delete (io/file dispatch-path)))))))))
+        (let [resolved      (vec resolved)
+              skip          (normalize-skip-columns skip)
+              header        (column-headers show-type? show-src? skip)
+              rows          (mapv #(report->row % show-type? show-src? skip user-state) resolved)
+              aligned       (tabulate (cons header rows))
+              input         (str/join "\n" aligned)
+              ts            (System/currentTimeMillis)
+              dispatch-path (tmp-path "related"      ts ".sh")
+              help-path     (tmp-path "related-help" ts ".txt")]
+          (spit help-path usage-text)
+          (try
+            (write-dispatch-script! dispatch-path help-path config resolved)
+            (apply process/shell {:in input :out :string :continue true}
+                   ["fzf" "--header-lines" "1"
+                    "--header" (str "~ " (count resolved) " related to: "
+                                    (truncate (:subject selected-report "(no subject)") 60)
+                                    " [Ctrl-x: back]")
+                    "--no-sort" "--reverse" "--no-hscroll"
+                    "--prompt" "related~ "
+                    "--bind" (str "enter:" exec-action "(" dispatch-path " open {n})")
+                    "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
+                    "--bind" (str "ctrl-v:" exec-action "(" dispatch-path " view {n})")
+                    "--bind" (str "ctrl-h:" exec-action "(" dispatch-path " help)")
+                    "--bind" "ctrl-x:abort"
+                    "--bind" "esc:abort"])
+            true
+            (finally
+              (.delete (io/file dispatch-path))
+              (.delete (io/file help-path)))))))))
 
-
-(defn- mark-and-save!
-  "Apply a transition for the given report and persist state.org."
-  [action selected-report]
-  (when (and selected-report (:message-id selected-report))
-    (let [user-state (load-state)]
-      (save-state! (apply-transition user-state action
-                                     (:message-id selected-report)
-                                     selected-report)))))
 
 (defn- handle-fzf-key
   "Handle an fzf --expect key (only ctrl-u and ctrl-/). Mutates the session
@@ -1187,16 +1251,17 @@
              reload-fn]}]
   (case key-used
     "ctrl-/"
-    (do (if (and selected-report (seq (:related selected-report)))
+    (do (when (and selected-report (seq (:related selected-report)))
           (let [session (read-session session-path)
                 mid-index (into {} (keep (fn [r]
                                            (when-let [mid (:message-id r)]
                                              [mid r])))
                                 (:reports session))]
-            (or (show-related! selected-report mid-index config
-                               show-type? show-src? skip-columns (load-state))
-                (println "  No related reports in loaded data.")))
-          (println "  No related reports."))
+            ;; Silent no-op when none of the related ids resolve in the loaded
+            ;; data: avoids a one-shot println that flashes between fzf alt-
+            ;; screens. Same when the report has no :related at all.
+            (show-related! selected-report mid-index config
+                           show-type? show-src? skip-columns (load-state))))
         sel-idx)
     "ctrl-u"
     (do (if reload-fn
@@ -1232,8 +1297,9 @@
         skip-columns (normalize-skip-columns (or skip-columns (:skip-columns config)))
         view-mode    (or view-mode :default)
         ts            (System/currentTimeMillis)
-        dispatch-path (str (System/getProperty "java.io.tmpdir") "/bone-dispatch-" ts ".sh")
-        session-path  (str (System/getProperty "java.io.tmpdir") "/bone-session-"  ts ".edn")
+        dispatch-path (tmp-path "dispatch" ts ".sh")
+        session-path  (tmp-path "session"  ts ".json")
+        help-path     (tmp-path "help"     ts ".txt")
         bb-bone       (str "bb " (shell-escape bone-script-path) " ")
         sess          (shell-escape session-path)
         mark-bind     (fn [key action]
@@ -1251,7 +1317,8 @@
       (println "No reports found.")
       (if (fzf-available?)
         (try
-          ;; Build initial session.
+          ;; Build initial session, write the help text once.
+          (spit help-path usage-text)
           (let [all-types   (vec (distinct (map (comp display-type :type) reports)))
                 all-sources (vec (distinct (keep :source reports)))
                 all-topics  (vec (distinct (keep :topic reports)))
@@ -1273,7 +1340,7 @@
                   visible     (session-visible session user-state)
                   aligned     (session-render session user-state)
                   input       (str/join "\n" aligned)
-                  _           (write-dispatch-script! dispatch-path config visible)
+                  _           (write-dispatch-script! dispatch-path help-path config visible)
                   fzf-args    (cond-> ["fzf" "--header-lines" "1"
                                        "--header" (status-header
                                                    (:sort-idx session 0) session
@@ -1283,16 +1350,16 @@
                                        "--no-sort" "--reverse" "--no-hscroll"
                                        "--prompt" "report> "
                                        "--expect" expect-keys
-                                       "--bind" (str "enter:execute(" dispatch-path " open {n})")
+                                       "--bind" (str "enter:" exec-action "(" dispatch-path " open {n})")
                                        "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                                       "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
-                                       "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
+                                       "--bind" (str "ctrl-v:" exec-action "(" dispatch-path " view {n})")
+                                       "--bind" (str "ctrl-h:" exec-action "(" dispatch-path " help)")
                                        "--bind" "ctrl-n:down"
                                        "--bind" "ctrl-p:up"
-                                       "--bind" (mark-bind "," "todo")
-                                       "--bind" (mark-bind "*" "sticky")
-                                       "--bind" (mark-bind ";" "read")
-                                       "--bind" (mark-bind "_" "clear")
+                                       "--bind" (mark-bind "alt-," "todo")
+                                       "--bind" (mark-bind "alt-*" "sticky")
+                                       "--bind" (mark-bind "alt-;" "read")
+                                       "--bind" (mark-bind "alt-_" "clear")
                                        "--bind" (picker-bind "ctrl-s" "--internal-pick-sort")
                                        "--bind" (picker-bind "ctrl-r" "--internal-pick-types")
                                        "--bind" (picker-bind "ctrl-b" "--internal-pick-sources")
@@ -1309,8 +1376,7 @@
                              (some (fn [i] (when (= (nth aligned (inc i)) selected) i))
                                    (range (count visible))))
                   sel-report (when sel-idx (nth visible sel-idx))]
-              (when (and (or (zero? exit) (loop-keys key-used))
-                         (loop-keys key-used))
+              (when (loop-keys key-used)
                 (recur (handle-fzf-key key-used session-path
                                        :selected-report sel-report
                                        :sel-idx sel-idx
@@ -1321,7 +1387,8 @@
                                        :reload-fn reload-fn)))))
           (finally
             (.delete (io/file dispatch-path))
-            (.delete (io/file session-path))))
+            (.delete (io/file session-path))
+            (.delete (io/file help-path))))
         ;; Plain text fallback
         (let [user-state (load-state)
               visible    (filter #(visible-by-state? user-state % view-mode) reports)]
@@ -1479,7 +1546,7 @@
    :skip-columns  {:alias :S :coerce :string :desc "Hide columns (comma-separated)" :ref "<COLS>"}
    :todo          {:alias :T :coerce :boolean :desc "Show only items marked :todo"}
    :sticky        {:alias :Y :coerce :boolean :desc "Show items marked :todo or :sticky"}
-   :all           {:alias :A :coerce :boolean :desc "Show all items including :read and :done"}
+   :all           {:alias :A :coerce :boolean :desc "Show all items, including :read"}
    :list-sources  {:alias :l :coerce :boolean :desc "List configured sources"}
    :add-source    {:alias :a :coerce :string :desc "Add a source" :ref "<URL>"}
    :remove-source {:alias :r :coerce :string :desc "Remove a source" :ref "<URL>"}
@@ -1498,10 +1565,10 @@
   (println "  -               Read reports from stdin")
   (println)
   (println "Local marks (kept in ~/.config/bone/state.org):")
-  (println "  ,  toggle :todo (always shown, '!' prefix)")
-  (println "  *  toggle :sticky (always shown, '*' prefix)")
-  (println "  ;  mark as :read (hidden from default view)")
-  (println "  _  clear all marks")
+  (println "  Alt-,  toggle :todo (always shown, '!' prefix)")
+  (println "  Alt-*  toggle :sticky (always shown, '*' prefix)")
+  (println "  Alt-;  mark as :read (hidden from default view)")
+  (println "  Alt-_  clear all marks")
   (println "  Ctrl-h inside fzf shows the full keymap."))
 
 (defn- parse-opts
