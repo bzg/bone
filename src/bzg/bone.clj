@@ -306,6 +306,300 @@
            sources))))
 
 ;; ---------------------------------------------------------------------------
+;; Local state (~/.config/bone/state.org)
+;;
+;; Per-report `flag` (nil, :todo, :sticky, :done) and `read-at` (set when the
+;; user has visited the item). Persisted as Org so it can be opened in Emacs,
+;; hand-edited, or grepped. Keyed by RFC-2822 message-id, which is stable
+;; across re-fetches and globally unique.
+;; ---------------------------------------------------------------------------
+
+(def state-org-path
+  (str (System/getProperty "user.home") "/.config/bone/state.org"))
+
+(def ^:private org-header
+  "#+TITLE: bone state\n#+TODO: TODO STICKY | DONE\n\n")
+
+(def ^:private flag->keyword
+  {:todo "TODO" :sticky "STICKY" :done "DONE"})
+
+(def ^:private keyword->flag
+  {"TODO" :todo "STICKY" :sticky "DONE" :done})
+
+(def ^:private org-ts-fmt
+  (java.time.format.DateTimeFormatter/ofPattern
+   "yyyy-MM-dd EEE HH:mm" java.util.Locale/ENGLISH))
+
+(defn- iso-now [] (str (java.time.Instant/now)))
+
+(defn- format-org-timestamp
+  "Format an ISO-8601 or 'YYYY-MM-DD HH:MM' string as an Org inactive
+  timestamp '[YYYY-MM-DD Day HH:MM]'. Falls back to wrapping the raw value."
+  [s]
+  (if (or (nil? s) (str/blank? s)) ""
+      (or (try (let [inst (java.time.Instant/parse s)
+                     zdt  (.atZone inst (java.time.ZoneId/systemDefault))]
+                 (str "[" (.format zdt org-ts-fmt) "]"))
+               (catch Exception _ nil))
+          (try (let [ldt (java.time.LocalDateTime/parse
+                          s (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm"))]
+                 (str "[" (.format ldt org-ts-fmt) "]"))
+               (catch Exception _ nil))
+          (str "[" s "]"))))
+
+(defn- parse-org-timestamp
+  "Parse '[YYYY-MM-DD Day HH:MM]' back to ISO-8601. Returns nil on failure."
+  [s]
+  (when s
+    (try
+      (when-let [[_ d t] (re-find #"\[(\d{4}-\d{2}-\d{2})(?:\s+\w+)?\s+(\d{2}:\d{2})\]" s)]
+        (-> (java.time.LocalDateTime/parse (str d "T" t))
+            (.atZone (java.time.ZoneId/systemDefault))
+            .toInstant str))
+      (catch Exception _ nil))))
+
+(defn- parse-org-state
+  "Parse a state.org body into {message-id {:flag ... :read-at ... :subject ...
+  :type ... :author ... :created-org ...}}. Tolerant: skips entries without a
+  :MESSAGE-ID: property."
+  [body]
+  (let [chunks (rest (str/split (str "\n" body) #"\n\* "))]
+    (reduce
+     (fn [acc chunk]
+       (let [[headline & rest-lines] (str/split-lines chunk)
+             [_ kw title tag] (re-find
+                               #"^(?:(TODO|STICKY|DONE)\s+)?(.+?)(?:\s+:([\w@:]+):)?\s*$"
+                               (or headline ""))
+             props (reduce (fn [m line]
+                             (if-let [[_ k v] (re-find #"^\s*:([A-Z][A-Z-]*):\s*(.*?)\s*$" line)]
+                               (assoc m k v) m))
+                           {} rest-lines)
+             mid (get props "MESSAGE-ID")]
+         (if mid
+           (assoc acc mid
+                  (cond-> {:flag (keyword->flag kw)
+                           :subject title}
+                    tag                   (assoc :type (first (str/split tag #":")))
+                    (get props "AUTHOR")  (assoc :author (get props "AUTHOR"))
+                    (get props "CREATED") (assoc :created-org (get props "CREATED"))
+                    (get props "READ-AT") (assoc :read-at (parse-org-timestamp
+                                                           (get props "READ-AT")))))
+           acc)))
+     {} chunks)))
+
+(defn- load-state []
+  (let [f (io/file state-org-path)]
+    (if (.exists f)
+      (try (parse-org-state (slurp f))
+           (catch Exception _ {}))
+      {})))
+
+(defn- type->tag
+  "Convert a report type ('patch', 'bug', ...) to ':patch:'. Returns nil for
+  empty/unsuitable values."
+  [t]
+  (when (and t (re-matches #"[a-zA-Z][\w-]*" (str t)))
+    (str ":" (str/lower-case t) ":")))
+
+(defn- render-entry [mid {:keys [flag read-at author subject type created-org created]}]
+  (let [kw (flag->keyword flag)
+        tag (type->tag type)]
+    (str "* " (when kw (str kw " ")) (or subject "(no subject)")
+         (when tag (str "    " tag)) "\n"
+         "  :PROPERTIES:\n"
+         "  :MESSAGE-ID: " mid "\n"
+         (when (or created-org created)
+           (str "  :CREATED:    " (or created-org (format-org-timestamp created)) "\n"))
+         (when author
+           (str "  :AUTHOR:     " author "\n"))
+         (when read-at
+           (str "  :READ-AT:    " (format-org-timestamp read-at) "\n"))
+         "  :END:\n")))
+
+(defn- render-org-state [state]
+  (let [entries (sort-by (fn [[_ v]] (or (:created-org v) "")) #(compare %2 %1) state)]
+    (str org-header
+         (str/join "\n" (map (fn [[mid v]] (render-entry mid v)) entries)))))
+
+(defn- save-state! [state]
+  (.mkdirs (.getParentFile (io/file state-org-path)))
+  (spit state-org-path (render-org-state state)))
+
+(defn- author-string [report]
+  (let [n (:from-name report) e (:from report)]
+    (cond (and n e (not (str/blank? n))) (str n " <" e ">")
+          e e
+          n n
+          :else nil)))
+
+(defn- enrich-entry
+  "Build/refresh metadata for a state entry from a report."
+  [existing report]
+  (cond-> (merge existing
+                 {:subject (:subject report)
+                  :type    (:type report)
+                  :author  (author-string report)})
+    (:date report)     (assoc :created (:date report))
+    ;; Don't overwrite a :created-org parsed back from the file unless we have
+    ;; a live :date — keeps round-trip stable when the report is gone.
+    (:date report)     (dissoc :created-org)))
+
+(defn- apply-transition
+  "Apply an action ∈ #{:read :unread :todo :sticky :done :clear} to the state.
+   :todo and :sticky toggle off when the current flag already matches.
+   :clear removes the entry entirely (back to implicit unread+unflagged).
+   Entries that end up with neither :flag nor :read-at are dissoc'd."
+  [state action mid report]
+  (if (= action :clear)
+    (dissoc state mid)
+    (let [base       (enrich-entry (or (get state mid) {}) report)
+          cur-flag   (:flag base)
+          new-entry  (case action
+                       :read   (assoc base :read-at (iso-now))
+                       :unread (dissoc base :read-at)
+                       :todo   (if (= cur-flag :todo)
+                                 (dissoc base :flag)
+                                 (assoc base :flag :todo))
+                       :sticky (if (= cur-flag :sticky)
+                                 (dissoc base :flag)
+                                 (assoc base :flag :sticky))
+                       :done   (assoc base :flag :done :read-at (iso-now)))]
+      (if (and (nil? (:flag new-entry)) (nil? (:read-at new-entry)))
+        (dissoc state mid)
+        (assoc state mid new-entry)))))
+
+(defn- visible-by-state?
+  "Show a report given the local state and the active view mode.
+   :default — hide read items unless flagged :todo/:sticky.
+   :todo    — only :todo.
+   :sticky  — :todo and :sticky.
+   :all     — everything."
+  [state report view]
+  (let [s     (get state (:message-id report))
+        flag  (:flag s)
+        read? (some? (:read-at s))]
+    (case view
+      :all     true
+      :todo    (= flag :todo)
+      :sticky  (#{:todo :sticky} flag)
+      :default (or (not read?) (#{:todo :sticky} flag)))))
+
+(defn- mark-prefix
+  "Single-character prefix for the leftmost column."
+  [state mid]
+  (case (:flag (get state mid))
+    :todo   "!"
+    :sticky "*"
+    " "))
+
+;; --- Session helpers (used by --internal-* subcommands) ---
+
+(declare display-type)
+(declare report->row)
+(declare column-headers)
+(declare normalize-skip-columns)
+(declare tabulate)
+
+(defn- write-session!
+  "Serialize a session as JSON. Keywords/sets are converted to strings/vectors;
+  read-session reverses these. JSON parses ~5x faster than EDN in babashka,
+  which matters because every fzf reload re-reads the session."
+  [path session]
+  (-> session
+      (update :view-mode   #(some-> % name))
+      (update :skip-columns #(when % (vec %)))
+      (update :types       #(when % (vec %)))
+      (update :sources     #(when % (vec %)))
+      (update :topics      #(when % (vec %)))
+      json/generate-string
+      (->> (spit path))))
+
+(defn- read-session [path]
+  (let [data (json/parse-string (slurp path) keyword)]
+    (-> data
+        (update :view-mode    #(some-> % keyword))
+        (update :skip-columns #(when % (set %)))
+        (update :types        #(when % (set %)))
+        (update :sources      #(when % (set %)))
+        (update :topics       #(when % (set %))))))
+
+(defn- session-visible
+  "Apply types/sources/topics filters and state visibility to the session's
+  reports. Returns the ordered visible reports."
+  [{:keys [reports types sources topics all-types all-sources all-topics view-mode]}
+   user-state]
+  (let [active-types   (or types (set all-types))
+        active-sources (or sources (set all-sources))
+        active-topics  (or topics (set all-topics))
+        view           (or view-mode :default)]
+    (->> reports
+         (filter #(contains? active-types (display-type (:type %))))
+         (filter #(or (empty? all-sources)
+                      (contains? active-sources (:source %))))
+         (filter #(or (empty? all-topics)
+                      (and (nil? topics) (nil? (:topic %)))
+                      (contains? active-topics (:topic %))))
+         (filter #(visible-by-state? user-state % view))
+         vec)))
+
+(defn- session-render
+  "Render the current visible list to aligned text rows. Returns the vector
+  produced by tabulate: [header-line row0 row1 ...]."
+  [session user-state]
+  (let [{:keys [show-type? show-src? skip-columns]} session
+        skip    (normalize-skip-columns skip-columns)
+        visible (session-visible session user-state)
+        header  (column-headers show-type? show-src? skip)
+        rows    (mapv #(report->row % show-type? show-src? skip user-state) visible)]
+    (tabulate (cons header rows))))
+
+(defn- do-internal-print!
+  "Internal entry point used by fzf reload bindings. Reads the session,
+  optionally applies a mark transition for the report at visible-line N,
+  and emits the (re-filtered) aligned list to stdout for fzf to consume.
+  Args: SESSION-PATH [N ACTION]."
+  [session-path n-str action-str]
+  (let [session (read-session session-path)]
+    (when (and n-str action-str)
+      (when-let [n (try (Long/parseLong n-str) (catch Exception _ nil))]
+        (let [pre-state   (load-state)
+              pre-visible (session-visible session pre-state)]
+          (when-let [target (nth pre-visible n nil)]
+            (save-state! (apply-transition pre-state
+                                           (keyword action-str)
+                                           (:message-id target)
+                                           target))))))
+    (let [aligned (session-render session (load-state))]
+      (println (str/join "\n" aligned)))))
+
+(declare pick-sort!)
+(declare pick-multi!)
+(declare sort-reports)
+
+(defn- do-internal-pick-sort! [session-path]
+  (let [session (read-session session-path)]
+    (when-let [idx (pick-sort!)]
+      (write-session! session-path
+                      (assoc session
+                             :reports  (sort-reports (:reports session) idx)
+                             :sort-idx idx)))))
+
+(defn- do-internal-pick-multi! [session-path which]
+  (let [session (read-session session-path)
+        all (case which
+              :types   (:all-types session)
+              :sources (:all-sources session)
+              :topics  (:all-topics session))]
+    (when (seq all)
+      (when-let [picked (pick-multi! (str (name which) "> ") all)]
+        (write-session! session-path (assoc session which picked))))))
+
+(defn- do-internal-clear-filters! [session-path]
+  (let [session (read-session session-path)]
+    (write-session! session-path
+                    (assoc session :types nil :sources nil :topics nil))))
+
+;; ---------------------------------------------------------------------------
 ;; Filtering
 ;; ---------------------------------------------------------------------------
 
@@ -409,7 +703,7 @@
 
 (def ^:private column-aliases
   "Short aliases for column names."
-  {"p" "priority", "d" "deadline", "#" "replies"})
+  {"p" "priority", "d" "deadline", "#" "replies", "!" "mark"})
 
 (defn- normalize-column [col]
   (get column-aliases col col))
@@ -419,10 +713,12 @@
 
 (defn- report-columns
   "Return a vector of column values for a report.
-  skip is a set of column names to hide (e.g. #{\"owner\" \"att\"})."
-  [report show-type? show-src? skip]
+  skip is a set of column names to hide (e.g. #{\"owner\" \"att\"}).
+  user-state is the loaded state.org map; nil means no mark column."
+  [report show-type? show-src? skip user-state]
   (let [skip (normalize-skip-columns skip)]
     (concat
+     (when-not (skip "mark")                     [(mark-prefix user-state (:message-id report))])
      (when (and show-type? (not (skip "type")))   [(display-type (:type report ""))])
      (when (and show-src?  (not (skip "source"))) [(truncate (:source report "") 10)])
      (when-not (skip "priority") [(case (:priority report 0) 3 "A" 2 "B" 1 "C" " ")])
@@ -441,8 +737,8 @@
 
 (defn- report->row
   "Format a report as a tab-separated row for fzf display."
-  [report show-type? show-src? skip]
-  (str/join "\t" (report-columns report show-type? show-src? skip)))
+  [report show-type? show-src? skip user-state]
+  (str/join "\t" (report-columns report show-type? show-src? skip user-state)))
 
 (defn- extra-str [report]
   (->> [(:source report)
@@ -464,8 +760,8 @@
 
 (defn- report->line
   "Format a report as a plain text line."
-  [report show-type? show-src? skip]
-  (let [line (str/join "  " (report-columns report show-type? show-src? skip))]
+  [report show-type? show-src? skip user-state]
+  (let [line (str/join "  " (report-columns report show-type? show-src? skip user-state))]
     (if-let [e (extra-str report)]
       (str line " " e)
       line)))
@@ -582,21 +878,39 @@
         0)))
 
 (def sort-options
-  [["date (newest)"    (fn [r] (- (parse-date-ms (:date-raw r))))               compare]
-   ["date (oldest)"    (fn [r] (parse-date-ms (:date-raw r)))                   compare]
-   ["priority (high)"  (fn [r] (- (:priority r 0)))                              compare]
-   ["status (active)"  (fn [r] (- (:score (report-flags+score r))))              compare]
-   ["deadline (closest)"  (fn [r] (or (days-until r :deadline) Integer/MAX_VALUE))          compare]
-   ["deadline (farthest)" (fn [r] (- (or (days-until r :deadline) Integer/MIN_VALUE)))       compare]
-   ["replies (most)"   (fn [r] (- (:replies r 0)))                               compare]
-   ["votes"            (fn [r] (let [[sum total] (parse-votes (:votes r))]
-                                 (if (pos? total) (- (/ (double sum) total)) 0.0)))
+  ;; Each key-fn is (fn [report user-state] -> sortable). user-state is ignored
+  ;; by all but the "marked" entry, which sorts :todo first, :sticky second,
+  ;; then everything else, with newest-first as tie-break.
+  [["date (newest)"    (fn [r _] (- (parse-date-ms (:date-raw r))))               compare]
+   ["date (oldest)"    (fn [r _] (parse-date-ms (:date-raw r)))                   compare]
+   ["priority (high)"  (fn [r _] (- (:priority r 0)))                              compare]
+   ["status (active)"  (fn [r _] (- (:score (report-flags+score r))))              compare]
+   ["deadline (closest)"  (fn [r _] (or (days-until r :deadline) Integer/MAX_VALUE))          compare]
+   ["deadline (farthest)" (fn [r _] (- (or (days-until r :deadline) Integer/MIN_VALUE)))       compare]
+   ["replies (most)"   (fn [r _] (- (:replies r 0)))                               compare]
+   ["votes"            (fn [r _] (let [[sum total] (parse-votes (:votes r))]
+                                   (if (pos? total) (- (/ (double sum) total)) 0.0)))
     compare]
-   ["activity (recent)" (fn [r] (- (parse-date-ms (:last-activity r))))           compare]
-   ["activity (oldest)" (fn [r] (parse-date-ms (:last-activity r)))               compare]
-   ["awaiting (recent)" (fn [r] (if (:awaiting r) (- (parse-date-ms (:date-raw r))) Long/MAX_VALUE)) compare]
-   ["awaiting (oldest)" (fn [r] (if (:awaiting r) (parse-date-ms (:date-raw r)) Long/MAX_VALUE))     compare]
-   ["type"             (fn [r] (display-type (:type r "")))                       compare]])
+   ["activity (recent)" (fn [r _] (- (parse-date-ms (:last-activity r))))           compare]
+   ["activity (oldest)" (fn [r _] (parse-date-ms (:last-activity r)))               compare]
+   ["awaiting (recent)" (fn [r _] (if (:awaiting r) (- (parse-date-ms (:date-raw r))) Long/MAX_VALUE)) compare]
+   ["awaiting (oldest)" (fn [r _] (if (:awaiting r) (parse-date-ms (:date-raw r)) Long/MAX_VALUE))     compare]
+   ["type"              (fn [r _] (display-type (:type r "")))                      compare]
+   ["marked (todo, sticky first)"
+    (fn [r state]
+      (let [flag (:flag (get state (:message-id r)))
+            ;; 0 = :todo, 1 = :sticky, 2 = anything else.
+            group (case flag :todo 0 :sticky 1 2)]
+        [group (- (parse-date-ms (:date-raw r)))]))
+    compare]])
+
+(def ^:private picker-window-args
+  ;; Inside tmux 3.3+, fzf can open in a popup overlaying the current pane,
+  ;; so the main list stays visible behind. Outside tmux, fall back to an
+  ;; inline 40% bottom strip.
+  (if (System/getenv "TMUX")
+    ["--tmux" "bottom,40%"]
+    ["--height" "40%"]))
 
 (defn- pick-sort!
   "Let user pick a sort order via fzf. Returns index or nil."
@@ -604,16 +918,18 @@
   (let [labels (mapv first sort-options)
         input  (str/join "\n" labels)
         {:keys [exit out]}
-        (process/shell {:in input :out :string :continue true}
-                       "fzf" "--prompt" "sort by> " "--no-sort" "--reverse")]
+        (apply process/shell {:in input :out :string :continue true}
+               (concat ["fzf" "--prompt" "sort by> " "--no-sort" "--reverse"]
+                       picker-window-args))]
     (when (zero? exit)
       (let [selected (str/trim out)
             idx (.indexOf ^java.util.List labels selected)]
         (when (>= idx 0) idx)))))
 
 (defn- sort-reports [reports sort-idx]
-  (let [[_ key-fn cmp] (nth sort-options sort-idx)]
-    (sort-by key-fn cmp reports)))
+  (let [user-state     (load-state)
+        [_ key-fn cmp] (nth sort-options sort-idx)]
+    (sort-by #(key-fn % user-state) cmp reports)))
 
 (defn- pick-multi!
   "Let user pick from `all` via fzf multi-select.
@@ -621,9 +937,10 @@
   [prompt all]
   (let [input (str/join "\n" (cons "[all]" all))
         {:keys [exit out]}
-        (process/shell {:in input :out :string :continue true}
-                       "fzf" "--multi" "--prompt" prompt
-                       "--no-sort" "--reverse")]
+        (apply process/shell {:in input :out :string :continue true}
+               (concat ["fzf" "--multi" "--prompt" prompt
+                        "--no-sort" "--reverse"]
+                       picker-window-args))]
     (when (zero? exit)
       (let [selected (set (remove str/blank? (str/split-lines (str/trim out))))]
         (if (contains? selected "[all]")
@@ -653,6 +970,10 @@
              "  Ctrl-t                     Filter by topic"
              "  Ctrl-x                     Remove all filters"
              "  Ctrl-u                     Update cache and reload"
+             "  ,                          Toggle :todo (column shows '!')"
+             "  *                          Toggle :sticky (column shows '*')"
+             "  ;                          Mark as :read (hide from default view)"
+             "  _                          Clear all marks on item"
              "  Ctrl-h                     Show this help"]))
 
 (defn- page-cmd-str
@@ -690,7 +1011,7 @@
                            "}"
                            ""]))
     (.append sb (str "if [ \"$ACTION\" = \"help\" ]; then\n"
-                     "  cat <<'BONE_HELP' | less -RX\n"
+                     "  cat <<'BONE_HELP' | less -R\n"
                      usage-text "\n"
                      "BONE_HELP\n"
                      "  exit 0\n"
@@ -758,7 +1079,11 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private loop-keys
-  #{"ctrl-s" "ctrl-r" "ctrl-b" "ctrl-t" "ctrl-x" "ctrl-u" "ctrl-/"})
+  ;; Keys that exit fzf for Clojure-side handling. Pickers and marks use
+  ;; execute+reload bindings instead — they don't appear here.
+  #{"ctrl-u" "ctrl-/"})
+
+(def ^:private expect-keys (str/join "," loop-keys))
 
 (defn- filter-visible
   "Apply active type/source/topic filters to reports."
@@ -795,6 +1120,7 @@
   [show-type? show-src? skip]
   (str/join "\t"
             (concat
+             (when-not (skip "mark")                     ["!"])
              (when (and show-type? (not (skip "type")))   ["Type"])
              (when (and show-src?  (not (skip "source"))) ["Source"])
              (when-not (skip "priority") ["P"])
@@ -811,14 +1137,14 @@
   "Show related reports for the selected report in a nested fzf.
   Resolves related message-ids against the mid-index to display full report rows.
   Supports the same keybindings as the main fzf view."
-  [selected-report mid-index config show-type? show-src? skip]
+  [selected-report mid-index config show-type? show-src? skip user-state]
   (when-let [rels (seq (:related selected-report))]
     (let [resolved (keep #(get mid-index (:message-id %)) rels)]
       (when (seq resolved)
         (let [resolved (vec resolved)
           skip   (normalize-skip-columns skip)
           header (column-headers show-type? show-src? skip)
-          rows     (mapv #(report->row % show-type? show-src? skip) resolved)
+          rows     (mapv #(report->row % show-type? show-src? skip user-state) resolved)
           aligned  (tabulate (cons header rows))
           input    (str/join "\n" aligned)
           dispatch-path (str (System/getProperty "java.io.tmpdir")
@@ -843,118 +1169,165 @@
           (.delete (io/file dispatch-path)))))))))
 
 
+(defn- mark-and-save!
+  "Apply a transition for the given report and persist state.org."
+  [action selected-report]
+  (when (and selected-report (:message-id selected-report))
+    (let [user-state (load-state)]
+      (save-state! (apply-transition user-state action
+                                     (:message-id selected-report)
+                                     selected-report)))))
+
 (defn- handle-fzf-key
-  "Handle an fzf --expect key. Returns updated state."
-  [key-used state all-types all-sources all-topics reload-fn
-   & {:keys [selected-report sel-idx mid-index config show-type? show-src? skip-columns]}]
-  (let [{:keys [reports sort-idx]} state
-        state (dissoc state :cursor-pos)]
-    (case key-used
-      "ctrl-s" (if-let [idx (pick-sort!)]
-                 (assoc state :reports (sort-reports reports idx) :sort-idx idx)
-                 state)
-      "ctrl-r" (if-let [new-types (pick-multi! "types> " all-types)]
-                 (assoc state :types new-types)
-                 state)
-      "ctrl-b" (if (empty? all-sources)
-                 (do (println "  No source information available.") state)
-                 (if-let [new-sources (pick-multi! "sources> " all-sources)]
-                   (assoc state :sources new-sources)
-                   state))
-      "ctrl-t" (if (empty? all-topics)
-                 (do (println "  No topic information available.") state)
-                 (if-let [new-topics (pick-multi! "topics> " all-topics)]
-                   (assoc state :topics new-topics)
-                   state))
-      "ctrl-x" (assoc state :types nil :sources nil :topics nil)
-      "ctrl-/" (do (if (and selected-report (seq (:related selected-report)))
-                     (or (show-related! selected-report mid-index config
-                                        show-type? show-src? skip-columns)
-                         (println "  No related reports in loaded data."))
-                     (println "  No related reports."))
-                   (cond-> state sel-idx (assoc :cursor-pos sel-idx)))
-      "ctrl-u" (if reload-fn
-                 (do (println "  Updating cache...")
-                     (update-sources-cache!)
-                     (let [new-reports (reload-fn)]
-                       (assoc state
-                              :reports (sort-reports new-reports sort-idx)
-                              :types nil :sources nil :topics nil)))
-                 (do (println "  Cache update not available for this data source.")
-                     state))
-      ;; enter/ctrl-o/ctrl-v handled by execute, or esc
-      state)))
+  "Handle an fzf --expect key (only ctrl-u and ctrl-/). Mutates the session
+  file in place if needed; returns the cursor-pos to restore on next fzf
+  start, or nil to reset."
+  [key-used session-path
+   & {:keys [selected-report sel-idx config show-type? show-src? skip-columns
+             reload-fn]}]
+  (case key-used
+    "ctrl-/"
+    (do (if (and selected-report (seq (:related selected-report)))
+          (let [session (read-session session-path)
+                mid-index (into {} (keep (fn [r]
+                                           (when-let [mid (:message-id r)]
+                                             [mid r])))
+                                (:reports session))]
+            (or (show-related! selected-report mid-index config
+                               show-type? show-src? skip-columns (load-state))
+                (println "  No related reports in loaded data.")))
+          (println "  No related reports."))
+        sel-idx)
+    "ctrl-u"
+    (do (if reload-fn
+          (do (println "  Updating cache...")
+              (update-sources-cache!)
+              (let [session     (read-session session-path)
+                    new-reports (reload-fn)]
+                (write-session! session-path
+                                (assoc session
+                                       :reports     (sort-reports new-reports
+                                                                  (:sort-idx session 0))
+                                       :all-types   (vec (distinct
+                                                          (map (comp display-type :type)
+                                                               new-reports)))
+                                       :all-sources (vec (distinct (keep :source new-reports)))
+                                       :all-topics  (vec (distinct (keep :topic new-reports)))
+                                       :types nil :sources nil :topics nil))))
+          (println "  Cache update not available for this data source."))
+        nil)
+    nil))
+
+(def ^:private bone-script-path
+  (or (System/getProperty "babashka.file") *file*))
 
 (defn display-reports!
   "Display reports interactively with fzf, or as plain text lines.
   reload-fn, when non-nil, is called on ctrl-u to refresh the cache and
-  return a new {:reports ...} map."
-  [config reports & {:keys [reload-fn skip-columns]}]
+  return a new {:reports ...} map.
+  view-mode ∈ #{:default :todo :sticky :all} controls state-based visibility."
+  [config reports & {:keys [reload-fn skip-columns view-mode]}]
   (let [show-type?   true
         show-src?    (multiple-sources? reports)
         skip-columns (normalize-skip-columns (or skip-columns (:skip-columns config)))
-        dispatch-path (str (System/getProperty "java.io.tmpdir")
-                           "/bone-dispatch-" (System/currentTimeMillis) ".sh")]
+        view-mode    (or view-mode :default)
+        ts            (System/currentTimeMillis)
+        dispatch-path (str (System/getProperty "java.io.tmpdir") "/bone-dispatch-" ts ".sh")
+        session-path  (str (System/getProperty "java.io.tmpdir") "/bone-session-"  ts ".edn")
+        bb-bone       (str "bb " (shell-escape bone-script-path) " ")
+        sess          (shell-escape session-path)
+        mark-bind     (fn [key action]
+                        (str key ":reload-sync(" bb-bone "--internal-print "
+                             sess " {n} " action ")"))
+        picker-bind   (fn [key sub]
+                        ;; execute-silent keeps fzf from releasing its screen
+                        ;; so the main list stays drawn while the tmux popup
+                        ;; (or fallback inline picker) overlays it.
+                        (str key ":execute-silent(" bb-bone sub " " sess
+                             ")+reload-sync(" bb-bone "--internal-print " sess ")"))
+        clear-bind    (str "ctrl-x:execute-silent(" bb-bone "--internal-clear-filters "
+                           sess ")+reload-sync(" bb-bone "--internal-print " sess ")")]
     (if (empty? reports)
       (println "No reports found.")
       (if (fzf-available?)
         (try
-          (loop [{:keys [reports sort-idx] :as state}
-                 {:reports reports :sort-idx 0 :types nil :sources nil :topics nil}]
-            (let [mid-index (into {} (keep (fn [r]
-                                             (when-let [mid (:message-id r)]
-                                               [mid r])))
-                                     reports)
-                  all-types   (vec (distinct (map (comp display-type :type) reports)))
-                    all-sources (vec (distinct (keep :source reports)))
-                    all-topics  (vec (distinct (keep :topic reports)))
-                    visible     (filter-visible reports state all-types all-sources all-topics)
-                    header      (column-headers show-type? show-src? skip-columns)
-                    rows        (mapv #(report->row % show-type? show-src? skip-columns) visible)
-                    aligned     (tabulate (cons header rows))
-                    input       (str/join "\n" aligned)
-                    _           (write-dispatch-script! dispatch-path config visible)
-                    cursor-pos  (:cursor-pos state)
-                    fzf-args    (cond-> ["fzf" "--header-lines" "1"
-                                         "--header" (status-header sort-idx state
-                                                                   all-types all-sources all-topics)
-                                         "--no-sort" "--reverse" "--no-hscroll"
-                                         "--prompt" "report> "
-                                         "--expect" (str/join "," loop-keys)
-                                         "--bind" (str "enter:execute(" dispatch-path " open {n})")
-                                         "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
-                                         "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
-                                         "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
-                                         "--bind" "ctrl-n:down"
-                                         "--bind" "ctrl-p:up"]
-                                  cursor-pos (conj "--bind" (str "load:pos(" (inc cursor-pos) ")")))
-                    {:keys [exit out]}
-                    (apply process/shell {:in input :out :string :continue true} fzf-args)]
-                (let [lines      (when (seq (str/trim out))
-                                   (str/split-lines (str/trim out)))
-                      key-used   (first lines)
-                      selected   (second lines)
-                      sel-idx    (when selected
-                                   (some (fn [i] (when (= (nth aligned (inc i)) selected) i))
-                                         (range (count visible))))
-                      sel-report (when sel-idx (nth visible sel-idx))]
-                  (when (or (zero? exit) (loop-keys key-used))
-                    (recur (handle-fzf-key key-used state
-                                           all-types all-sources all-topics
-                                           reload-fn
-                                           :selected-report sel-report
-                                           :sel-idx sel-idx
-                                           :mid-index mid-index
-                                           :config config
-                                           :show-type? show-type?
-                                           :show-src? show-src?
-                                           :skip-columns skip-columns))))))
+          ;; Build initial session.
+          (let [all-types   (vec (distinct (map (comp display-type :type) reports)))
+                all-sources (vec (distinct (keep :source reports)))
+                all-topics  (vec (distinct (keep :topic reports)))
+                sorted      (sort-reports reports 0)]
+            (write-session! session-path
+                            {:reports      sorted
+                             :sort-idx     0
+                             :types        nil :sources nil :topics nil
+                             :all-types    all-types
+                             :all-sources  all-sources
+                             :all-topics   all-topics
+                             :show-type?   show-type?
+                             :show-src?    show-src?
+                             :skip-columns skip-columns
+                             :view-mode    view-mode}))
+          (loop [cursor-pos nil]
+            (let [user-state  (load-state)
+                  session     (read-session session-path)
+                  visible     (session-visible session user-state)
+                  aligned     (session-render session user-state)
+                  input       (str/join "\n" aligned)
+                  _           (write-dispatch-script! dispatch-path config visible)
+                  fzf-args    (cond-> ["fzf" "--header-lines" "1"
+                                       "--header" (status-header
+                                                   (:sort-idx session 0) session
+                                                   (:all-types session)
+                                                   (:all-sources session)
+                                                   (:all-topics session))
+                                       "--no-sort" "--reverse" "--no-hscroll"
+                                       "--prompt" "report> "
+                                       "--expect" expect-keys
+                                       "--bind" (str "enter:execute(" dispatch-path " open {n})")
+                                       "--bind" (str "ctrl-o:execute-silent(" dispatch-path " browse {n})")
+                                       "--bind" (str "ctrl-v:execute(" dispatch-path " view {n})")
+                                       "--bind" (str "ctrl-h:execute(" dispatch-path " help)")
+                                       "--bind" "ctrl-n:down"
+                                       "--bind" "ctrl-p:up"
+                                       "--bind" (mark-bind "," "todo")
+                                       "--bind" (mark-bind "*" "sticky")
+                                       "--bind" (mark-bind ";" "read")
+                                       "--bind" (mark-bind "_" "clear")
+                                       "--bind" (picker-bind "ctrl-s" "--internal-pick-sort")
+                                       "--bind" (picker-bind "ctrl-r" "--internal-pick-types")
+                                       "--bind" (picker-bind "ctrl-b" "--internal-pick-sources")
+                                       "--bind" (picker-bind "ctrl-t" "--internal-pick-topics")
+                                       "--bind" clear-bind]
+                                cursor-pos (conj "--bind" (str "load:pos(" (inc cursor-pos) ")")))
+                  {:keys [exit out]}
+                  (apply process/shell {:in input :out :string :continue true} fzf-args)
+                  lines    (when (seq (str/trim out))
+                             (str/split-lines (str/trim out)))
+                  key-used (first lines)
+                  selected (second lines)
+                  sel-idx  (when selected
+                             (some (fn [i] (when (= (nth aligned (inc i)) selected) i))
+                                   (range (count visible))))
+                  sel-report (when sel-idx (nth visible sel-idx))]
+              (when (and (or (zero? exit) (loop-keys key-used))
+                         (loop-keys key-used))
+                (recur (handle-fzf-key key-used session-path
+                                       :selected-report sel-report
+                                       :sel-idx sel-idx
+                                       :config config
+                                       :show-type? show-type?
+                                       :show-src? show-src?
+                                       :skip-columns skip-columns
+                                       :reload-fn reload-fn)))))
           (finally
-            (.delete (io/file dispatch-path))))
+            (.delete (io/file dispatch-path))
+            (.delete (io/file session-path))))
         ;; Plain text fallback
-        (do (println (count reports) "report(s):\n")
-            (doseq [r reports]
-              (println " " (report->line r show-type? show-src? skip-columns))))))))
+        (let [user-state (load-state)
+              visible    (filter #(visible-by-state? user-state % view-mode) reports)]
+          (println (count visible) "report(s):\n")
+          (doseq [r visible]
+            (println " " (report->line r show-type? show-src? skip-columns user-state))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Report (triage summary)
@@ -1104,6 +1477,9 @@
    :mine          {:alias :m :coerce :boolean :desc "Show only your reports"}
    :closed        {:alias :c :coerce :boolean :desc "Include closed reports"}
    :skip-columns  {:alias :S :coerce :string :desc "Hide columns (comma-separated)" :ref "<COLS>"}
+   :todo          {:alias :T :coerce :boolean :desc "Show only items marked :todo"}
+   :sticky        {:alias :Y :coerce :boolean :desc "Show items marked :todo or :sticky"}
+   :all           {:alias :A :coerce :boolean :desc "Show all items including :read and :done"}
    :list-sources  {:alias :l :coerce :boolean :desc "List configured sources"}
    :add-source    {:alias :a :coerce :string :desc "Add a source" :ref "<URL>"}
    :remove-source {:alias :r :coerce :string :desc "Remove a source" :ref "<URL>"}
@@ -1119,7 +1495,14 @@
   (println)
   (println "Options:")
   (println (cli/format-opts {:spec cli-spec}))
-  (println "  -               Read reports from stdin"))
+  (println "  -               Read reports from stdin")
+  (println)
+  (println "Local marks (kept in ~/.config/bone/state.org):")
+  (println "  ,  toggle :todo (always shown, '!' prefix)")
+  (println "  *  toggle :sticky (always shown, '*' prefix)")
+  (println "  ;  mark as :read (hidden from default view)")
+  (println "  _  clear all marks")
+  (println "  Ctrl-h inside fzf shows the full keymap."))
 
 (defn- parse-opts
   "Parse CLI options from an argument sequence. Returns [cmd opts]."
@@ -1182,6 +1565,23 @@
     opts))
 
 (defn -main [& args]
+  ;; Internal subcommands — invoked by fzf bindings (reload/execute). Each
+  ;; reads/updates the session file and exits.
+  (case (first args)
+    "--internal-print"
+    (do (do-internal-print! (nth args 1) (nth args 2 nil) (nth args 3 nil))
+        (System/exit 0))
+    "--internal-pick-sort"
+    (do (do-internal-pick-sort! (nth args 1)) (System/exit 0))
+    "--internal-pick-types"
+    (do (do-internal-pick-multi! (nth args 1) :types) (System/exit 0))
+    "--internal-pick-sources"
+    (do (do-internal-pick-multi! (nth args 1) :sources) (System/exit 0))
+    "--internal-pick-topics"
+    (do (do-internal-pick-multi! (nth args 1) :topics) (System/exit 0))
+    "--internal-clear-filters"
+    (do (do-internal-clear-filters! (nth args 1)) (System/exit 0))
+    nil)
   (let [args       (seq (or (seq args) *command-line-args*))
         config     (load-config)
         [cmd opts] (parse-opts args)]
@@ -1199,10 +1599,15 @@
       :else                  (let [opts      (enrich-opts opts config)
                                     reports   (filter-reports (:reports (load-data opts)) opts)
                                     reload-fn (when (nil? (:data-src opts))
-                                                #(filter-reports (:reports (load-from-sources)) opts))]
+                                                #(filter-reports (:reports (load-from-sources)) opts))
+                                    view-mode (cond (:all opts)    :all
+                                                    (:todo opts)   :todo
+                                                    (:sticky opts) :sticky
+                                                    :else          :default)]
                                 (display-reports! config reports
                                                   :reload-fn reload-fn
-                                                  :skip-columns (:skip-columns opts))))))
+                                                  :skip-columns (:skip-columns opts)
+                                                  :view-mode view-mode)))))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (try
