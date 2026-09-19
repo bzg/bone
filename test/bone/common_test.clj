@@ -500,6 +500,26 @@
   (is (false? (common/ics-file? nil))))
 
 ;; ---------------------------------------------------------------------------
+;; text-attachment?
+;; ---------------------------------------------------------------------------
+
+(deftest text-attachment-test
+  (is (true?  (common/text-attachment? {:attachment/content-type "text/plain"
+                                        :attachment/filename     "backtrace.txt"})))
+  (is (true?  (common/text-attachment? {:attachment/content-type "Text/X-Log; charset=utf-8"
+                                        :attachment/filename     "build.log"})))
+  ;; ingest asks about the content type alone
+  (is (true?  (common/text-attachment? {:attachment/content-type "text/plain"})))
+  (is (false? (common/text-attachment? {:attachment/content-type "application/pdf"
+                                        :attachment/filename     "doc.pdf"})))
+  (is (false? (common/text-attachment? {:attachment/filename "notes.txt"})))
+  (testing "a patch sent as text/plain is a patch, not also a text attachment"
+    (is (false? (common/text-attachment? {:attachment/content-type "text/plain"
+                                          :attachment/filename     "0001-fix.patch"})))
+    (is (false? (common/text-attachment? {:attachment/content-type "text/plain; charset=us-ascii"
+                                          :attachment/filename     "changes.DIFF"})))))
+
+;; ---------------------------------------------------------------------------
 ;; fold-ics-line
 ;; ---------------------------------------------------------------------------
 

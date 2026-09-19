@@ -152,10 +152,14 @@
   #{"text/plain" "text/x-log"})
 
 (defn text-attachment?
-  "True if an attachment has a text/plain or text/x-log content type."
+  "True if an attachment has a text/plain or text/x-log content type
+  and is not a patch: a .patch/.diff file is published as a patch
+  whatever its content type (some mailers send it as text/plain), and
+  must not show up a second time as a text attachment."
   [att]
   (boolean (when-let [ct (:attachment/content-type att)]
-             (text-content-types (-> ct str/lower-case (str/split #";") first str/trim)))))
+             (and (not (patch-file? (:attachment/filename att)))
+                  (text-content-types (-> ct str/lower-case (str/split #";") first str/trim))))))
 
 (defn has-ics-attachment?
   "True if any attachment has a .ics filename."

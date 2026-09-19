@@ -571,18 +571,19 @@
 (defn- report-attachment-files
   "Build :events and :texts fields from lazy-fetched attachment data."
   [report att-email]
-  (let [h (mid-hash (:report/message-id report))]
+  (let [h     (mid-hash (:report/message-id report))
+        texts (when (:report/has-text-attachments report)
+                (mapv (fn [att] {:file (str h "/" (attachment-basename att))})
+                      (filter #(and (text-attachment? %) (:attachment/data %))
+                              (:email/attachments @att-email))))]
     (cond-> {}
       (and (= :announcement (:report/type report))
            (:report/has-ics report))
       (assoc :events
              (mapv (fn [f] {:file (str h "/" (:basename f))})
                    (event-ics-files report @att-email)))
-      (:report/has-text-attachments report)
-      (assoc :texts
-             (mapv (fn [att] {:file (str h "/" (attachment-basename att))})
-                   (filter #(text-attachment? %)
-                           (:email/attachments @att-email)))))))
+      (seq texts)
+      (assoc :texts texts))))
 
 ;; ---------------------------------------------------------------------------
 ;; Export context -- bound for the duration of one export run.
