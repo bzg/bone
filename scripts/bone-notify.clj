@@ -24,7 +24,7 @@
          '[clojure.edn :as edn]
          '[clojure.java.io :as io]
          '[taoensso.timbre :as log]
-         '[bone.common :refer [get-header format-date format-date-iso
+         '[bone.common :refer [get-header-values format-date format-date-iso
                                report-priority report-status report-descendant-count
                                load-config db-path build-source-map
                                bone-schema mid-hash
@@ -164,7 +164,7 @@
         replies (report-descendant-count report)
         deadline (:report/deadline-value report)
         expiry   (:report/expiry-value report)
-        arch    (get-header (:email/headers-edn email) "Archived-At")]
+        arch    (first (get-header-values (:email/headers-edn email) "Archived-At"))]
     (str "  [" type "] " subject "\n"
          "    from: " from " -- " date
          " -- priority:" pri " replies:" replies

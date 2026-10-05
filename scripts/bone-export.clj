@@ -413,8 +413,12 @@
 ;; report->map helpers above the context block already use it.
 (declare get-header-cached)
 
-(defn- archived-at [email]
-  (get-header-cached (:email/headers-edn email) "Archived-At"))
+(defn- archived-at
+  "Archived-At header value; the first one when the header is repeated
+  (get-header then returns a vector)."
+  [email]
+  (let [v (get-header-cached (:email/headers-edn email) "Archived-At")]
+    (if (vector? v) (first v) v)))
 
 (defn- raw-message-id
   "Original-case Message-Id from stored headers; nil for synthetic emails.
