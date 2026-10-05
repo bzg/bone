@@ -532,11 +532,16 @@
        :complete (= (count patches) (:series/expected series))
        :closed   (some? (:series/closed series))})))
 
+(defn- patch-basename
+  "Return the basename of a :report/patches entry (handles absolute paths)."
+  [p]
+  (.getName (io/file (:patch/filename p))))
+
 (defn- report-patch-fields [report]
   (when (seq (:report/patches report))
     (let [h (mid-hash (:report/message-id report))]
       (mapv (fn [p]
-              (cond-> {:file   (str h "/" (:patch/filename p))
+              (cond-> {:file   (str h "/" (patch-basename p))
                        :source (name (:patch/source p))}
                 (:patch/author p)  (assoc :author  (:patch/author p))
                 (:patch/subject p) (assoc :subject (:patch/subject p))
@@ -1211,11 +1216,6 @@
         (spit filename (json/generate-string entries {:pretty true}))
         (log/info "Wrote" (count entries) "report(s) with votes to" filename))
       (delete-stale-file! out-dir "votes.json"))))
-
-(defn- patch-basename
-  "Return the basename of a :report/patches entry (handles absolute paths)."
-  [p]
-  (.getName (io/file (:patch/filename p))))
 
 (defn dump-patches!
   "Export patch files for a single source.
