@@ -677,7 +677,7 @@ consume them.
 
 Running =bb export all= generates, for each source:
 
-- HTML pages: =index.html= (reports table), =stats.html= (charts),
+- HTML pages: =index.html= (reports table), =data.html= (charts),
   =docs.html= (user docs).
 - Full exports: =all.json=, =all.org=, =all.xml=.
 - Per-type feeds: =bugs.json=, =patches.xml=, =requests.org=, etc.
