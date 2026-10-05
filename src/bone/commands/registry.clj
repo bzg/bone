@@ -121,8 +121,8 @@
 (def commands-by-id (into {} (map (juxt :id identity)) commands))
 
 ;; Attr lookup for bareword commands -- one bareword per attr, so this
-;; mapping is unambiguous (unlike the broader :attr-to-trigger mapping
-;; which would collide for attrs that also have a -by line form).
+;; mapping is unambiguous (a mapping over all commands would collide
+;; for attrs that also have a -by line form).
 (def attr->word-cmd
   (into {} (map (juxt :attr identity)) word-commands))
 
@@ -144,18 +144,17 @@
               (map :id))
         commands))
 
-;; State attrs that support the `-by` proxy form (e.g. Acked-by:
-;; bob@x credits Bob instead of the sender).  The credited address
-;; lives in `address-attrs`.
-(def proxy-state-attrs
-  [:report/acked :report/owned :report/closed :report/urgent :report/important])
-
+;; Bareword state attrs and the attr caching the credited address:
+;; the sender, or the designated address of a `-by` line (Acked-by:
+;; bob@x credits Bob instead of the sender).
 (def address-attrs
   {:report/acked     :report/acked-address
    :report/owned     :report/owned-address
    :report/closed    :report/closed-address
    :report/urgent    :report/urgent-address
    :report/important :report/important-address})
+
+(def proxy-state-attrs (vec (keys address-attrs)))
 
 ;; Report attrs tracked as refs to the pose-email:
 ;;   {ref-attr paired-value-attr-or-nil}

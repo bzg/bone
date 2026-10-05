@@ -220,14 +220,6 @@
                               "(?:;[^:\r\n]*)?:(.*)$"))]
       (some-> (re-find re (unfold-ics block)) second str/trim))))
 
-(defn vevent-uid [block] (ics-property block "UID"))
-
-(defn vevent-recurrence-id
-  "RECURRENCE-ID of a VEVENT block, or nil.  Distinguishes the override of
-  a single occurrence from the recurring master that shares its UID."
-  [block]
-  (ics-property block "RECURRENCE-ID"))
-
 (defn vevent-sequence
   "SEQUENCE number of a VEVENT block (0 when absent or unparseable)."
   [block]
@@ -242,8 +234,8 @@
   so they are deduplicated only when byte-for-byte identical -- the
   normalized block text itself is the key."
   [vevents]
-  (let [vkey (fn [v] (if-let [uid (vevent-uid v)]
-                       [uid (vevent-recurrence-id v)]
+  (let [vkey (fn [v] (if-let [uid (ics-property v "UID")]
+                       [uid (ics-property v "RECURRENCE-ID")]
                        v))
         best (reduce (fn [m v]
                        (let [k (vkey v)]
@@ -942,11 +934,6 @@
 ;; :to nil = the tenure is currently active. :order encodes the config order
 ;; used as a tie-break when computing the lead maintainer.
 
-(defn active-tenures
-  "Return tenures that are currently active (no :to)."
-  [tenures]
-  (filter #(nil? (:to %)) tenures))
-
 (defn- tenure-sort-key [t]
   [(if-let [^Date f (:from t)] (.getTime f) 0)
    (or (:order t) Long/MAX_VALUE)
@@ -957,7 +944,7 @@
   with the earliest :from (nil sorts first), tie-broken by :order then email.
   Returns nil if no active tenure."
   [tenures]
-  (:email (first (sort-by tenure-sort-key (active-tenures tenures)))))
+  (:email (first (sort-by tenure-sort-key (filter #(nil? (:to %)) tenures)))))
 
 (defn lead-maintainer?
   "True if addr is the current lead maintainer for this source."
@@ -1064,18 +1051,17 @@
   "Load ./mailmap.edn (shape `{\"Canonical Name\" [emails...]}`) and return
   `{email-lc -> canonical-name}` (inverted, flat).  Returns `{}` if
   the file is absent.  Export-only -- never read on the ingest path."
-  ([] (load-mailmap "mailmap.edn"))
-  ([path]
-   (let [f (io/file path)]
-     (if (.exists f)
-       (let [m (edn/read-string (slurp f))]
-         (reduce-kv
-          (fn [acc nm emails]
-            (reduce (fn [a e] (assoc a (str/lower-case e) nm))
-                    acc
-                    emails))
-          {} m))
-       {}))))
+  []
+  (let [f (io/file "mailmap.edn")]
+    (if (.exists f)
+      (let [m (edn/read-string (slurp f))]
+        (reduce-kv
+         (fn [acc nm emails]
+           (reduce (fn [a e] (assoc a (str/lower-case e) nm))
+                   acc
+                   emails))
+         {} m))
+      {})))
 
 (defn db-path
   "Resolve the Datalevin DB path: prefer :db {:path ...} from the
@@ -1284,7 +1270,7 @@
 (defn parse-cli-args
   "Parse common CLI flags into a map.
   Recognises: -o/--output, -n/--source, -p/--min-priority, -s/--min-status,
-  --json, --dir, --force, --html-theme, --html-page-size, --html-columns,
+  --json, --dir, --force, --index-only, --html-theme, --html-page-size, --html-columns,
   --html-columns-sort, --closed-retention, --topics-filter.
   Any leading non-flag token is captured as :format.
   Warns when a valued flag is missing its argument or followed by another flag."

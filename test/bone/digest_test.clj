@@ -29,6 +29,16 @@
               (.setTimeZone (TimeZone/getTimeZone "UTC")))]
     (.parse fmt s)))
 
+(def ^:private loose-line-patterns
+  (:line-patterns (commands/build-source-commands {})))
+
+(defn- detect-lines
+  "`commands/detect-lines` with the loose-mode default line patterns."
+  ([report-type body-text] (detect-lines report-type body-text nil nil))
+  ([report-type body-text overrides email-date]
+   (commands/detect-lines report-type body-text overrides email-date
+                          loose-line-patterns)))
+
 (defn- get-report
   "Pull a report by message-id, including the qualified-relation reverse refs.
   After the qualified-links refactor: :report/superseded-by(-target) and
@@ -633,67 +643,67 @@
         ;; --- Directive unit tests ---
         (testing "detect-lines"
           (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}]
-                 (commands/detect-lines :bug "Acked-by: a@b.com\n")))
+                 (detect-lines :bug "Acked-by: a@b.com\n")))
           (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (commands/detect-lines :bug "Owned-by: x@y.com\nIgnore this line\n")))
+                 (detect-lines :bug "Owned-by: x@y.com\nIgnore this line\n")))
           (is (= [{:action :unset :attr :report/acked :scope :user :id :unacked}]
-                 (commands/detect-lines :bug "Not acked\n")))
+                 (detect-lines :bug "Not acked\n")))
           (is (= [{:action :unset :attr :report/urgent :scope :user :id :unurgent}]
-                 (commands/detect-lines :bug "Not urgent\n")))
+                 (detect-lines :bug "Not urgent\n")))
           (is (= [{:action :unset :attr :report/important :scope :user :id :unimportant}]
-                 (commands/detect-lines :bug "Not important\n")))
+                 (detect-lines :bug "Not important\n")))
           (is (= [{:action :set-deadline :date (parse-date-iso "2026-06-15") :scope :user :id :deadline}]
-                 (commands/detect-lines :bug "Deadline: 2026-06-15\n")))
+                 (detect-lines :bug "Deadline: 2026-06-15\n")))
           (is (= [{:action :unset-deadline :scope :user :id :undeadline}]
-                 (commands/detect-lines :bug "No deadline\n")))
+                 (detect-lines :bug "No deadline\n")))
           (is (= [{:action :unset-topic :scope :user :id :untopic}]
-                 (commands/detect-lines :bug "No topic\n")))
+                 (detect-lines :bug "No topic\n")))
           (is (= [{:action :set-topic :topic "my-topic" :scope :user :id :topic}]
-                 (commands/detect-lines :bug "Topic: my-topic\n")))
+                 (detect-lines :bug "Topic: my-topic\n")))
           (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}
                   {:action :set-deadline :date (parse-date-iso "2026-07-01") :scope :user :id :deadline}
                   {:action :set-topic :topic "urgent-fix" :scope :user :id :topic}]
-                 (commands/detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopic: urgent-fix\n")))
+                 (detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopic: urgent-fix\n")))
           (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (commands/detect-lines :bug "Thanks for the report.\nOwned-by: x@y.com\nWill look into it.\n")))
+                 (detect-lines :bug "Thanks for the report.\nOwned-by: x@y.com\nWill look into it.\n")))
           ;; RFC 5322 "Display Name <addr>" format
           (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (commands/detect-lines :bug "Owned-by: Some User <x@y.com>\n")))
+                 (detect-lines :bug "Owned-by: Some User <x@y.com>\n")))
           ;; Bracketed address without display name: angle brackets must be stripped
           (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (commands/detect-lines :bug "Owned-by: <x@y.com>\n")))
+                 (detect-lines :bug "Owned-by: <x@y.com>\n")))
           ;; Address must contain a dot in the domain part
-          (is (= [] (commands/detect-lines :bug "Owned-by: alice@localhost\n")))
+          (is (= [] (detect-lines :bug "Owned-by: alice@localhost\n")))
           ;; Address must not contain stray @ characters
-          (is (= [] (commands/detect-lines :bug "Owned-by: alice@@host.com\n")))
-          (is (= [] (commands/detect-lines :bug "Just a normal reply.\n")))
-          (is (nil? (commands/detect-lines :bug nil)))
+          (is (= [] (detect-lines :bug "Owned-by: alice@@host.com\n")))
+          (is (= [] (detect-lines :bug "Just a normal reply.\n")))
+          (is (nil? (detect-lines :bug nil)))
           ;; Expiry directive
           (is (= [{:action :set-expiry :date (parse-date-iso "2026-09-01") :scope :user :id :expiry}]
-                 (commands/detect-lines :bug "Expiry: 2026-09-01\n")))
+                 (detect-lines :bug "Expiry: 2026-09-01\n")))
           (is (= [{:action :unset-expiry :scope :user :id :unexpiry}]
-                 (commands/detect-lines :bug "No expiry\n")))
+                 (detect-lines :bug "No expiry\n")))
           ;; "Expiry: deadline" is no longer a valid command (use :inactive-after :deadline in config)
-          (is (= [] (commands/detect-lines :bug "Expiry: deadline\n")))
+          (is (= [] (detect-lines :bug "Expiry: deadline\n")))
           ;; Deadline with duration (relative to email date)
           (let [email-date (parse-date-iso "2026-01-10")
-                result (commands/detect-lines :bug "Deadline: 30d\n" nil email-date)]
+                result (detect-lines :bug "Deadline: 30d\n" nil email-date)]
             (is (= 1 (count result)))
             (is (= :set-deadline (:action (first result))))
             (is (= (parse-date-iso "2026-02-09") (:date (first result)))))
           ;; Expiry with duration (relative to email date)
           (let [email-date (parse-date-iso "2026-01-03")
-                result (commands/detect-lines :bug "Expiry: 3d\n" nil email-date)]
+                result (detect-lines :bug "Expiry: 3d\n" nil email-date)]
             (is (= 1 (count result)))
             (is (= :set-expiry (:action (first result))))
             (is (= (parse-date-iso "2026-01-06") (:date (first result)))))
           ;; Compound duration
           (let [email-date (parse-date-iso "2026-01-01")
-                result (commands/detect-lines :bug "Expiry: 1m 2w\n" nil email-date)]
+                result (detect-lines :bug "Expiry: 1m 2w\n" nil email-date)]
             (is (= 1 (count result)))
             (is (= (parse-date-iso "2026-02-14") (:date (first result)))))
           ;; Expiry now applies to all report types, including announcements
-          (let [result (commands/detect-lines :announcement "Expiry: 2026-09-01\n")]
+          (let [result (detect-lines :announcement "Expiry: 2026-09-01\n")]
             (is (= 1 (count result)))
             (is (= :set-expiry (:action (first result))))
             (is (= (parse-date-iso "2026-09-01") (:date (first result))))))
@@ -867,36 +877,36 @@
         ;; --- Directive unit tests for supersede ---
         (testing "detect-lines: Superseded-by with angle brackets"
           (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (commands/detect-lines :bug "Superseded-by: <msg@example.com>\n"))))
+                 (detect-lines :bug "Superseded-by: <msg@example.com>\n"))))
 
         (testing "detect-lines: Superseded-by tolerates an URL prefix"
           (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (commands/detect-lines :bug "Superseded-by: https://orgmode.org/list/<msg@example.com>\n"))))
+                 (detect-lines :bug "Superseded-by: https://orgmode.org/list/<msg@example.com>\n"))))
 
         (testing "detect-lines: Superseded-by accepts a public-inbox URL"
           (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (commands/detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com/\n")))
+                 (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com/\n")))
           (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (commands/detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com\n"))))
+                 (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com\n"))))
 
         (testing "detect-lines: Superseded-by accepts a bare message-id"
           (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (commands/detect-lines :bug "Superseded-by: msg@example.com\n"))))
+                 (detect-lines :bug "Superseded-by: msg@example.com\n"))))
 
         (testing "detect-lines: Superseded-by rejects URLs where the @ segment is non-terminal"
-          (is (= [] (commands/detect-lines :bug "Superseded-by: https://example.com/foo@bar/baz.html\n"))))
+          (is (= [] (detect-lines :bug "Superseded-by: https://example.com/foo@bar/baz.html\n"))))
 
         (testing "detect-lines: Not superseded-by"
           (is (= [{:action :unset-superseded :attr :rel/supersedes-from :scope :user :id :unsuperseded-by :target-message-id "<msg@example.com>"}]
-                 (commands/detect-lines :bug "Not superseded-by: <msg@example.com>\n"))))
+                 (detect-lines :bug "Not superseded-by: <msg@example.com>\n"))))
 
         (testing "detect-lines: Supersedes (symmetric of Superseded-by)"
           (is (= [{:action :set-supersedes :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :supersedes}]
-                 (commands/detect-lines :bug "Supersedes: <msg@example.com>\n"))))
+                 (detect-lines :bug "Supersedes: <msg@example.com>\n"))))
 
         (testing "detect-lines: Not supersedes"
           (is (= [{:action :unset-supersedes :attr :rel/supersedes-to :scope :user :id :unsupersedes :target-message-id "<msg@example.com>"}]
-                 (commands/detect-lines :bug "Not supersedes: <msg@example.com>\n"))))
+                 (detect-lines :bug "Not supersedes: <msg@example.com>\n"))))
 
         (testing "resolve-commands: superseded-by"
           (is (= {:set {} :unset #{} :superseded-by "<mid@host>"}
