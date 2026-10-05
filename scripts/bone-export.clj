@@ -1922,4 +1922,6 @@
                      (nil? topics-filter))
             (save-last-export! run-started)))))
     (finally
-      (d/close conn))))
+      ;; A dead pod makes d/close throw "Stream closed", which would
+      ;; replace the exception that actually aborted the export.
+      (try (d/close conn) (catch Exception _ nil)))))
