@@ -99,12 +99,13 @@
        (into #{})))
 
 (defn- all-emails
-  "All email entities as {:eid :source :from :date :mid}."
+  "All email entities as {:eid :source :from :date :mid}.  :from is \"\"
+  when the email has no parseable author address."
   [db]
   (->> (dq '[:find ?e ?src ?from ?date ?mid
              :where
              [?e :email/source ?src]
-             [?e :email/author-address ?from]
+             [(get-else $ ?e :email/author-address "") ?from]
              [?e :email/date-sent ?date]
              [?e :email/message-id ?mid]]
            db)
@@ -143,7 +144,7 @@
     (log/info "Orphan retention cutoff:" cutoff-date)
     (->> emails
          (remove #(contains? protected (:eid %)))
-         (remove #(contains? maintainers (str/lower-case (or (:from %) ""))))
+         (remove #(contains? maintainers (str/lower-case (:from %))))
          (filter source-ok?)
          ;; :email/date-sent is required by the all-emails query.
          (filter #(.before ^java.util.Date (:date %) cutoff-date))
