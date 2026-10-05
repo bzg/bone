@@ -351,3 +351,42 @@
     (testing "paths and dots are single topics"
       (is (= "net/mlx5e" (topic "[BUG] net/mlx5e: crash")))
       (is (= "org-demo.html" (topic "[BUG] org-demo.html: bad aside"))))))
+
+;; ---------------------------------------------------------------------------
+;; Inline patch extraction
+;; ---------------------------------------------------------------------------
+
+(deftest extract-inline-patch-test
+  (let [diff ["diff --git a/lisp/x.el b/lisp/x.el"
+              "--- a/lisp/x.el"
+              "+++ b/lisp/x.el"
+              "@@ -1,2 +1,2 @@"
+              " (defun x ()"
+              "-  1)"
+              "+  2)"]
+        body (fn [& parts] (str/join "\n" (apply concat parts)))]
+    (testing "the patch starts at its first line"
+      (is (= (str/join "\n" diff)
+             (detect/extract-inline-patch (body ["Quick fix below." ""] diff)))))
+    (testing "what follows the diff is not part of the patch"
+      (is (= (str/join "\n" diff)
+             (detect/extract-inline-patch
+              (body ["Quick fix below." ""] diff
+                    ["" "WDYT?"
+                     "_______________________________________________"
+                     "Some mailing list"
+                     "https://lists.example.org/listinfo/some"])))))
+    (testing "a blank context line inside the diff is kept"
+      (is (= (str/join "\n" (concat diff ["" " (provide 'x)"]))
+             (detect/extract-inline-patch
+              (body diff ["" " (provide 'x)" "" "Thanks."])))))
+    (testing "a rename without hunks is kept whole"
+      (let [rename ["diff --git a/old.el b/new.el"
+                    "similarity index 100%"
+                    "rename from old.el"
+                    "rename to new.el"]]
+        (is (= (str/join "\n" rename)
+               (detect/extract-inline-patch (body rename ["" "Thanks."]))))))
+    (testing "no patch, no result"
+      (is (nil? (detect/extract-inline-patch "Just prose.")))
+      (is (nil? (detect/extract-inline-patch nil))))))

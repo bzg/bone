@@ -236,15 +236,28 @@
 (def ^:private inline-patch-start-patterns
   [#"^From [0-9a-f]{40} " #"^diff --git " #"^--- a/"])
 
-(defn extract-inline-patch [body-text]
+(def ^:private diff-line-re
+  "A line that can end a patch: hunk content or header, or one of
+  git's extended headers for a change without hunks (rename, mode,
+  binary)."
+  #"^(?:[ +\-@\\]|diff --git |index [0-9a-f]|(?:old|new) mode |(?:new|deleted) file mode |similarity index |rename (?:from|to) |Binary files |GIT binary patch)")
+
+(defn extract-inline-patch
+  "The patch pasted in `body-text`, or nil: from its first line to its
+  last diff line.  Whatever follows the diff (a closing remark, a
+  mailing-list footer) is not part of the patch."
+  [body-text]
   (when body-text
-    (let [lines (str/split-lines body-text)
+    (let [lines (vec (str/split-lines body-text))
           start (some (fn [[i line]]
                         (when (some #(re-find % line) inline-patch-start-patterns)
                           i))
                       (map-indexed vector lines))]
       (when start
-        (str/join "\n" (subvec (vec lines) start))))))
+        (let [end (or (some #(when (re-find diff-line-re (lines %)) (inc %))
+                            (range (dec (count lines)) (dec start) -1))
+                      (count lines))]
+          (str/join "\n" (subvec lines start end)))))))
 
 (defn- patch-entity [filename source text]
   (let [fp-meta (parse-format-patch-headers text)]
