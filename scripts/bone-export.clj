@@ -149,7 +149,9 @@
   [db source-name ^java.util.Date since]
   (boolean
    (some (fn [^java.util.Date dt] (.after dt since))
-         (mapcat (juxt :from :to) (get-tenures db source-name)))))
+         ;; An active tenure has no :to, an initial one no :from.
+         (keep identity
+               (mapcat (juxt :from :to) (get-tenures db source-name))))))
 
 (defn- preserve-shell!
   "When `regen?` is false, copy a previously-exported top-level file from
