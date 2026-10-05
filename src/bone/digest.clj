@@ -26,13 +26,11 @@
 ;; ---------------------------------------------------------------------------
 
 (def email-pull-pattern
-  '[:db/id :email/id :email/source :email/subject :email/message-id
+  '[:db/id :email/source :email/subject :email/message-id
     :email/in-reply-to :email/references :email/ancestor-mid-hashes
     :email/pending-thread?
     :email/author-address :email/author-name
-    :email/from-address :email/from-name
-    :email/date-sent :email/ingested-at
-    :email/digested-at
+    :email/date-sent :email/digested-at
     :email/body-text :email/body-text-from-html :email/headers-edn
     {:email/attachments [:attachment/filename :attachment/content-type :attachment/data]}])
 
@@ -51,30 +49,55 @@
 
 (defn- reports-by-hash
   "Reports matched by the mid-hash `h`: {:root report-eid-or-nil
-  :encl #{eids}} -- :root when `h` is a report's own message-id,
-  :encl the reports counting that email among their descendants.
-  Resolution via bone.lookup, descendant join eid-bound (see the
-  bone.lookup ns docstring)."
+  :encl #{eids} :email-eid eid-or-nil} -- :root when `h` is a report's
+  own message-id, :encl the reports counting that email among their
+  descendants, :email-eid the stored email itself.  Resolution via
+  bone.lookup, descendant join eid-bound (see the bone.lookup ns
+  docstring)."
   [db h]
   (let [as-root (lookup/report-eid-by-hash db h)
         email-e (lookup/email-eid-by-hash db h)
         as-desc (when email-e
                   (d/q '[:find [?r ...] :in $ ?e :where [?r :report/descendants ?e]]
                        db email-e))]
-    {:root as-root :encl (set as-desc)}))
+    {:root as-root :encl (set as-desc) :email-eid email-e}))
 
 (defn- email-ancestors
-  "Ancestor mids of the stored email `eid` (root first).  Used by
-  `thread-lookup` and `nearest-root-report` to splice through
-  stored-but-pending intermediates."
+  "Ancestor mids of the stored email `eid` (root first)."
   [db eid]
-  (let [pulled (d/pull db [:email/references :email/in-reply-to] eid)]
-    (common/ancestor-mids-from (:email/references pulled)
-                               (:email/in-reply-to pulled))))
+  (ancestor-mids (d/pull db [:email/references :email/in-reply-to] eid)))
 
-(def ^:private thread-lookup-max-splices
-  "Upper bound on transitive ancestor splicing per `thread-lookup` call."
+(def ^:private max-ancestor-splices
+  "Upper bound on transitive ancestor splicing per `walk-ancestors` call."
   32)
+
+(defn- walk-ancestors
+  "Fold `step` over `email`'s ancestor mids, nearest first, each mid
+  visited once.  `(step acc mid)` returns `[acc' splice-eid]`, or a
+  `reduced` value to stop the walk.  A non-nil `splice-eid` (a stored
+  email) gets its own ancestors spliced into the walk, at most
+  `max-ancestor-splices` times, so stored intermediates carrying no
+  report don't cut the thread."
+  [db email init step]
+  (loop [stack   (vec (ancestor-mids email))  ; root-first; peek = nearest
+         seen    #{}
+         splices 0
+         acc     init]
+    (if-let [mid (peek stack)]
+      (if (contains? seen mid)
+        (recur (pop stack) seen splices acc)
+        (let [res (step acc mid)]
+          (if (reduced? res)
+            @res
+            (let [[acc' splice-eid] res
+                  ancestors (when (and splice-eid
+                                       (< splices max-ancestor-splices))
+                              (email-ancestors db splice-eid))]
+              (recur (into (pop stack) ancestors)
+                     (conj seen mid)
+                     (if ancestors (inc splices) splices)
+                     acc')))))
+      acc)))
 
 (defn thread-step
   "Pure arbitration of one ancestor mid during `thread-lookup`, walked
@@ -87,7 +110,7 @@
   merely encloses it -- else the undecided set, which belongs to a
   closer thread.  Returns the next state."
   [{:keys [nearest cand] :as state} {:keys [root encl]}]
-  (let [eids     (cond-> (or encl #{}) root (conj root))
+  (let [eids     (cond-> encl root (conj root))
         nearest' (or nearest
                      (cond
                        (and root (or (nil? cand) (contains? cand root))) #{root}
@@ -113,31 +136,18 @@
   by any ancestor, :nearest is the closest match (nil if none), both
   arbitrated by the pure `thread-step`/`finalize-thread-lookup`.
   When an ancestor mid matches a stored email with no report, that
-  email's own ancestors are spliced into the walk (bounded by
-  `thread-lookup-max-splices`) so pending intermediates don't orphan
+  email's own ancestors are spliced into the walk (see
+  `walk-ancestors`) so pending intermediates don't orphan
   descendants."
   [email db]
-  (loop [stack   (vec (ancestor-mids email))  ; root-first; peek = nearest
-         seen    #{}
-         splices 0
-         state   {:all #{} :nearest nil :cand nil}]
-    (if (empty? stack)
-      (finalize-thread-lookup state)
-      (let [mid    (peek stack)
-            stack' (pop stack)]
-        (if (contains? seen mid)
-          (recur stack' seen splices state)
-          (let [seen'  (conj seen mid)
-                h      (common/mid-hash mid)
-                {:keys [root encl] :as hit} (reports-by-hash db h)
-                state' (thread-step state hit)]
-            (if (and (nil? root) (empty? encl)
-                     (< splices thread-lookup-max-splices))
-              (if-let [ancestors (some->> (lookup/email-eid-by-hash db h)
-                                          (email-ancestors db))]
-                (recur (into stack' ancestors) seen' (inc splices) state')
-                (recur stack' seen' splices state'))
-              (recur stack' seen' splices state'))))))))
+  (finalize-thread-lookup
+   (walk-ancestors
+    db email {:all #{} :nearest nil :cand nil}
+    (fn [state mid]
+      (let [{:keys [root encl email-eid] :as hit}
+            (reports-by-hash db (common/mid-hash mid))]
+        [(thread-step state hit)
+         (when (and (nil? root) (empty? encl)) email-eid)])))))
 
 ;; ---------------------------------------------------------------------------
 ;; DB operations
@@ -147,7 +157,7 @@
   "Record a participant on `source-name`; with `:contributor? true`,
   stamp :participant/contributor-since on first patch (idempotent)."
   [conn source-name from-addr from-name date-sent & {:keys [contributor?]}]
-  (when (and source-name from-addr)
+  (when from-addr
     (let [k     (str (common/slugify source-name) ":" (str/lower-case from-addr))
           db    (d/db conn)
           e     (d/entid db [:participant/key k])
@@ -237,53 +247,48 @@
   parents: :related-to to every parent, plus :resolves when the new
   report is a patch and the parent a bug/request."
   [conn new-report-eid new-report-type email parent-report-eids]
-  (when (seq parent-report-eids)
-    (let [db      (d/db conn)
-          parents (d/q '[:find ?r ?t :in $ [?r ...]
-                         :where [?r :report/type ?t]]
-                       db (vec parent-report-eids))
-          pose!   (fn [parent-eid kind]
-                    (rel/pose-from-email! conn email {:from-eid new-report-eid
-                                                      :to-eid   parent-eid
-                                                      :kind     kind}))]
-      (doseq [[parent-eid parent-type] parents]
-        ;; :related-to (neutral, all type combinations)
-        (when (rel/valid-pose? :related-to new-report-eid parent-eid
-                               new-report-type parent-type)
-          (pose! parent-eid :related-to))
-        ;; :resolves (patch -> bug/request only)
-        (when (and (= :patch new-report-type)
-                   (rel/valid-pose? :resolves new-report-eid parent-eid
-                                    new-report-type parent-type))
-          (pose! parent-eid :resolves))))))
+  (let [parents (d/q '[:find ?r ?t :in $ [?r ...]
+                       :where [?r :report/type ?t]]
+                     (d/db conn) (vec parent-report-eids))
+        pose!   (fn [parent-eid kind]
+                  (rel/pose-from-email! conn email {:from-eid new-report-eid
+                                                    :to-eid   parent-eid
+                                                    :kind     kind}))]
+    (doseq [[parent-eid parent-type] parents]
+      ;; :related-to (neutral, all type combinations)
+      (when (rel/valid-pose? :related-to new-report-eid parent-eid
+                             new-report-type parent-type)
+        (pose! parent-eid :related-to))
+      ;; :resolves (patch -> bug/request only)
+      (when (rel/valid-pose? :resolves new-report-eid parent-eid
+                             new-report-type parent-type)
+        (pose! parent-eid :resolves)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Auto-close logic
 ;; ---------------------------------------------------------------------------
 
 (defn- close-changes-for-release! [conn version release-email release-report-eid]
-  (when (and version (not (str/blank? version)))
-    (let [db      (d/db conn)
-          open-chgs (d/q '[:find [?r ...] :in $ ?ver
-                           :where
-                           [?r :report/type :change] [?r :report/version ?ver]
-                           (not [?r :report/closed _])]
-                         db version)
-          release-email-eid (:db/id release-email)]
-      (when (seq open-chgs)
-        (let [close-tx (mapv (fn [r] {:db/id r
-                                      :report/closed release-email-eid
-                                      :report/close-reason :resolved})
-                             open-chgs)]
-          (d/transact! conn close-tx))
-        (doseq [chg-rid open-chgs]
-          (rel/pose-from-email! conn release-email
-                                {:from-eid release-report-eid
-                                 :to-eid   chg-rid
-                                 :kind     :related-to}))
-        (tracking/bump-report-updated! conn open-chgs)
-        (log/info "Auto-closed" (count open-chgs)
-                  "[CHG" version "] (superseded by release)")))))
+  (let [open-chgs (d/q '[:find [?r ...] :in $ ?ver
+                         :where
+                         [?r :report/type :change] [?r :report/version ?ver]
+                         (not [?r :report/closed _])]
+                       (d/db conn) version)
+        release-email-eid (:db/id release-email)]
+    (when (seq open-chgs)
+      (let [close-tx (mapv (fn [r] {:db/id r
+                                    :report/closed release-email-eid
+                                    :report/close-reason :resolved})
+                           open-chgs)]
+        (d/transact! conn close-tx))
+      (doseq [chg-rid open-chgs]
+        (rel/pose-from-email! conn release-email
+                              {:from-eid release-report-eid
+                               :to-eid   chg-rid
+                               :kind     :related-to}))
+      (tracking/bump-report-updated! conn open-chgs)
+      (log/info "Auto-closed" (count open-chgs)
+                "[CHG" version "] (superseded by release)"))))
 
 (defn- parse-version-number [v]
   (when v (when-let [[_ n] (re-find #"^v(\d+)$" v)] (parse-long n))))
@@ -310,26 +315,14 @@
          db report-eid (str/lower-case from-addr))))
 
 (defn- ancestor-mid-closure
-  "All ancestor mids reachable from `email` (splicing through stored
-  intermediates, like `thread-lookup`), plus its own message-id."
+  "All ancestor mids reachable from `email` (splicing through every
+  stored intermediate), plus its own message-id."
   [db email]
-  (loop [stack   (vec (ancestor-mids email))
-         seen    #{}
-         splices 0]
-    (if (empty? stack)
-      (conj seen (:email/message-id email))
-      (let [mid    (peek stack)
-            stack' (pop stack)]
-        (if (contains? seen mid)
-          (recur stack' seen splices)
-          (let [seen'     (conj seen mid)
-                h         (common/mid-hash mid)
-                ancestors (when (< splices thread-lookup-max-splices)
-                            (some->> (lookup/email-eid-by-hash db h)
-                                     (email-ancestors db)))]
-            (recur (if ancestors (into stack' ancestors) stack')
-                   seen'
-                   (if ancestors (inc splices) splices))))))))
+  (walk-ancestors
+   db email #{(:email/message-id email)}
+   (fn [mids mid]
+     [(conj mids mid)
+      (lookup/email-eid-by-hash db (common/mid-hash mid))])))
 
 (defn- shares-common-ancestor?
   "True when the candidate report's own email and `email-closure` (the
@@ -616,7 +609,7 @@
   (let [body-text (common/email-body-text email)
         src-cmds  (commands/build-source-commands source-cfg)
         strict?   (:strict-syntax? src-cmds)]
-    (when (and from-addr body-text source-name via-channel?)
+    (when (and from-addr body-text via-channel?)
       (roles/apply-role-controls! conn rroles source-name from-addr
                                   body-text (:email/date-sent email) strict?))))
 
@@ -625,7 +618,7 @@
   (the report wasn't created) so notifications render the subject.
   Audience :maintainers so the lead sees the attempt."
   [source-name from-addr email report-info reason]
-  (when (and from-addr source-name)
+  (when from-addr
     (commands/record-failure!
      {:source     source-name
       :from-addr  from-addr
@@ -647,7 +640,7 @@
   `replay?` is true when a pending email is processed again: the
   denial was recorded on arrival and must not be recorded twice."
   [conn eid message-id email from-addr source-name source-cfg via-channel? rroles replay?]
-  (let [subj-patterns (detect/resolve-labels (or source-cfg {}))
+  (let [subj-patterns (detect/resolve-labels source-cfg)
         allowed-types (:report-types source-cfg)
         report-info   (detect/detect-report email subj-patterns allowed-types)
         decision      (creation-decision report-info from-addr via-channel? rroles email
@@ -816,20 +809,13 @@
   crosses (e.g. the cover letter of a patch).  Ancestors of
   stored-but-reportless intermediates are spliced in (bounded)."
   [db email]
-  (loop [stack   (vec (ancestor-mids email))  ; root-first; peek = nearest
-         seen    #{}
-         splices 0]
-    (when-let [mid (peek stack)]
-      (let [stack' (pop stack)]
-        (if (contains? seen mid)
-          (recur stack' seen splices)
-          (let [h (common/mid-hash mid)]
-            (or (lookup/report-eid-by-hash db h)
-                (let [ancestors (when (< splices thread-lookup-max-splices)
-                                  (some->> (lookup/email-eid-by-hash db h)
-                                           (email-ancestors db)))]
-                  (recur (into stack' ancestors) (conj seen mid)
-                         (if ancestors (inc splices) splices))))))))))
+  (walk-ancestors
+   db email nil
+   (fn [_ mid]
+     (let [h (common/mid-hash mid)]
+       (if-let [rid (lookup/report-eid-by-hash db h)]
+         (reduced rid)
+         [nil (lookup/email-eid-by-hash db h)])))))
 
 (defn- collect-trailers!
   "Store the git person trailers of a pure reply on the patch report
@@ -1042,7 +1028,8 @@
                     ;; Recover the report-eid of an interrupted pass
                     ;; (pending retry, or crash between the pending retract
                     ;; above and Phase 4) so the Phase 4 hooks still run.
-                    ;; Safe: process-email! only runs on undigested emails.
+                    ;; Safe: process-email! only runs on emails whose
+                    ;; Phase 4 has not completed.
                     report-eid   (or report-eid
                                      (lookup/report-eid db message-id))]
 
@@ -1121,8 +1108,7 @@
       (log/info "Flushing" (count pendings)
                 "stale pending email(s) older than" max-age-days "day(s)"))
     ;; Keep the pending flag set: process-email! retracts it itself, which
-    ;; both enables its report-eid recovery (was-pending?) and leaves the
-    ;; email retriable at the next flush if processing throws.
+    ;; leaves the email retriable at the next flush if processing throws.
     (doseq [eid pendings
             :let [email (d/pull (d/db conn) email-pull-pattern eid)]
             ;; A rescue triggered by an earlier iteration may have already

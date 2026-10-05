@@ -103,25 +103,24 @@
 (defn detect-patch-subject
   "Match [PATCH] in a subject (strict, no Re: stripping)."
   [subject patterns]
-  (when subject
-    (when-let [m (re-find (:patch patterns) subject)]
-      (let [inner   (extract-inner m)
-            seq-m   (when inner (re-find patch-seq-pattern inner))
-            seq-str (when seq-m (first seq-m))
-            no-seq  (when inner
-                      (str/trim (if seq-str
-                                  (subs inner 0 (- (count inner) (count seq-str)))
-                                  inner)))
-            tokens  (when (and no-seq (not (str/blank? no-seq))) (str/split no-seq #"\s+"))
-            version (when (and tokens (re-matches patch-version-pattern (last tokens)))
-                      (last tokens))
-            topic-tokens (if version (butlast tokens) tokens)
-            topic   (or (when (seq topic-tokens) (str/join " " topic-tokens))
-                        (extract-colon-topic subject))]
-        (cond-> {:type :patch :patch-source #{:subject}}
-          seq-str (assoc :patch-seq seq-str)
-          version (assoc :version version)
-          topic   (assoc :topic topic))))))
+  (when-let [m (re-find (:patch patterns) subject)]
+    (let [inner   (extract-inner m)
+          seq-m   (when inner (re-find patch-seq-pattern inner))
+          seq-str (when seq-m (first seq-m))
+          no-seq  (when inner
+                    (str/trim (if seq-str
+                                (subs inner 0 (- (count inner) (count seq-str)))
+                                inner)))
+          tokens  (when (and no-seq (not (str/blank? no-seq))) (str/split no-seq #"\s+"))
+          version (when (and tokens (re-matches patch-version-pattern (last tokens)))
+                    (last tokens))
+          topic-tokens (if version (butlast tokens) tokens)
+          topic   (or (when (seq topic-tokens) (str/join " " topic-tokens))
+                      (extract-colon-topic subject))]
+      (cond-> {:type :patch :patch-source #{:subject}}
+        seq-str (assoc :patch-seq seq-str)
+        version (assoc :version version)
+        topic   (assoc :topic topic)))))
 
 ;; Attachment & inline patch detection
 
@@ -136,7 +135,7 @@
   [email]
   (has-patch-attachment? (:email/attachments email)))
 
-(def ^:private format-patch-start #"(?m)^From [0-9a-f]{40} ")
+(def ^:private format-patch-start #"^From [0-9a-f]{40} ")
 
 (defn parse-format-patch-headers
   "Parse `git format-patch` headers (`From`, `Subject`, `Date`) from

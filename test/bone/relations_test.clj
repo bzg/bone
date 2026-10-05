@@ -17,12 +17,9 @@
       "symmetric kind is its own inverse"))
 
 (deftest canonicalize-test
-  (testing "asymmetric kinds preserve order"
-    (is (= [10 20] (r/canonicalize :resolves 10 20)))
-    (is (= [20 10] (r/canonicalize :resolves 20 10))))
-  (testing "symmetric :related-to sorts ascending by eid"
-    (is (= [10 20] (r/canonicalize :related-to 10 20)))
-    (is (= [10 20] (r/canonicalize :related-to 20 10)))))
+  (testing "sorts ascending by eid"
+    (is (= [10 20] (r/canonicalize 10 20)))
+    (is (= [10 20] (r/canonicalize 20 10)))))
 
 (deftest valid-pose?-test
   (testing ":duplicates requires same type, both actionable"

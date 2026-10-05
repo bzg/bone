@@ -3,8 +3,8 @@
 ;; License-Filename: LICENSES/EPL-2.0.txt
 
 (ns bone.relations
-  "Qualified relations between reports.  Pure helpers (no datalevin)
-  for IDs, validation, tx-builders, then IO helpers that pose/retract.
+  "Qualified relations between reports.  Pure helpers first (IDs,
+  validation, tx-builders), then IO helpers that pose/retract.
   Asymmetric kinds (:resolves, :supersedes, :duplicates) store two
   datoms (one per direction); :related-to stores one canonicalized
   by ascending eid order.  See bone-schema.edn for the :rel/* attrs."
@@ -20,6 +20,8 @@
     :related-to})
 
 (def asymmetric-kinds
+  "Kinds stored as two datoms; they also require both ends to be
+  actionable (:bug, :patch, :request)."
   #{:resolves :resolved-by
     :supersedes :superseded-by
     :duplicates :duplicated-by})
@@ -39,12 +41,6 @@
   "Kinds requiring (:report/type from) == (:report/type to)."
   #{:supersedes :superseded-by :duplicates :duplicated-by})
 
-(def report-typed-kinds
-  "Kinds requiring both ends to be actionable (:bug, :patch, :request)."
-  #{:resolves :resolved-by
-    :supersedes :superseded-by
-    :duplicates :duplicated-by})
-
 (def actionable-types #{:bug :patch :request})
 
 (defn make-relation-id
@@ -52,11 +48,10 @@
   (str from-eid ":" (name kind) ":" to-eid))
 
 (defn canonicalize
-  "Symmetric kinds: [from to] in ascending eid order (so reciprocal
-  poses produce the same :rel/id).  Asymmetric kinds pass through."
-  [kind from-eid to-eid]
-  (if (and (symmetric-kinds kind)
-           (neg? (compare to-eid from-eid)))
+  "[from to] in ascending eid order, so reciprocal poses of a
+  symmetric kind produce the same :rel/id."
+  [from-eid to-eid]
+  (if (neg? (compare to-eid from-eid))
     [to-eid from-eid]
     [from-eid to-eid]))
 
@@ -74,7 +69,7 @@
   (boolean
    (and (all-kinds kind)
         (not= source-eid target-eid)
-        (or (not (report-typed-kinds kind))
+        (or (not (asymmetric-kinds kind))
             (and (actionable-types source-type)
                  (actionable-types target-type)))
         (or (not (same-type-kinds kind))
@@ -101,7 +96,7 @@
                           :rel/active?  true}
                    value (assoc :rel/value value)))]
     (if (symmetric-kinds kind)
-      (let [[f t] (canonicalize kind from-eid to-eid)]
+      (let [[f t] (canonicalize from-eid to-eid)]
         [(mk-rel f t kind)])
       [(mk-rel from-eid to-eid kind)
        (mk-rel to-eid from-eid (inverse-kinds kind))])))
@@ -118,7 +113,7 @@
   or single canonical id for a symmetric one."
   [kind from-eid to-eid]
   (if (symmetric-kinds kind)
-    (let [[f t] (canonicalize kind from-eid to-eid)]
+    (let [[f t] (canonicalize from-eid to-eid)]
       [(make-relation-id f kind t)])
     [(make-relation-id from-eid kind to-eid)
      (make-relation-id to-eid (inverse-kinds kind) from-eid)]))
@@ -188,21 +183,14 @@
   "Retract a (from, kind, to) relation if active.  Symmetric kinds
   accept either direction.  Returns true when anything was retracted."
   [conn from-eid kind to-eid retracted-by-email-eid]
-  (let [db        (d/db conn)
-        ids       (paired-relation-ids kind from-eid to-eid)
-        active    (filterv (fn [rid]
-                             (when-let [e (d/entid db [:rel/id rid])]
-                               (= true (d/q '[:find ?a . :in $ ?e
-                                              :where [?e :rel/active? ?a]]
-                                            db e))))
-                           ids)]
+  (let [db     (d/db conn)
+        active (filterv #(:rel/active? (d/pull db [:rel/active?] %))
+                        (keep #(d/entid db [:rel/id %])
+                              (paired-relation-ids kind from-eid to-eid)))]
     (when (seq active)
-      (let [tx (mapcat (fn [rid]
-                         (retract-tx (d/entid db [:rel/id rid])
-                                     retracted-by-email-eid))
-                       active)]
-        (d/transact! conn (vec tx))
-        true))))
+      (d/transact! conn (into [] (mapcat #(retract-tx % retracted-by-email-eid))
+                              active))
+      true)))
 
 (defn active-inverse-relation
   "Eid of an active relation of `kind` posed in the reverse direction
@@ -235,20 +223,16 @@
                     [?e :rel/active? true]]
                   db from-eid kind)]
     (when (seq eids)
-      (let [;; Retract the direct datoms
-            tx (mapcat #(retract-tx % retracted-by-email-eid) eids)
-            ;; For asymmetric kinds, also retract the inverse datoms
-            inv (when (asymmetric-kinds kind)
-                  (let [inv-kind (inverse-kinds kind)
-                        inv-eids (d/q '[:find [?e ...]
-                                        :in $ ?to ?inv-kind
-                                        :where
-                                        [?e :rel/to ?to]
-                                        [?e :rel/kind ?inv-kind]
-                                        [?e :rel/active? true]]
-                                      db from-eid inv-kind)]
-                    (mapcat #(retract-tx % retracted-by-email-eid) inv-eids)))]
-        (d/transact! conn (vec (concat tx inv)))
+      (let [inv-eids (d/q '[:find [?e ...]
+                            :in $ ?to ?inv-kind
+                            :where
+                            [?e :rel/to ?to]
+                            [?e :rel/kind ?inv-kind]
+                            [?e :rel/active? true]]
+                          db from-eid (inverse-kinds kind))]
+        ;; Direct datoms, then their inverse-direction siblings.
+        (d/transact! conn (into [] (mapcat #(retract-tx % retracted-by-email-eid))
+                                (concat eids inv-eids)))
         (count eids)))))
 
 ;; ---------------------------------------------------------------------------
@@ -294,12 +278,6 @@
     (cond-> []
       pose (conj [:db/retract bug-eid attr (:db/id pose)])
       addr (conj [:db/retract bug-eid addr-attr addr]))))
-
-(defn- transfer-auto-credit-tx
-  [bug-eid attr addr-attr new-email-eid new-addr]
-  [{:db/id bug-eid
-    attr new-email-eid
-    addr-attr (some-> new-addr str/lower-case)}])
 
 (defn- open-patch-thread-ancestors
   "Open :patch reports counting `patch-eid`'s root email among their
@@ -412,9 +390,10 @@
                        (fn [acc bug-eid]
                          (let [db' (d/db conn)
                                tx  (when (auto-credit? db' bug-eid :report/owned)
-                                     (transfer-auto-credit-tx
-                                       bug-eid :report/owned :report/owned-address
-                                       succ-eml-eid succ-addr))
+                                     [{:db/id bug-eid
+                                       :report/owned succ-eml-eid
+                                       :report/owned-address
+                                       (some-> succ-addr str/lower-case)}])
                                _   (when (seq tx)
                                      (d/transact! conn tx))
                                ;; Successor inherits the :resolves link
