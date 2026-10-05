@@ -1,10 +1,16 @@
 {:paths ["src" "scripts" "resources"]
  :tasks
- {;; The JVM daemon handles ingest, digest and expire:
- ;;   clojure -M:run                   (daemon)
+ {;; The JVM side handles ingest, digest and expire:
+ ;;   clojure -M:run                (single pass)
+ ;;   clojure -M:run -- --watch     (daemon)
  ;;   clojure -M:run -- --fetch 4d  (recovery)
  ;;
  ;; Export and notify are read-only bb scripts:
+
+  :init (defn rm-rf [^java.io.File f]
+          (when (.isDirectory f)
+            (doseq [c (.listFiles f)] (rm-rf c)))
+          (.delete f))
 
   export     {:doc  "Export reports: bb export [--force] [--index-only] [-n source] [-p 1|2|3] [-s 1-7]"
               :task (apply shell "bb scripts/bone-export.clj" *command-line-args*)}
@@ -13,19 +19,15 @@
               :task (apply shell "bb scripts/bone-notify.clj" *command-line-args*)}
 
   clean      {:doc  "Remove public/ exports, stale AOT classes/, and reset the incremental-export watermark"
-              :task (do (let [dir (clojure.java.io/file "public")]
-                         (when (.exists dir)
-                          (doseq [f (reverse (file-seq dir))]
-                           (when-not (= f dir)
-                            (.delete f)
-                            (println "Deleted" (.getPath f))))))
+              :task (do (doseq [f (.listFiles (clojure.java.io/file "public"))]
+                         (rm-rf f)
+                         (println "Deleted" (.getPath f)))
                         ;; Wipe AOT artifacts: stale .class files (e.g. an
                         ;; old datalevin compiled by `bb build-jar`) sit on
                         ;; :paths and shadow bumped deps, breaking run/test.
                         (let [dir (clojure.java.io/file "classes")]
                          (when (.exists dir)
-                          (doseq [f (reverse (file-seq dir))]
-                           (.delete f))
+                          (rm-rf dir)
                           (println "Deleted classes/")))
                         ;; Drop the incremental watermark so the next
                         ;; export rebuilds everything.  .failures.edn
@@ -49,11 +51,7 @@
               :task (do
                       (let [classes (clojure.java.io/file "classes")
                             bin     (clojure.java.io/file "bin")
-                            wrapper (clojure.java.io/file "bin/bone")
-                            rm-rf   (fn rm [^java.io.File f]
-                                      (when (.isDirectory f)
-                                        (doseq [c (.listFiles f)] (rm c)))
-                                      (.delete f))]
+                            wrapper (clojure.java.io/file "bin/bone")]
                         ;; Wipe stale .class files so a Clojure version bump
                         ;; doesn't carry forward incompatible AOT artefacts.
                         (when (.exists classes) (rm-rf classes))

@@ -219,14 +219,13 @@
 (defn- failure-subjects-map
   "Build {message-id -> subject} for the message-ids referenced by `failures`."
   [db failures]
-  (when (seq failures)
-    (->> failures
-         (map :report-mid)
-         distinct
-         (reduce (fn [m mid]
-                   (if-let [s (report-subject-by-mid db mid)]
-                     (assoc m mid s) m))
-                 {}))))
+  (->> failures
+       (map :report-mid)
+       distinct
+       (reduce (fn [m mid]
+                 (if-let [s (report-subject-by-mid db mid)]
+                   (assoc m mid s) m))
+               {})))
 
 (defn- failures-section
   "Build the failures section text, or nil when there are no failures."
@@ -248,7 +247,7 @@
 
 (defn build-email-body
   "Build the notification email body for one (email, subscription) pair.
-  `failures` is a seq of cmd-failure entities to include."
+  `failures` is a seq of failure maps (from the failures file) to include."
   [db reports email subscription failures]
   (let [source   (:source subscription)
         prefs    (merge {:min-priority 1 :min-status 0} subscription)
@@ -326,8 +325,7 @@
     (log/debug "SKIPPED" email
                "-- notifications disabled for source" (:source s))))
 
-;; Guard ensures this block only runs when the script is invoked directly,
-;; not when loaded via load-file (e.g. from tests or other scripts).
+;; Run only when invoked as a script, not when the file is loaded.
 (when (= (System/getProperty "babashka.file") *file*)
   (let [flags       (set *command-line-args*)
         dry-run?    (flags "--dry-run")
@@ -340,7 +338,7 @@
         admin-bcc   (:admin-bcc notif)
         subscribers (:subscribers notif)]
     (cond
-      (not (and notif (:enabled notif)))
+      (not (:enabled notif))
       (do (log/info "Notifications disabled in config.")
           (System/exit 0))
 

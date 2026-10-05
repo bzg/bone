@@ -22,11 +22,13 @@
                                resolve-command-syntax reproducible-config-str
                                parse-cli-args load-config load-mailmap db-path build-source-map
                                format-date-iso bone-schema lead-maintainer]]
-         '[bone.common-bb :refer [load-datalevin-pod! get-tenures]]
-         '[bone.html-bb :refer [pico-cdn resolved-theme set-theme!
-                                bone-description footer-css bone-footer wrap-js
+         '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
+         '[bone.html-bb :refer [set-theme! head-hiccup
+                                footer-css theme-toggle-css bone-footer wrap-js
                                 spit-html theme-toggle-js nav-bar
                                 org-inline parse-org-table html-escape]])
+
+(load-datalevin-pod!)
 
 ;; ---------------------------------------------------------------------------
 ;; Build the org table from resolved labels + commands
@@ -209,14 +211,14 @@
 ;; Minimal org -> HTML conversion
 ;; ---------------------------------------------------------------------------
 
-;; org-inline is provided by bone-html.clj (HTML-escape aware).
+;; org-inline is provided by bone.html-bb (HTML-escape aware).
 
 (defn- heading-id [text]
   (-> text str/lower-case str/trim
                           (str/replace #"[^a-z0-9 -]" "")
                           (str/replace #"\s+" "-")))
 
-;; parse-org-table is provided by bone-html.clj (shared with bone-stats).
+;; parse-org-table is provided by bone.html-bb (shared with bone-stats).
 
 (defn org->html [org-text]
   (let [lines (str/split-lines org-text)]
@@ -243,35 +245,25 @@
                 (re-matches #":CUSTOM_ID:.*" trimmed))
             (recur (inc i) acc in-para?)
 
-            (re-matches #"(?i)#\+begin_example" trimmed)
-            (let [acc  (if in-para? (conj! acc "</p>") acc)
-                  acc  (conj! acc "<pre>")
+            (re-matches #"(?i)#\+begin_(?:example|src.*)" trimmed)
+            (let [src? (re-matches #"(?i)#\+begin_src.*" trimmed)
+                  [open close end-re]
+                  (if src?
+                    ["<pre><code>" "</code></pre>" #"(?i)#\+end_src"]
+                    ["<pre>" "</pre>" #"(?i)#\+end_example"])
+                  acc  (if in-para? (conj! acc "</p>") acc)
+                  acc  (conj! acc open)
                   next (loop [j (inc i), a acc]
                          (if (>= j (count lines))
                            [j a]
                            (let [bl (str/trim (nth lines j))]
-                             (if (re-matches #"(?i)#\+end_example" bl)
+                             (if (re-matches end-re bl)
                                [(inc j) a]
                                (recur (inc j)
                                       (conj! a (-> (nth lines j)
                                                    (str/replace "&" "&amp;")
                                                    (str/replace "<" "&lt;"))))))))]
-              (recur (first next) (conj! (second next) "</pre>") false))
-
-            (re-matches #"(?i)#\+begin_src.*" trimmed)
-            (let [acc  (if in-para? (conj! acc "</p>") acc)
-                  acc  (conj! acc "<pre><code>")
-                  next (loop [j (inc i), a acc]
-                         (if (>= j (count lines))
-                           [j a]
-                           (let [bl (str/trim (nth lines j))]
-                             (if (re-matches #"(?i)#\+end_src" bl)
-                               [(inc j) a]
-                               (recur (inc j)
-                                      (conj! a (-> (nth lines j)
-                                                   (str/replace "&" "&amp;")
-                                                   (str/replace "<" "&lt;"))))))))]
-              (recur (first next) (conj! (second next) "</code></pre>") false))
+              (recur (first next) (conj! (second next) close) false))
 
             (str/starts-with? trimmed "|")
             (let [acc    (if in-para? (conj! acc "</p>") acc)
@@ -303,7 +295,7 @@
   main.container { max-width: 1600px; }
   table { font-size: 0.9rem; }
   pre { font-size: 0.85rem; padding: 1rem; }
-  .theme-toggle { cursor: pointer; background: none; border: none; font-size: 1.2rem; padding: 0.3rem; }
+  " theme-toggle-css "
   .meta { font-size: 0.78rem; color: var(--pico-muted-color); margin-bottom: 2rem; }
 " footer-css))
 
@@ -314,21 +306,7 @@
      "<!DOCTYPE html>\n"
      (h/html
       [:html {:lang "en" :data-theme "light"}
-       [:head
-        [:meta {:charset "UTF-8"}]
-        [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
-        [:meta {:name "color-scheme" :content "light dark"}]
-        [:meta {:name "description" :content bone-description}]
-        [:meta {:property "og:title" :content title}]
-        [:meta {:property "og:description" :content bone-description}]
-        [:meta {:property "og:type" :content "website"}]
-        [:link {:rel "stylesheet" :href pico-cdn}]
-        (for [{:keys [link inline]} (resolved-theme)]
-          (if link
-            [:link {:rel "stylesheet" :href link}]
-            [:style (h/raw inline)]))
-        [:title title]
-        [:style (h/raw docs-css)]]
+       (head-hiccup {:title title :css docs-css})
        [:body
         [:main.container
          (nav-bar title "docs")
@@ -347,17 +325,16 @@
   "Return `{lowercase-email -> non-blank name}` for all participants of
   `source-name`.  Single query, intended for batch lookups."
   [db source-name]
-  (let [dq (resolve 'pod.huahaiy.datalevin/q)]
-    (->> (dq '[:find ?email ?name
-               :in $ ?src
-               :where
-               [?e :participant/source ?src]
-               [?e :participant/email ?email]
-               [?e :participant/name ?name]]
-             db source-name)
-         (reduce (fn [acc [email name]]
-                   (if (str/blank? name) acc (assoc acc email name)))
-                 {}))))
+  (->> (dq '[:find ?email ?name
+             :in $ ?src
+             :where
+             [?e :participant/source ?src]
+             [?e :participant/email ?email]
+             [?e :participant/name ?name]]
+           db source-name)
+       (reduce (fn [acc [email name]]
+                 (if (str/blank? name) acc (assoc acc email name)))
+               {})))
 
 (defn build-maintainers-html
   "Build an HTML section listing all maintainer tenures (active and closed),
@@ -434,13 +411,11 @@
                     (System/exit 2))
       effective-dir (or out-dir (.getParent (io/file out-file)))
       ;; Load DB for maintainer names
-      dbp         (db-path config)
-      _           (load-datalevin-pod!)
-      conn        ((resolve 'pod.huahaiy.datalevin/get-conn) dbp bone-schema {:wal? false})
+      conn        (d/get-conn (db-path config) bone-schema {:wal? false})
       ;; try/finally so the connection is closed even when the template
       ;; slurp or rendering throws (same pattern as the other scripts).
       html        (try
-                    (let [db          ((resolve 'pod.huahaiy.datalevin/db) conn)
+                    (let [db          (d/db conn)
                           maint-html  (build-maintainers-html db source-name)
                           config-html (build-configuration-html config source-name)
                           org-text    (-> (slurp "resources/docs-tpl.org")
@@ -456,7 +431,7 @@
                                             :website (:website source-cfg)
                                             :source source-name}))
                     (finally
-                      ((resolve 'pod.huahaiy.datalevin/close) conn)))]
+                      (d/close conn)))]
   (io/make-parents out-file)
   (spit-html out-file html)
   ;; Routine progress on stdout (captured in the export log), not stderr:

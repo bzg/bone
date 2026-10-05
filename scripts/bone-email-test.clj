@@ -1,6 +1,6 @@
 #!/usr/bin/env bb
 
-;; test/bone-email-test.clj -- Test SMTP configuration by sending a test email.
+;; bone-email-test.clj -- Test SMTP configuration by sending a test email.
 ;;
 ;; Reads :notifications :smtp from config.edn, sends a short test message
 ;; to the lead maintainer of the first source (or to a custom address via --to).
@@ -102,7 +102,7 @@
             (do
               (println "Sending test email...")
               (pods/load-pod 'tzzh/mail "0.0.3")
-              (require '[pod.tzzh.mail :as mail])
+              (require 'pod.tzzh.mail)
 
               (let [body (str "This is a test email from BONE.\n\n"
                               "If you received this, your SMTP configuration is working.\n\n"

@@ -7,7 +7,8 @@
   <head> builder, nav bar, org->HTML helpers, and an optional
   `tidy` pretty-printer."
   (:require [babashka.process]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [hiccup2.core :as h]))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared CDN
@@ -23,7 +24,7 @@
   "Base URL for bzg/pico-themes on jsDelivr."
   "https://cdn.jsdelivr.net/gh/bzg/pico-themes@latest/")
 
-(defn resolve-css-theme
+(defn- resolve-css-theme
   "Resolve a --html-theme / :theme value to a seq of maps, or nil.
   Each map is either {:link url} or {:inline css-content}.
 
@@ -77,15 +78,15 @@
 ;; ---------------------------------------------------------------------------
 
 (def bone-description "BONE (Bug And Report Keeper) -- track bugs, patches, and requests.")
-(def bone-repo-url "https://codeberg.org/bzg/bone")
+(def ^:private bone-repo-url "https://codeberg.org/bzg/bone")
 
 ;; ---------------------------------------------------------------------------
 ;; LibreJS license tags (JS files are MPL-2.0)
 ;; ---------------------------------------------------------------------------
 
-(def js-license-start
+(def ^:private js-license-start
   "// @license magnet:?xt=urn:btih:3877d6d54b3accd4bc32f8a48bf32ebc0901502a&dn=mpl-2.0.txt MPL-2.0")
-(def js-license-end
+(def ^:private js-license-end
   "// @license-end")
 
 (defn wrap-js
@@ -114,8 +115,37 @@
         (str/replace ">" "&gt;")
         (str/replace "\"" "&quot;"))))
 
+(defn head-hiccup
+  "The shared <head> block as a hiccup vector.
+   opts keys:
+     :title    -- page <title> (required)
+     :css      -- inline CSS string (optional)
+     :rss-href -- href for <link rel=alternate> RSS (optional)
+     :extra    -- hiccup appended before </head> (optional)"
+  [{:keys [title css rss-href extra]}]
+  [:head
+   [:meta {:charset "UTF-8"}]
+   [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+   [:meta {:name "color-scheme" :content "light dark"}]
+   [:meta {:name "description" :content bone-description}]
+   [:meta {:property "og:title" :content title}]
+   [:meta {:property "og:description" :content bone-description}]
+   [:meta {:property "og:type" :content "website"}]
+   [:link {:rel "stylesheet" :href pico-cdn}]
+   (for [{:keys [link inline]} (resolved-theme)]
+     (if link
+       [:link {:rel "stylesheet" :href link}]
+       [:style (h/raw inline)]))
+   (when rss-href
+     [:link {:rel "alternate" :type "application/rss+xml"
+             :title "BONE Reports RSS" :href rss-href}])
+   [:title title]
+   (when css [:style (h/raw css)])
+   extra])
+
 (defn html-head
-  "Render a <head> block as a string.
+  "Render a <head> block as a string, for the pages assembled from
+  strings (see `head-hiccup` for the hiccup ones).
    opts keys:
      :title      -- page <title> (required)
      :css        -- inline CSS string (optional)
@@ -142,11 +172,14 @@
          (or extra-head "")
          "</head>\n")))
 
+(def theme-toggle-css
+  ".theme-toggle { cursor: pointer; background: none; border: none; font-size: 1.2rem; padding: 0.3rem; }")
+
 ;; ---------------------------------------------------------------------------
 ;; Shared nav theme-toggle button (hiccup vector)
 ;; ---------------------------------------------------------------------------
 
-(defn theme-toggle-btn []
+(defn- theme-toggle-btn []
   [:button.theme-toggle
    {:onclick "toggleTheme()" :aria-label "Toggle theme"}
    [:span#theme-icon "🌙"]])
@@ -155,7 +188,7 @@
 ;; Shared nav bar (hiccup vector)
 ;; ---------------------------------------------------------------------------
 
-(def nav-pages
+(def ^:private nav-pages
   "Navigation pages in display order: [id label href]."
   [["reports" "Reports" "index.html"]
    ["docs"   "Docs"  "docs.html"]
@@ -252,24 +285,23 @@
     :ical     when true (default) and :feeds is on, appends an iCal link.
     :website  when set, appends a link to the tracked project's website,
               labeled with :source (the source name) when available."
-  ([] (bone-footer {}))
-  ([{:keys [ical feeds website source] :or {ical true feeds true}}]
-   [:footer.bone-footer
-    [:a {:href bone-repo-url} "BONE"]
-    " is "
-    [:a {:href "https://www.gnu.org/philosophy/free-sw.html"}
-     "Free Software"]
-    (when feeds
-      (list " -- "
-            [:a {:href "reports/all.xml"} "RSS"]
-            " -- "
-            [:a {:href "reports/all.json"} "JSON"]
-            " -- "
-            [:a {:href "reports/all.org"} "Org"]
-            (when ical
-              (list " -- " [:a {:href "events/announcements.ics"} "iCal"]))))
-    (when website
-      (list " -- " [:a {:href website} (or source "Website")]))]))
+  [{:keys [ical feeds website source] :or {ical true feeds true}}]
+  [:footer.bone-footer
+   [:a {:href bone-repo-url} "BONE"]
+   " is "
+   [:a {:href "https://www.gnu.org/philosophy/free-sw.html"}
+    "Free Software"]
+   (when feeds
+     (list " -- "
+           [:a {:href "reports/all.xml"} "RSS"]
+           " -- "
+           [:a {:href "reports/all.json"} "JSON"]
+           " -- "
+           [:a {:href "reports/all.org"} "Org"]
+           (when ical
+             (list " -- " [:a {:href "events/announcements.ics"} "iCal"]))))
+   (when website
+     (list " -- " [:a {:href website} (or source "Website")]))])
 
 ;; ---------------------------------------------------------------------------
 ;; Org-mode inline link conversion (shared by bone-docs, bone-stats)
@@ -344,7 +376,7 @@
           deref :exit (= 0))
       (catch Exception _ false))))
 
-(defn tidy-html
+(defn- tidy-html
   "Pretty-print an HTML string via tidy.  Returns the input unchanged if
   tidy is not installed or if it fails on the input."
   [html]

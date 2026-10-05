@@ -1,15 +1,15 @@
 #!/usr/bin/env bb
 
-;; bone-index.clj -- Generate the reports index HTML page from BONE data.
+;; bone-index.clj -- Generate the reports index HTML shell.
 ;;
-;; Reads reports.json (produced by bone-export) and config.edn, then
-;; builds a standalone HTML page.  Most logic is in Clojure; JS is
-;; limited to client-side filtering, sorting, theme toggle, and URL
-;; permalink state.
+;; Reads the envelope of all-open.json (produced by bone-export) for
+;; the source metadata, then builds a standalone HTML shell.  The page
+;; embeds no report data: the inlined JS fetches the reports and does
+;; the rendering, filtering, sorting, theme toggle and URL permalink
+;; state.
 ;;
-;; Usage:
-;;   bb export html                              -> via bb task (preferred)
-;;   bb scripts/bone-index.clj -o <out.html> --json <reports.json>
+;; Usage (normally invoked per source by bone-export.clj):
+;;   bb scripts/bone-index.clj -o <out.html> --json <all-open.json>
 ;;
 ;; --json and -o are required (the public/<source>/... layout means
 ;; there is no single sensible default).  --dir defaults to the
@@ -21,9 +21,9 @@
          '[hiccup2.core :as h]
          '[taoensso.timbre :as log]
          '[bone.common :refer [parse-cli-args escape-script-payload]]
-         '[bone.html-bb :refer [pico-cdn resolved-theme set-theme!
-                                bone-description page-title
-                                footer-css bone-footer wrap-js spit-html
+         '[bone.html-bb :refer [set-theme! head-hiccup page-title
+                                footer-css theme-toggle-css
+                                bone-footer wrap-js spit-html
                                 noscript-banner wrap-template
                                 theme-toggle-js nav-bar]])
 
@@ -102,7 +102,7 @@
   .vote-pos { background: var(--bone-vote-pos-bg, #27ae6033); color: var(--bone-vote-pos, #27ae60); }
   .vote-neg { background: var(--bone-vote-neg-bg, #c0392b33); color: var(--bone-vote-neg, #c0392b); }
   .vote-zero { background: var(--bone-vote-zero-bg, #95a5a622); color: var(--bone-vote-zero, #7f8c8d); }
-  .theme-toggle { cursor: pointer; background: none; border: none; font-size: 1.2rem; padding: 0.3rem; }
+  " theme-toggle-css "
 
   /* Responsive: progressively hide columns -- only Subject remains */
   @media (max-width: 1200px) {
@@ -149,15 +149,23 @@
 
 ;; Columns in their fixed render order.  --html-columns selects a subset;
 ;; unselected columns are hidden via CSS (nth-child position), the order is
-;; not configurable.  Each pair maps the CLI name to the JS sort key used by
-;; data-sort / boneConfig.columnsSort ("author" sorts on the "from" key).
+;; not configurable.  Each row is [cli-name sort-key label tooltip aria-label]:
+;; the JS sort key is used by data-sort / boneConfig.columnsSort ("author"
+;; sorts on the "from" key), and the aria-label lets screen readers hear
+;; "Replies" for the glyph-only header.
 (def ^:private canonical-columns
-  [["type" "type"] ["priority" "priority"] ["due" "due"] ["flags" "flags"]
-   ["replies" "replies"] ["owner" "owner"] ["author" "from"]
-   ["subject" "subject"] ["date" "date"]])
+  [["type"     "type"     "Type"    "Sort by type"              nil]
+   ["priority" "priority" "Prio"    "Sort by priority"          "Priority"]
+   ["due"      "due"      "Due"     "Sort by deadline"          nil]
+   ["flags"    "flags"    "Flags"   "Sort by flags"             nil]
+   ["replies"  "replies"  "↩"       "Sort by number of replies" "Replies"]
+   ["owner"    "owner"    "Owner"   "Sort by owner"             nil]
+   ["author"   "from"     "Author"  "Sort by author"            nil]
+   ["subject"  "subject"  "Subject" "Sort by last activity"     nil]
+   ["date"     "date"     "Date"    "Sort by date"              nil]])
 
 (def ^:private column-names (mapv first canonical-columns))
-(def ^:private column-sort-key (into {} canonical-columns))
+(def ^:private column-sort-key (into {} (map (juxt first second)) canonical-columns))
 
 (defn- parse-columns
   "Parse --html-columns CSV into an ordered vector of valid column names.
@@ -232,29 +240,19 @@
         ;; ICS lives one level up from reports-dir, in events/
         base-dir     (.getParent (clojure.java.io/file reports-dir))
         has-ical?    (and base-dir (.exists (clojure.java.io/file base-dir "events" "announcements.ics")))
-        rss-href     "reports/all.xml"
         ;; Sortable column headers: focusable (tabindex) with an Enter/
         ;; Space handler (thSortKey in bone-index.js) so keyboard users
-        ;; can sort; aria-sort is maintained by the JS.  The ↩ glyph
-        ;; gets an :aria-label so screen readers hear "Replies".
-        cols         (mapv (fn [[k i label tip aria]]
+        ;; can sort; aria-sort is maintained by the JS.
+        cols         (mapv (fn [[_ k label tip aria]]
                              [:th (cond-> {:data-sort k
                                            :scope     "col"
                                            :tabindex  "0"
-                                           :onclick   (str "sortTable(" i ",'" k "')")
+                                           :onclick   (str "sortTable('" k "')")
                                            :onkeydown "thSortKey(event)"
                                            :title     tip}
                                     aria (assoc :aria-label aria))
                               label])
-                           [["type"     0 "Type"    "Sort by type"              nil]
-                            ["priority" 1 "Prio"    "Sort by priority"          "Priority"]
-                            ["due"      2 "Due"     "Sort by deadline"          nil]
-                            ["flags"    3 "Flags"   "Sort by flags"             nil]
-                            ["replies"  4 "↩"       "Sort by number of replies" "Replies"]
-                            ["owner"    5 "Owner"   "Sort by owner"             nil]
-                            ["from"     6 "Author"  "Sort by author"            nil]
-                            ["subject"  7 "Subject" "Sort by last activity"     nil]
-                            ["date"     8 "Date"    "Sort by date"              nil]])
+                           canonical-columns)
         tpl-body     (str
                       (h/html
                        [:main.container
@@ -313,25 +311,10 @@
      "<!DOCTYPE html>\n"
      (h/html
       [:html {:lang "en" :data-theme "light"}
-       [:head
-        [:meta {:charset "UTF-8"}]
-        [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
-        [:meta {:name "color-scheme" :content "light dark"}]
-        [:meta {:name "description" :content bone-description}]
-        [:meta {:property "og:title" :content title}]
-        [:meta {:property "og:description" :content bone-description}]
-        [:meta {:property "og:type" :content "website"}]
-        [:link {:rel "stylesheet" :href pico-cdn}]
-        (for [{:keys [link inline]} (resolved-theme)]
-          (if link
-            [:link {:rel "stylesheet" :href link}]
-            [:style (h/raw inline)]))
-        (when has-rss?
-          [:link {:rel "alternate" :type "application/rss+xml"
-                  :title "BONE Reports RSS" :href rss-href}])
-        [:title title]
-        [:style (h/raw page-css)]
-        (when mask-css [:style (h/raw mask-css)])]
+       (head-hiccup {:title    title
+                     :css      page-css
+                     :rss-href (when has-rss? "reports/all.xml")
+                     :extra    (when mask-css [:style (h/raw mask-css)])})
        [:body
         (noscript-banner title)
         (h/raw (wrap-template "js-tpl" tpl-body))

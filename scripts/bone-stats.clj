@@ -6,6 +6,10 @@
 ;;   bb scripts/bone-stats.clj json -o <reports-dir>/stats.json -n <source>
 ;;   bb scripts/bone-stats.clj html -o <base-dir>/data.html -n <source>
 ;;
+;; -o and -n are required (the public/<source>/... layout means there
+;; is no single sensible default).  --dir defaults to the directory
+;; of -o.
+;;
 ;; Environment / defaults:
 ;;   BONE_DB -- path to db (default: ./data/bone-db)
 
@@ -16,7 +20,7 @@
          '[taoensso.timbre :as log]
          '[bone.common :refer [parse-cli-args load-config load-mailmap db-path bone-schema
                                votes-by-report vote-counts]]
-         '[bone.common-bb :refer [load-datalevin-pod! dq]]
+         '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
          '[bone.html-bb :refer [set-theme! page-title
                                 bone-footer wrap-js spit-html theme-toggle-js
                                 nav-bar html-head wrap-template
@@ -43,7 +47,7 @@
 (defn within-last-year? [inst]
   (when inst (> (.getTime inst) (- (now-ms) one-year-ms))))
 
-;; days-between (integer, shared) is in bone-common.clj.
+;; days-between (integer, shared) is in bone.common.
 ;; This variant returns fractional days for statistical averaging.
 (defn- days-between-frac [a b]
   (when (and a b)
@@ -54,33 +58,23 @@
   (when x (/ (Math/round (* x 100.0)) 100.0)))
 
 ;; ---------------------------------------------------------------------------
-;; Queries (all-reports and report-pull-pattern loaded from bone-common.clj)
+;; Queries
 ;; ---------------------------------------------------------------------------
 
 (defn emails-last-year
-  "Count emails sent in the last year, scoped to `source-name` when
-  given (stats.json is per-source; a global count would skew the
-  report/email ratio), all sources when nil."
-  ([db] (emails-last-year db nil))
-  ([db source-name]
-   (let [threshold (java.util.Date. (- (System/currentTimeMillis) one-year-ms))]
-     (-> (if source-name
-           (d/q '[:find (count ?e)
-                  :in $ ?threshold ?src
-                  :where
-                  [?e :email/source ?src]
-                  [?e :email/message-id _]
-                  [?e :email/date-sent ?date]
-                  [(>= ?date ?threshold)]]
-                db threshold source-name)
-           (d/q '[:find (count ?e)
-                  :in $ ?threshold
-                  :where
-                  [?e :email/message-id _]
-                  [?e :email/date-sent ?date]
-                  [(>= ?date ?threshold)]]
-                db threshold))
-         ffirst (or 0)))))
+  "Count emails of `source-name` sent in the last year (stats.json is
+  per-source; a global count would skew the report/email ratio)."
+  [db source-name]
+  (let [threshold (java.util.Date. (- (System/currentTimeMillis) one-year-ms))]
+    (-> (d/q '[:find (count ?e)
+               :in $ ?threshold ?src
+               :where
+               [?e :email/source ?src]
+               [?e :email/message-id _]
+               [?e :email/date-sent ?date]
+               [(>= ?date ?threshold)]]
+             db threshold source-name)
+        ffirst (or 0))))
 
 (defn all-participants
   "Fetch all participant entities from the database."
@@ -102,27 +96,6 @@
          [?e :participant/contributor-since ?since]]
        db))
 
-(defn- all-active-tenures
-  "Return currently-active tenures (no :to) as maps with :email and
-  :from -- all sources, or only `source-name`'s when given (the stats
-  page is per-source, a global count there would be misleading)."
-  ([db] (all-active-tenures db nil))
-  ([db source-name]
-   (let [eids (d/q '[:find [?e ...]
-                     :where [?e :maint-tenure/email _]]
-                   db)]
-     (->> eids
-          (map (fn [eid]
-                 (d/pull db '[:maint-tenure/email
-                              :maint-tenure/from
-                              :maint-tenure/to
-                              :maint-tenure/source] eid)))
-          (remove :maint-tenure/to)
-          (filter (fn [m] (or (nil? source-name)
-                              (= source-name (:maint-tenure/source m)))))
-          (mapv (fn [m] {:email (:maint-tenure/email m)
-                         :from  (:maint-tenure/from m)}))))))
-
 (defn total-maintainers
   "Count distinct currently-active maintainer addresses."
   [tenures]
@@ -130,18 +103,6 @@
        (keep :email)
        distinct
        count))
-
-(defn all-maintainer-since-dates
-  "Return :from dates of currently-active tenures as ISO strings
-  (\"yyyy-MM-dd\"). Tenures with :from = nil are excluded -- they are
-  counted via `maintainers-without-since` and fed as `n-always` to the
-  cumulative chart."
-  [tenures]
-  (let [fmt (doto (java.text.SimpleDateFormat. "yyyy-MM-dd")
-              (.setTimeZone (java.util.TimeZone/getTimeZone "UTC")))]
-    (->> tenures
-         (keep :from)
-         (mapv #(.format fmt ^java.util.Date %)))))
 
 (defn- maintainers-without-since
   "Count currently-active tenures with no :from (seeded 'forever')."
@@ -236,35 +197,12 @@
         months (last-12-months)]
     (mapv (fn [m] [m (get counts m 0)]) months)))
 
-(defn contributors-by-month
-  "Cumulative contributor count per month over the last 12 months.
-  `contributors` is the result of `all-contributors` (tuples of [email source since])."
-  [contributors]
-  (let [by-ym (->> contributors
-                   (keep (fn [[_ _ since]] (date->ym since)))
-                   frequencies)]
-    (cumulative-by-month by-ym 0)))
-
-(defn participants-by-month
-  "Cumulative participant count per month over the last 12 months.
-  `participants` is the result of `all-participants` (tuples of [email source since])."
-  [participants]
-  (let [by-ym (->> participants
-                   (keep (fn [[_ _ since]] (date->ym since)))
-                   frequencies)]
-    (cumulative-by-month by-ym 0)))
-
-(defn maintainers-by-month
-  "Cumulative maintainer count per month over the last 12 months.
-  `since-dates` is a seq of \"yyyy-MM-dd\" strings from :roles/maintainer-since.
-  `n-always` is the count of current maintainers with no since-date
-  (config-seeded without :since or directive-added) -- they are counted
-  as present in every month."
-  [since-dates n-always]
-  (let [by-ym (->> since-dates
-                   (keep (fn [d] (when (>= (count d) 7) (subs d 0 7))))
-                   frequencies)]
-    (cumulative-by-month by-ym n-always)))
+(defn cumulative-since
+  "Cumulative head count per month over the last 12 months, from the
+  dates (java.util.Date) at which people joined.  `base` counts the
+  people with no known date -- they are present in every month."
+  [dates base]
+  (cumulative-by-month (frequencies (keep date->ym dates)) base))
 
 (defn email-vs-reports-ratio [reports emails-last-year-count]
   (let [n (count (filter #(within-last-year? (report-date %)) reports))]
@@ -298,23 +236,22 @@
   (`{email-lc -> canonical-name}`) maps the address, the canonical name
   is used both as the group key and as the displayed `:name`, so a
   single contributor posting from multiple addresses appears once."
-  ([reports n] (top-openers reports n {}))
-  ([reports n mailmap]
-   (->> reports
-        (filter #(within-last-year? (report-date %)))
-        (map (fn [r]
-               (let [addr-lc (some-> (report-author r) str/lower-case)
-                     canon   (get mailmap addr-lc)]
-                 {:lc-addr addr-lc
-                  :canon   canon
-                  :name    (get-in r [:report/email :email/author-name])})))
-        (group-by (fn [{:keys [canon lc-addr]}] (or canon lc-addr)))
-        (map (fn [[_ rs]]
-               {:address (:lc-addr (first rs))
-                :name    (or (:canon (first rs))
-                             (some #(when (seq (:name %)) (:name %)) rs))
-                :count   (count rs)}))
-        (sort-by :count >) (take n))))
+  [reports n mailmap]
+  (->> reports
+       (filter #(within-last-year? (report-date %)))
+       (map (fn [r]
+              (let [addr-lc (some-> (report-author r) str/lower-case)
+                    canon   (get mailmap addr-lc)]
+                {:lc-addr addr-lc
+                 :canon   canon
+                 :name    (get-in r [:report/email :email/author-name])})))
+       (group-by (fn [{:keys [canon lc-addr]}] (or canon lc-addr)))
+       (map (fn [[_ rs]]
+              {:address (:lc-addr (first rs))
+               :name    (or (:canon (first rs))
+                            (some #(when (seq (:name %)) (:name %)) rs))
+               :count   (count rs)}))
+       (sort-by :count >) (take n)))
 
 (defn open-closed-ratio [reports]
   (let [open     (count (remove :report/closed reports))
@@ -352,48 +289,41 @@
 
 (defn compute-stats
   [reports db source-name]
-  (let [mailmap       (load-mailmap)
-        last-year     (filter #(within-last-year? (report-date %)) reports)
-        open-yr       (remove :report/closed last-year)
-        emails-yr     (when db (emails-last-year db source-name))
-        contributors  (when db (cond->> (all-contributors db)
-                                 source-name (filter #(= source-name (second %)))))
-        participants  (when db (cond->> (all-participants db)
-                                 source-name (filter #(= source-name (second %)))))
-        tenures       (when db (all-active-tenures db source-name))
-        n-maintainers (when db (total-maintainers tenures))
-        maint-since   (when db (all-maintainer-since-dates tenures))
-        n-always      (when db (maintainers-without-since tenures))
-        all-votes     (if db
-                        (votes-by-report
-                         (d/q '[:find ?r ?val ?voter ?emid
-                                :where
-                                [?v :vote/report ?r]
-                                [?v :vote/value  ?val]
-                                [?v :vote/voter  ?voter]
-                                [?v :vote/email  ?e]
-                                [?e :email/message-id ?emid]]
-                              db))
-                        {})]
-    (cond->
-      {:generated-at      (str (java.util.Date.))
-       :reports-per-type  (reports-per-type reports)
-       :reports-by-month  (reports-by-month reports)
-       :time-to-close     (time-to-close-stats reports)
-       :open-closed-ratio (open-closed-ratio reports)
-       :open-last-year    (count open-yr)
-       :total-last-year   (count last-year)
-       :top-openers       (top-openers reports 10 mailmap)
-       :vote-leaders      (vote-leaders reports all-votes 10)
-       :closed-cancel     (closed-cancel-breakdown reports)}
-      emails-yr     (assoc :email-ratio (email-vs-reports-ratio reports emails-yr))
-      contributors  (assoc :contributors-by-month (contributors-by-month contributors)
-                           :total-contributors (count contributors))
-      participants  (assoc :participants-by-month (participants-by-month participants)
-                           :total-participants (count participants))
-      n-maintainers (assoc :total-maintainers n-maintainers)
-      maint-since   (assoc :maintainers-by-month
-                           (maintainers-by-month maint-since (or n-always 0))))))
+  (let [last-year    (filter #(within-last-year? (report-date %)) reports)
+        this-source? #(= source-name (second %))
+        contributors (filter this-source? (all-contributors db))
+        participants (filter this-source? (all-participants db))
+        ;; Currently-active tenures (no :to).
+        tenures      (remove :to (get-tenures db source-name))
+        all-votes    (votes-by-report
+                      (d/q '[:find ?r ?val ?voter ?emid
+                             :where
+                             [?v :vote/report ?r]
+                             [?v :vote/value  ?val]
+                             [?v :vote/voter  ?voter]
+                             [?v :vote/email  ?e]
+                             [?e :email/message-id ?emid]]
+                           db))]
+    {:generated-at          (str (java.util.Date.))
+     :reports-per-type      (reports-per-type reports)
+     :reports-by-month      (reports-by-month reports)
+     :time-to-close         (time-to-close-stats reports)
+     :open-closed-ratio     (open-closed-ratio reports)
+     :open-last-year        (count (remove :report/closed last-year))
+     :total-last-year       (count last-year)
+     :top-openers           (top-openers reports 10 (load-mailmap))
+     :vote-leaders          (vote-leaders reports all-votes 10)
+     :closed-cancel         (closed-cancel-breakdown reports)
+     :email-ratio           (email-vs-reports-ratio
+                             reports (emails-last-year db source-name))
+     :contributors-by-month (cumulative-since (map #(nth % 2) contributors) 0)
+     :total-contributors    (count contributors)
+     :participants-by-month (cumulative-since (map #(nth % 2) participants) 0)
+     :total-participants    (count participants)
+     :total-maintainers     (total-maintainers tenures)
+     :maintainers-by-month  (cumulative-since
+                             (keep :from tenures)
+                             (maintainers-without-since tenures))}))
 
 ;; ---------------------------------------------------------------------------
 ;; HTML / Vega-Lite rendering
@@ -428,11 +358,12 @@
 
 (defn chart-ttc [ttc]
   (let [order ["same-day" "≤1 week" "≤1 month" "≤3 months" ">3 months"]
-        data  [{"b" "same-day"   "n" (get-in ttc [:buckets :same-day] 0)}
-               {"b" "≤1 week"    "n" (get-in ttc [:buckets :within-week] 0)}
-               {"b" "≤1 month"   "n" (get-in ttc [:buckets :within-month] 0)}
-               {"b" "≤3 months"  "n" (get-in ttc [:buckets :within-quarter] 0)}
-               {"b" ">3 months"  "n" (get-in ttc [:buckets :longer] 0)}]]
+        {:keys [same-day within-week within-month within-quarter longer]} (:buckets ttc)
+        data  [{"b" "same-day"   "n" same-day}
+               {"b" "≤1 week"    "n" within-week}
+               {"b" "≤1 month"   "n" within-month}
+               {"b" "≤3 months"  "n" within-quarter}
+               {"b" ">3 months"  "n" longer}]]
     (vl "Time to close" "bar" data
         {:x {:field "b" :type "ordinal" :title nil :sort order}
          :y {:field "n" :type "quantitative" :title "Reports"}})))
@@ -456,7 +387,7 @@
 (defn chart-cancel-breakdown [cancel-data]
   (let [data (mapcat (fn [[t {:keys [canceled expired resolved]}]]
                        [{"type" t "reason" "Canceled" "count" canceled}
-                        {"type" t "reason" "Expired"  "count" (or expired 0)}
+                        {"type" t "reason" "Expired"  "count" expired}
                         {"type" t "reason" "Resolved" "count" resolved}])
                      cancel-data)]
     (vl "Closed reports: canceled, expired & resolved" "bar" (vec data)
@@ -487,13 +418,11 @@
                 :color {:field "role" :type "nominal" :title "Role"
                         :scale {:range ["#72b362" "#4c78a8" "#e45756"]}}}}))
 
-;; HTML assembly
-
 ;; ---------------------------------------------------------------------------
-;; data.org rendering (reuses org table parser from bone-docs logic)
+;; data.org rendering
 ;; ---------------------------------------------------------------------------
 
-;; parse-org-table is provided by bone-html.clj (shared with bone-docs).
+;; parse-org-table is provided by bone.html-bb (shared with bone-docs).
 
 (defn- strip-dead-data-links
   "Remove individual org links [[target][label]] whose file does not exist.
@@ -517,23 +446,17 @@
     cleaned))
 
 (defn render-data-section
-  "Render resources/data.org as an HTML section, filtering dead links."
+  "Render resources/data.org as an HTML section, filtering dead links.
+  A row that had links and lost them all is dropped."
   [out-dir]
-  (let [org-text (slurp "resources/data.org")
-        lines    (str/split-lines org-text)
-        tlines   (filterv #(str/starts-with? (str/trim %) "|") lines)
-        filtered (if out-dir
-                   (let [processed (mapv (fn [line]
-                                           {:had-links (boolean (re-find #"\[\[" line))
-                                            :result (if (re-find #"\[\[" line)
-                                                      (strip-dead-data-links line out-dir)
-                                                      line)})
-                                         tlines)]
-                     (->> processed
-                          (remove (fn [{:keys [had-links result]}]
-                                    (and had-links (not (re-find #"\[\[" result)))))
-                          (mapv :result)))
-                   tlines)]
+  (let [link?    #(re-find #"\[\[" %)
+        filtered (->> (str/split-lines (slurp "resources/data.org"))
+                      (filter #(str/starts-with? (str/trim %) "|"))
+                      (keep (fn [line]
+                              (if (link? line)
+                                (let [stripped (strip-dead-data-links line out-dir)]
+                                  (when (link? stripped) stripped))
+                                line))))]
     (when (seq filtered)
       (str "<h3>Available data</h3>\n"
            (parse-org-table filtered)))))
@@ -561,19 +484,16 @@
        (when time-to-close
          {:v (str (:median-days time-to-close) "d") :l "Median to close"
           :s (str "avg " (:avg-days time-to-close) "d")})
-       (when email-ratio
-         {:v (or (:ratio email-ratio) "--") :l "Report/email ratio (last 12 months)"
-          :s (str (:reports-last-year email-ratio) " reports / "
-                  (:emails-last-year email-ratio) " emails")})
-       (when total-participants
-         {:v total-participants :l "Participants"
-          :s (when total-contributors (str total-contributors " contributors"))})
-       (when total-maintainers
-         {:v total-maintainers :l "Maintainers"})])))
+       {:v (or (:ratio email-ratio) "--") :l "Report/email ratio (last 12 months)"
+        :s (str (:reports-last-year email-ratio) " reports / "
+                (:emails-last-year email-ratio) " emails")}
+       {:v total-participants :l "Participants"
+        :s (str total-contributors " contributors")}
+       {:v total-maintainers :l "Maintainers"}])))
 
 (defn view-charts
   "Ordered Vega-Lite chart specs as {:id dom-id :spec spec} maps,
-  nil-filtered.  Mirrors the previous server-rendered chart set."
+  nil-filtered."
   [stats]
   (let [{:keys [reports-per-type reports-by-month time-to-close top-openers
                 closed-cancel participants-by-month contributors-by-month
@@ -581,10 +501,9 @@
     (filterv some?
       [{:id "chart-month"   :spec (chart-by-month reports-by-month)}
        {:id "chart-type"    :spec (chart-per-type reports-per-type)}
-       (when (or (seq participants-by-month) (seq contributors-by-month))
-         {:id "chart-people" :spec (chart-people (or participants-by-month [])
-                                                 (or contributors-by-month [])
-                                                 (or maintainers-by-month []))})
+       {:id "chart-people" :spec (chart-people participants-by-month
+                                               contributors-by-month
+                                               maintainers-by-month)}
        (when time-to-close
          {:id "chart-ttc"    :spec (chart-ttc time-to-close)})
        {:id "chart-openers" :spec (chart-openers top-openers)}
@@ -664,10 +583,8 @@
   (let [conn (d/get-conn (db-path (load-config)) bone-schema {:wal? false})]
     (try
       (let [db       (d/db conn)
-            all-reps (all-reports-lean db)
-            reports  (if source-name
-                       (filter #(= source-name (get-in % [:report/email :email/source])) all-reps)
-                       all-reps)
+            reports  (filter #(= source-name (get-in % [:report/email :email/source]))
+                             (all-reports-lean db))
             stats    (compute-stats reports db source-name)
             ;; Bundle the data.html view model (KPI cards + chart specs)
             ;; into stats.json so the data.html shell can render entirely
@@ -693,14 +610,16 @@
         _           (when-let [t (:theme opts)] (set-theme! t))
         html?       (= (:format opts) "html")
         source-name (:source-name opts)
-        out-file    (or (:out-file opts)
-                        (if html? "public/web/data.html" "public/reports/stats.json"))
-        out-dir     (or (:out-dir opts)
-                        (.getParent (io/file out-file)))]
+        out-file    (:out-file opts)
+        _           (when (or (str/blank? out-file) (str/blank? source-name))
+                      (log/error "bone-stats.clj requires -o <file> and -n <source>")
+                      (System/exit 2))
+        ;; getParent is nil for a bare filename: default to ".".
+        out-dir     (or (:out-dir opts) (.getParent (io/file out-file)) ".")]
     (io/make-parents out-file)
     (if html?
       (generate-html! out-file out-dir source-name)
       (generate-json! out-file source-name))))
-;; Guard for tests and load-file (same pattern as bone-notify).
+;; Run only when invoked as a script, not when the file is loaded.
 (when (= (System/getProperty "babashka.file") *file*)
   (apply -main *command-line-args*))

@@ -358,7 +358,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- commands-map-errors
-  "Walk a :commands (or :global-commands) map and return a seq of
+  "Walk a :commands map (top-level or per-source) and return a seq of
   human-readable error strings.  Used to surface precise, actionable
   messages before falling back to `s/explain-str`."
   [where commands-map]

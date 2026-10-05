@@ -1016,7 +1016,7 @@ function tbodyClick(e) {
 
 var sortState = {};
 
-function sortTable(colIdx, key) {
+function sortTable(key) {
   var dir = sortState[key] === 'asc' ? 'desc' : 'asc';
   sortState = {};
   sortState[key] = dir;
