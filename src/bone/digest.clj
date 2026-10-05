@@ -361,8 +361,7 @@
         base-opts (assoc endpoints
                          :setter    (:email/author-address email)
                          :email-eid email-eid
-                         :posed-at  (or (:email/date-sent email) (Date.))
-                         :value     nil)
+                         :posed-at  (or (:email/date-sent email) (Date.)))
         fresh?    (fn [kind]
                     (not-any? #(d/entid db [:rel/id %])
                               (rel/paired-relation-ids kind old-rid new-report-eid)))
@@ -375,7 +374,7 @@
                        fresh))
     (doseq [kind existing]
       (rel/pose-from-email! conn email (assoc endpoints :kind kind)))
-    (rel/propagate-patch-closure! conn old-rid :patch email-eid
+    (rel/propagate-patch-closure! conn old-rid email-eid
                                   :superseded new-report-eid)
     (tracking/bump-report-updated! conn old-rid)
     (log/info "Auto-closed patch" log-msg)))
@@ -585,7 +584,7 @@
 (defn post-creation-plan
   "Given report-info and context, return a set of post-creation
   action keywords to execute."
-  [report-info nearest-eids parent-eids patches]
+  [report-info parent-eids patches]
   (let [rtype (:type report-info)]
     (cond-> #{}
       (seq parent-eids)                                       (conj :link-related)
@@ -1066,7 +1065,7 @@
                 ;; Phase 4: post-creation hooks (plan is pure, execution is effectful)
                 (when report-eid
                   (let [patches (detect/build-patch-entities email)
-                        plan    (post-creation-plan report-info nearest-eids parent-eids patches)]
+                        plan    (post-creation-plan report-info parent-eids patches)]
                     (run-post-creation-hooks! conn report-eid eid email from-addr report-info
                                               parent-eids nearest-eids patches plan)))
 

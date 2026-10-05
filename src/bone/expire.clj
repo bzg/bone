@@ -124,7 +124,7 @@
     (if explicit-expiry
       (.before ^Date explicit-expiry now)
       (let [expiry-cfg (:expiry (get source-map src))
-            rule-raw   (get expiry-cfg (keyword rtype))]
+            rule-raw   (get expiry-cfg rtype)]
         (when-let [rule (parse-expiry-rule rule-raw)]
           (rule-matches? rule report-data now))))))
 

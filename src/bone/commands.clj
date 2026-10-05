@@ -480,7 +480,7 @@
         (when (and (= :patch rtype) close-reason (:report/closed new-sets)
                    (or (not= :resolved close-reason)
                        (common/patch-triggers? source-cfg)))
-          (rel/propagate-patch-closure! conn report-eid rtype email-eid
+          (rel/propagate-patch-closure! conn report-eid email-eid
                                         close-reason nil))))))
 
 (def ^:private line-pull-pattern
@@ -799,7 +799,7 @@
                                          :to-eid    target-eid
                                          :kind      :related-to
                                          :setter    from-addr :email-eid email-eid
-                                         :posed-at  posed-at  :value nil})
+                                         :posed-at  posed-at})
               (tracking/bump-report-updated! conn target-eid)
               (log/info "Related-to:" mid "(by" from-addr ")")))))
     (doseq [mid to-clear]
@@ -990,12 +990,12 @@
               :setter from-addr :email-eid email-eid
               :posed-at posed-at}]
     (rel/pose-if-absent! conn (assoc opts :kind kind :value target-mid))
-    (rel/pose-if-absent! conn (assoc opts :kind :related-to :value nil)))
+    (rel/pose-if-absent! conn (assoc opts :kind :related-to)))
   (tracking/bump-report-updated! conn pose-from)
   (tracking/bump-report-updated! conn pose-to)
   (when (= :patch source-type)
     (rel/propagate-patch-closure!
-     conn pose-from :patch email-eid
+     conn pose-from email-eid
      propagate (when propagate-tgt pose-to))))
 
 (defn- apply-closure-clear-row!
@@ -1048,7 +1048,7 @@
           (when (and (= :patch source-type)
                      (contains? (:set resolved) :report/closed)
                      (common/patch-triggers? source-cfg))
-            (rel/propagate-patch-closure! conn report-eid :patch email-eid
+            (rel/propagate-patch-closure! conn report-eid email-eid
                                           :resolved nil)))
         (doseq [row valid-rows]
           (apply-closure-set-row! conn row email-eid from-addr posed-at source-type))

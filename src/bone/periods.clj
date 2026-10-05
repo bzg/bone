@@ -92,10 +92,5 @@
   "Vector of error strings for `source`'s :periods ([] = valid or absent)."
   [source]
   (let [periods (:periods source)]
-    (if-not periods
-      []
-      (let [entry-errs (into [] (mapcat validate-entry (range) periods))
-            cont-errs  (if (>= (count periods) 2)
-                         (validate-contiguity periods)
-                         [])]
-        (vec (concat entry-errs cont-errs))))))
+    (into (vec (mapcat validate-entry (range) periods))
+          (validate-contiguity periods))))

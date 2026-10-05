@@ -20,7 +20,7 @@
          '[clojure.string :as str]
          '[hiccup2.core :as h]
          '[taoensso.timbre :as log]
-         '[bone.common :refer [parse-cli-args load-config escape-script-payload]]
+         '[bone.common :refer [parse-cli-args escape-script-payload]]
          '[bone.html-bb :refer [pico-cdn resolved-theme set-theme!
                                 bone-description page-title
                                 footer-css bone-footer wrap-js spit-html
@@ -67,7 +67,6 @@
   th[data-sort]::after { content: ' ↕'; opacity: 0.3; font-size: 0.75em; }
   th[data-sort].asc::after  { content: ' ↑'; opacity: 0.7; }
   th[data-sort].desc::after { content: ' ↓'; opacity: 0.7; }
-  tr.hidden { display: none; }
   [data-theme=light] { --bone-stripe-bg: #f5f5f5; --bone-row-bg: #fff; }
   [data-theme=dark]  { --bone-stripe-bg: #1a1f2b; --bone-row-bg: #13171f; }
   tr.stripe td       { background-color: var(--bone-stripe-bg); }

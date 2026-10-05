@@ -7,8 +7,7 @@
   <head> builder, nav bar, org->HTML helpers, and an optional
   `tidy` pretty-printer."
   (:require [babashka.process]
-            [clojure.string :as str]
-            [hiccup2.core :as h]))
+            [clojure.string :as str]))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared CDN
@@ -120,11 +119,9 @@
    opts keys:
      :title      -- page <title> (required)
      :css        -- inline CSS string (optional)
-     :extra-head -- raw HTML string inserted before </head> (optional)
-     :rss-href   -- href for <link rel=alternate> RSS (optional)"
-  [{:keys [title css extra-head rss-href]}]
-  (let [title    (html-escape title)
-        rss-href (html-escape rss-href)]
+     :extra-head -- raw HTML string inserted before </head> (optional)"
+  [{:keys [title css extra-head]}]
+  (let [title (html-escape title)]
     (str "<head>\n"
          "<meta charset=\"UTF-8\">\n"
          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
@@ -140,9 +137,6 @@
                               (str "<link rel=\"stylesheet\" href=\"" link "\">\n")
                               (str "<style>\n" inline "\n</style>\n")))
                           entries)))
-         (when rss-href
-           (str "<link rel=\"alternate\" type=\"application/rss+xml\" "
-                "title=\"BONE Reports RSS\" href=\"" rss-href "\">\n"))
          "<title>" title "</title>\n"
          (when css (str "<style>\n" css "\n</style>\n"))
          (or extra-head "")

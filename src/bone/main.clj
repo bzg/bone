@@ -103,10 +103,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- iso->date [s]
-  (when (and (string? s) (re-matches #"\d{4}-\d{2}-\d{2}" s))
-    ;; "2026-02-30" matches the regex but fails to parse: nil => fetch-err.
-    (try (Date/from (Instant/parse (str s "T00:00:00Z")))
-         (catch Exception _ nil))))
+  ;; "2026-02-30" has the ISO shape but fails to parse: nil => fetch-err.
+  (when (string? s) (common/parse-iso-date s)))
 
 (defn- duration->days [s]
   (when (and (string? s) (re-matches #"\d+[dwmy]" s))

@@ -74,7 +74,7 @@
 (load-datalevin-pod!)
 
 ;; ---------------------------------------------------------------------------
-;; File-based export timestamp (replaces DB-based save-last-export!)
+;; File-based export timestamp
 ;; The export is fully read-only w.r.t. the database.
 ;; ---------------------------------------------------------------------------
 
@@ -435,7 +435,7 @@
 
 (defn- sender-role
   "Determine role of sender for a given source context."
-  [from source-name _source-map maintainers-map]
+  [from source-name maintainers-map]
   (when (and (seq from) source-name)
     (let [from-lc (str/lower-case from)]
       (when (contains? (get maintainers-map source-name #{}) from-lc)
@@ -660,9 +660,9 @@
     (let [last-addr (str/lower-case (:report/last-activity-address report))
           op-addr   (some-> (get-in report [:report/email :email/author-address])
                             str/lower-case)
-          last-role (sender-role last-addr source-name source-map maintainers-map)
+          last-role (sender-role last-addr source-name maintainers-map)
           op-role   (when op-addr
-                      (sender-role op-addr source-name source-map maintainers-map))]
+                      (sender-role op-addr source-name maintainers-map))]
       (when (and last-role (not op-role))
         (let [config                   (ctx-config)
               src-cfg                  (get source-map source-name)
@@ -741,7 +741,7 @@
                         (:email/author-name email))
         arch        (archive-url report email source-map)
         relations   (group-relations report source-map)
-        role        (sender-role from source-name source-map maintainers-map)
+        role        (sender-role from source-name maintainers-map)
         awaiting?   (awaiting-reply? report source-name source-map maintainers-map)]
     (-> {:type     (name (:report/type report))
          :subject  (or (:email/subject email) "")

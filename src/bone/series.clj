@@ -120,8 +120,7 @@
                 :kind      :related-to
                 :setter    (:email/author-address email)
                 :email-eid (:db/id email)
-                :posed-at  (or (:email/date-sent email) (Date.))
-                :value     nil}
+                :posed-at  (or (:email/date-sent email) (Date.))}
           linked (filterv (fn [sibling-eid]
                             (rel/pose-if-absent! conn (assoc opts :to-eid sibling-eid)))
                           existing)]

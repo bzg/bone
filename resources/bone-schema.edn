@@ -160,7 +160,6 @@
  :meta/ident         {:db/valueType :db.type/string
                       :db/unique    :db.unique/identity}
  :meta/last-modified {:db/valueType :db.type/instant}
- :meta/last-export   {:db/valueType :db.type/instant}
 
  ;; --- Votes (one entity per voter per report) ---
  :vote/key    {:db/valueType :db.type/string

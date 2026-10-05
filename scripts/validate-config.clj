@@ -139,7 +139,7 @@
         :since  (s/and (s/keys :req-un [:ingest.fetch/since])
                        #(= #{:since} (set (keys %))))
         :window (s/and (s/keys :opt-un [:ingest.fetch/start :ingest.fetch/end])
-                       #(seq %)
+                       seq
                        #(every? #{:start :end} (keys %))
                        (fn [{:keys [start end]}]
                          (or (nil? start) (nil? end) (neg? (compare start end)))))))
@@ -220,7 +220,6 @@
   (and (map? v)
        (seq v)
        (every? #{:words :scope :report-types} (keys v))
-       (some #{:words :scope :report-types} (keys v))
        (if (:words v) (s/valid? ::trigger-words (:words v)) true)
        (if-let [sc (:scope v)]
          (if (contains? reg/setter-scoped-command-ids cmd-id)

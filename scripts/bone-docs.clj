@@ -340,67 +340,6 @@
                       :source source})]]))))
 
 ;; ---------------------------------------------------------------------------
-;; Filter feed links in "Getting the data" table
-;; ---------------------------------------------------------------------------
-
-(defn- strip-dead-links
-  "Remove org links [[file][label]] whose target does not exist in out-dir.
-  Bare links are replaced by their label; separators (', ') before/after
-  removed links are cleaned up."
-  [cell out-dir]
-  (let [;; Replace each [[target][label]] with label if file exists, else ""
-        replaced (str/replace
-                  cell
-                  #"\[\[([^\]]+)\]\[([^\]]+)\]\]"
-                  (fn [[_ target label]]
-                    (if (.exists (io/file out-dir target))
-                      (str "[[" target "][" label "]]")
-                      "")))
-        ;; Clean up separators: collapse multiple ", " and trim
-        cleaned (-> replaced
-                    str/trim
-                    (str/replace #",\s*,+" ",")
-                    (str/replace #"^,\s*" "")
-                    (str/replace #",\s*$" "")
-                    str/trim)]
-    cleaned))
-
-(defn filter-feed-links
-  "Process the org text: in table rows that contain feed links (*.json,
-  *.xml, *.org), remove links to files that don't exist in out-dir.
-  Removes entire rows where all links have been stripped.
-  Cleans up adjacent hlines left by removed rows."
-  [org-text out-dir]
-  (if-not out-dir
-    org-text
-    (let [lines (str/split-lines org-text)
-          hline? #(re-matches #"\s*\|[-+]+\|\s*" %)]
-      (->> lines
-           (map (fn [line]
-                  (if (and (str/starts-with? (str/trim line) "|")
-                           (re-find #"\[\[.+\.(json|xml|org)\]" line))
-                    ;; This is a table row with feed links -- process each cell
-                    (let [cells (->> (str/split line #"\|" -1)
-                                     (drop 1) butlast
-                                              (mapv #(str/trim %)))
-                          filtered (mapv #(strip-dead-links % out-dir) cells)
-                          ;; Drop row if format column (2nd cell) is empty
-                          format-cell (get filtered 1)]
-                      (when-not (str/blank? format-cell)
-                        (str "| " (str/join " | " filtered) " |")))
-                    line)))
-           (remove nil?)
-           ;; Remove consecutive hlines (keep first)
-           (reduce (fn [acc line]
-                     (if (and (hline? line)
-                              (seq acc)
-                              (hline? (peek acc)))
-                       acc
-                       (conj acc line)))
-                   [])
-           (str/join "\n")))))
-
-;; ---------------------------------------------------------------------------
 ;; Maintainers section
 ;; ---------------------------------------------------------------------------
 
@@ -507,8 +446,7 @@
                           org-text    (-> (slurp "resources/docs-tpl.org")
                                           (substitute-version (bone-version))
                                           (substitute-source-links source-cfg)
-                                          (substitute-template labels cmds prefix)
-                                          (filter-feed-links effective-dir))
+                                          (substitute-template labels cmds prefix))
                           body-html   (cond-> (org->html org-text)
                                         maint-html  (str "\n" maint-html)
                                         config-html (str "\n" config-html))
