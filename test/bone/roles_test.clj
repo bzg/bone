@@ -49,7 +49,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "user@x.org"
-                                  "Add maintainer: intruder@x.org" t1)
+                                  "Add maintainer: intruder@x.org" t1 false)
       (is (not (common/maintainer? (roles/get-tenures (d/db conn) "s")
                                    "intruder@x.org")))))
 
@@ -58,7 +58,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "co@x.org"
-                                  "Add maintainer: peer@x.org" t1)
+                                  "Add maintainer: peer@x.org" t1 false)
       (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
                               "peer@x.org")))))
 
@@ -68,7 +68,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "co@x.org"
-                                  "Remove maintainer: lead@x.org" t1)
+                                  "Remove maintainer: lead@x.org" t1 false)
       ;; lead tenure is untouched
       (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
                               "lead@x.org"))))
@@ -78,7 +78,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "lead@x.org"
-                                  "Remove maintainer: co@x.org" t1)
+                                  "Remove maintainer: co@x.org" t1 false)
       (is (not (common/maintainer? (roles/get-tenures (d/db conn) "s")
                                    "co@x.org"))))))
 
@@ -88,7 +88,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "lead@x.org"
-                                  "Remove maintainer: lead@x.org" t1)
+                                  "Remove maintainer: lead@x.org" t1 false)
       (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
                               "lead@x.org"))
       (is (= "lead@x.org"
@@ -100,7 +100,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "co@x.org"
-                                  "Add maintainer: peer@x.org" t1)
+                                  "Add maintainer: peer@x.org" t1 false)
       (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
                               "peer@x.org"))))
 
@@ -109,7 +109,7 @@
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls! conn t0 "s" "co@x.org"
-                                  "Add maintainer: Peer User <peer@x.org>" t1)
+                                  "Add maintainer: Peer User <peer@x.org>" t1 false)
       (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
                               "peer@x.org"))))
 
@@ -119,7 +119,7 @@
           t0   (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls!
        conn t0 "s" "co@x.org"
-       "Add maintainer: alice@x.org Bob <bob@x.org> carol@x.org" t1)
+       "Add maintainer: alice@x.org Bob <bob@x.org> carol@x.org" t1 false)
       (let [ts (roles/get-tenures (d/db conn) "s")]
         (is (common/maintainer? ts "alice@x.org"))
         (is (common/maintainer? ts "bob@x.org"))
@@ -181,7 +181,7 @@
      conn {:name "s" :maintainers ["lead@x.org" "bob@x.org"]})
     (let [t0 (roles/get-tenures (d/db conn) "s")]
       (roles/apply-role-controls!
-       conn t0 "s" "lead@x.org" "Remove maintainer: bob@x.org" t1))
+       conn t0 "s" "lead@x.org" "Remove maintainer: bob@x.org" t1 false))
     (roles/sync-source-tenures!
      conn {:name "s" :maintainers ["lead@x.org" "bob@x.org"]})
     (is (not (contains? (active conn "s") "bob@x.org"))

@@ -42,7 +42,7 @@
 
 (defn configure-email-logging!
   [smtp-cfg {:keys [to level] :or {level :error}}]
-  (when (and smtp-cfg to)
+  (when to
     (let [{:keys [host port tls user password from]} smtp-cfg
           timeout (str smtp-log-timeout-ms)
           conn {:host host :port (or port 587) :tls (boolean tls)
@@ -186,7 +186,7 @@
 (defn- advance-watermark! [db-conn mailbox-name msgs safe-ids]
   (let [all-uids (->> msgs (keep :uid) sort)]
     (if-let [new-wm (max-contiguous-safe-uid all-uids safe-ids)]
-      (do (when (not= new-wm (some->> all-uids last))
+      (do (when (not= new-wm (last all-uids))
             (log/warn "Watermark stopped at UID" new-wm
                       "(some messages failed -- will retry on next reconnect)"))
           (ingest/save-imap-uid! db-conn mailbox-name new-wm))
@@ -337,8 +337,8 @@
   "Run store-and-process! on `msg`, logging and swallowing exceptions.
   Returns the result keyword (:ok/:skip/:retry); :retry on exception so
   the IMAP watermark stays put and the message gets a fresh attempt on
-  the next catch-up.  Honours `shutting-down?` -- callers that iterate
-  should also check it via a :while clause to stop cleanly."
+  the next catch-up.  Does not check `shutting-down?` itself: callers
+  that iterate do, to stop cleanly."
   [ctx msg]
   (try
     (store-and-process! ctx msg)
@@ -346,34 +346,29 @@
       (log/error e "Failed to process id:" (:id msg) (blog/exception-msg e))
       :retry)))
 
-(defn- collect-safe-uids
-  "Set of UIDs from `msgs` that didn't need retry.  Caps the IMAP
-  watermark advance.  Stops early on shutdown so the grace period
-  isn't spent looping over a large catch-up."
-  [ctx msgs]
-  (reduce (fn [acc msg]
-            (if (shutting-down?)
-              (reduced acc)
-              (let [result (safe-store-and-process! ctx msg)]
-                (if (and (not= :retry result) (:uid msg))
-                  (conj acc (:uid msg))
-                  acc))))
-          #{} msgs))
-
 (defn- process-each!
   "Ingest each message in order; per-message exceptions are logged and
-  don't abort the loop.  Stops early on shutdown.  Returns the set of
-  message :id values whose processing needs a retry (:retry) -- a
-  failure before store leaves no trace in the DB, so callers sealing a
-  Maildir baseline must exclude these ids or they would be lost."
+  don't abort the loop.  Stops early on shutdown so the grace period
+  isn't spent looping over a large catch-up.  Returns
+  {:safe-uids #{...} :failed-ids #{...}}: the UIDs that didn't need a
+  retry (they cap the IMAP watermark advance) and the message :id
+  values that did (:retry) -- a failure before store leaves no trace
+  in the DB, so callers sealing a Maildir baseline must exclude these
+  ids or they would be lost."
   [ctx msgs]
-  (reduce (fn [failed msg]
-            (if (shutting-down?)
-              (reduced failed)
-              (if (= :retry (safe-store-and-process! ctx msg))
-                (conj failed (:id msg))
-                failed)))
-          #{} msgs))
+  (reduce (fn [acc msg]
+            (cond
+              (shutting-down?)
+              (reduced acc)
+
+              (= :retry (safe-store-and-process! ctx msg))
+              (update acc :failed-ids conj (:id msg))
+
+              (:uid msg)
+              (update acc :safe-uids conj (:uid msg))
+
+              :else acc))
+          {:safe-uids #{} :failed-ids #{}} msgs))
 
 (defn- catch-up-imap!
   "IMAP incremental fetch via UID watermark; falls back to first-run
@@ -393,7 +388,7 @@
                                          (str (inc watermark)) nil))))]
     (log/info "Fetched" (count msgs) "messages")
     (when (and (seq msgs) (not (shutting-down?)))
-      (let [safe-ids (collect-safe-uids ctx msgs)]
+      (let [safe-ids (:safe-uids (process-each! ctx msgs))]
         (advance-watermark! db-conn mailbox-name msgs safe-ids)))))
 
 (defn- catch-up-maildir!
@@ -434,7 +429,7 @@
                          #{})
                      :else
                      (do (log/info "Fetched" (count msgs) "messages from Maildir (first run)")
-                         (process-each! ctx msgs)))]
+                         (:failed-ids (process-each! ctx msgs))))]
         ;; Seal pre-existing ids as seen, then flag init done.  Never
         ;; seal on shutdown: ids interrupted mid-loop are neither stored
         ;; nor failed, and sealing them would lose them for good.  Ids
@@ -793,7 +788,6 @@
                        :while (not (shutting-down?))]
                    (batch-fetch-one! mb db-conn ingest-cfg cli-fetch-map source-map sources)))]
     (when (and (not (shutting-down?))
-               (seq results)
                (not-any? true? results))
       (log/error (count results) "mailbox(es) failed -- aborting before expire/flush.")
       (System/exit 1))
@@ -955,7 +949,7 @@
       (System/exit 1))
     (setup-logging! config)
     (let [mailboxes     (validate-mailboxes! config)
-          ingest-cfg    (or (:ingest config) {})
+          ingest-cfg    (:ingest config)
           cli-fetch-map (some-> cli-fetch cli-fetch->map)
           db-path       (common/expand-home (common/db-path config))]
       ;; Single-instance guard: taken before the --fresh wipe so a
@@ -972,10 +966,7 @@
         (if watch?
           (watch-all! mailboxes db-conn ingest-cfg cli-fetch-map config-path)
           (do (batch-run! mailboxes db-conn ingest-cfg cli-fetch-map config-path)
-              ;; Datalevin/LMDB keeps non-daemon threads alive; explicit
-              ;; close + System/exit avoids a hung JVM after batch mode.
-              (try (ingest/close db-conn)
-                   (catch Exception e
-                     (log/debug "DB close failed:" (.getMessage e))))
-              (shutdown-agents)
+              ;; Datalevin/LMDB keeps non-daemon threads alive: exit
+              ;; explicitly to avoid a hung JVM after batch mode.  The
+              ;; shutdown hook closes the DB.
               (System/exit 0)))))))

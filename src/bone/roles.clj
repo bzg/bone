@@ -48,7 +48,7 @@
 
 (defn- active-as-of
   "Tenures whose half-open window [:from, :to) contains `as-of`.
-  nil `as-of` (dawn of time) returns []."
+  nil `as-of` (dawn of time) returns nil."
   [tenures ^Date as-of]
   (when as-of
     (filter #(window-contains? % as-of) tenures)))
@@ -73,7 +73,7 @@
   reference instant."
   [conn source-name {:keys [^Date from maintainers]}]
   (let [all       (get-tenures (d/db conn) source-name)
-        declared  (into [] (distinct (map str/lower-case (or maintainers []))))
+        declared  (into [] (distinct (map str/lower-case maintainers)))
         declared? (set declared)
         active?   (set (map :email (active-as-of all from)))
         adds      (into []
@@ -86,12 +86,11 @@
                                     from (assoc :maint-tenure/from from)))))
                         (map-indexed vector declared))
         drops     (remove declared? active?)
-        closes    (when from
-                    (into []
-                          (keep (fn [email]
-                                  (when-let [t (covering-tenure all email from)]
-                                    [[:db/add (:eid t) :maint-tenure/to from] email])))
-                          drops))]
+        closes    (into []
+                        (keep (fn [email]
+                                (when-let [t (covering-tenure all email from)]
+                                  [[:db/add (:eid t) :maint-tenure/to from] email])))
+                        drops)]
     (when (seq adds)
       (d/transact! conn adds)
       (doseq [{email :maint-tenure/email f :maint-tenure/from} adds]
@@ -189,12 +188,11 @@
                      (= a lead)
                      (do (log/warn "Denied: cannot remove lead maintainer" a
                                    "(for" source-name ")")
-                         (when failure-ctx
-                           (commands/record-failure!
-                            (assoc failure-ctx
-                                   :reason   :insufficient-scope
-                                   :audience :maintainers
-                                   :command  (str "Remove maintainer: " a))))
+                         (commands/record-failure!
+                          (assoc failure-ctx
+                                 :reason   :insufficient-scope
+                                 :audience :maintainers
+                                 :command  (str "Remove maintainer: " a)))
                          nil)
                      :else
                      ;; Per-iteration DB refresh: closing one tenure
@@ -213,23 +211,20 @@
   is the pre-directive snapshot for permission checks; DB is re-read
   between operations.  Denied attempts go to the failures file as
   :insufficient-scope/:maintainers so the lead sees them."
-  ([conn tenures source-name from-addr body-text email-date]
-   (apply-role-controls! conn tenures source-name from-addr body-text email-date false))
-  ([conn tenures source-name from-addr body-text email-date strict-syntax?]
-   (let [controls    (parse-role-controls body-text strict-syntax?)
-         ;; as-of the email's date: sync-all-sources! installs *all*
-         ;; config periods up front, so on a --fresh replay a now-closed
-         ;; tenure must still grant what it granted at the time.
-         is-maint    (common/maintainer? tenures from-addr email-date)
-         ;; Lead stays a "current" notion: Remove maintainer is
-         ;; lead-only as of now.
-         is-lead     (common/lead-maintainer? tenures from-addr)
-         failure-ctx (when (and from-addr source-name)
-                       {:source     source-name
-                        :from-addr  from-addr
-                        :email-date email-date
-                        :report-mid ""})]
-     (doseq [{:keys [command addresses]} controls]
+  [conn tenures source-name from-addr body-text email-date strict-syntax?]
+  (let [controls    (parse-role-controls body-text strict-syntax?)
+        ;; as-of the email's date: sync-all-sources! installs *all*
+        ;; config periods up front, so on a --fresh replay a now-closed
+        ;; tenure must still grant what it granted at the time.
+        is-maint    (common/maintainer? tenures from-addr email-date)
+        ;; Lead stays a "current" notion: Remove maintainer is
+        ;; lead-only as of now.
+        is-lead     (common/lead-maintainer? tenures from-addr)
+        failure-ctx {:source     source-name
+                     :from-addr  from-addr
+                     :email-date email-date
+                     :report-mid ""}]
+    (doseq [{:keys [command addresses]} controls]
       (case command
         "Add maintainer"
         (if is-maint
@@ -238,12 +233,11 @@
             (log/info "add maintainer:" (str/join " " opened)
                       (str "(for " source-name ")")))
           (do (log/warn "Denied:" from-addr "lacks permission for: Add maintainer")
-              (when failure-ctx
-                (commands/record-failure!
-                 (assoc failure-ctx
-                        :reason   :insufficient-scope
-                        :audience :maintainers
-                        :command  (str "Add maintainer: " (str/join " " addresses)))))))
+              (commands/record-failure!
+               (assoc failure-ctx
+                      :reason   :insufficient-scope
+                      :audience :maintainers
+                      :command  (str "Add maintainer: " (str/join " " addresses))))))
 
         "Remove maintainer"
         (if is-lead
@@ -257,14 +251,11 @@
                         (str "(for " source-name ")"))))
           (do (log/warn "Denied:" from-addr
                         "lacks permission for: Remove maintainer (lead only)")
-              (when failure-ctx
-                (commands/record-failure!
-                 (assoc failure-ctx
-                        :reason   :insufficient-scope
-                        :audience :maintainers
-                        :command  (str "Remove maintainer: " (str/join " " addresses)))))))
-
-        nil)))))
+              (commands/record-failure!
+               (assoc failure-ctx
+                      :reason   :insufficient-scope
+                      :audience :maintainers
+                      :command  (str "Remove maintainer: " (str/join " " addresses))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Permission check for report creation (pure)

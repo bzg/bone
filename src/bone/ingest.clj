@@ -75,7 +75,7 @@
   "Align the stored UIDVALIDITY with the mailbox's live value.
   Returns :match, :stamped (first time), :reset (changed -- watermark
   cleared, caller falls back to first-run fetch), or :unsupported
-  (backend cannot report UIDVALIDITY, e.g. Maildir)."
+  (nil `live-uv`: the backend could not report UIDVALIDITY)."
   [conn mailbox-name live-uv]
   (if (nil? live-uv)
     :unsupported
@@ -217,10 +217,9 @@
 (defn- clean-subject
   "Collapse whitespace in a Subject, falling back to \"(no subject)\"."
   [subject]
-  (let [s (or subject "")]
-    (if (str/blank? s)
-      "(no subject)"
-      (-> s (str/replace #"\s+" " ") str/trim))))
+  (if (str/blank? subject)
+    "(no subject)"
+    (-> subject (str/replace #"\s+" " ") str/trim)))
 
 ;; ---------------------------------------------------------------------------
 ;; Transform
@@ -228,7 +227,7 @@
 
 (defn email->txdata
   "Mailseq message => Datalevin tx-data.  Source is NOT stamped here
-  (resolved at digest time from headers).  Opts:
+  (`store-email!` adds it from its :source opt).  Opts:
     :max-attachment-size -- override 1 MB cap
     :message-id          -- pre-normalized mid; recomputed if absent."
   ([msg] (email->txdata msg {}))
@@ -300,18 +299,12 @@
 ;; Store
 ;; ---------------------------------------------------------------------------
 
-(defn- truncate
-  "Truncate string s to at most n characters."
-  [s n]
-  (when (string? s) (subs s 0 (min n (count s)))))
-
 (defn store-email!
   "Store a parsed email.  Skips nil/oversized/duplicate Message-IDs.
   Returns true if stored.
   Opts: :source (stamps the email + scopes (source,id) dedup; required
   for live ingestion), :max-attachment-size (override 1 MB default)."
-  ([conn msg] (store-email! conn msg {}))
-  ([conn msg opts]
+  [conn msg opts]
   (let [message-id (or (:message-id opts)
                        (common/extract-bracketed-id (:message-id msg)))
         id         (:id msg)
@@ -338,7 +331,8 @@
         (try
           (d/transact! conn [txdata])
           (log/info "Stored email id:" id
-                    "Subject:" (truncate (:email/subject txdata) 60))
+                    "Subject:" (let [s (:email/subject txdata)]
+                                 (subs s 0 (min 60 (count s)))))
           true
           (catch Exception e
             ;; If the message-id now exists, a concurrent writer (another
@@ -348,5 +342,5 @@
                                   (catch Exception _ false))]
               (if now-exists?
                 (do (log/debug "Duplicate Message-ID (race):" message-id) false)
-                (throw e))))))))))
+                (throw e)))))))))
 

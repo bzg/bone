@@ -38,18 +38,15 @@
         (= :deadline after)
         (assoc v :expires-on-deadline true)
 
-        (string? after)
         ;; ISO-shaped strings are dates (parse-iso-date also validates
         ;; the calendar); anything else is tried as a duration.
-        (if (re-matches #"\d{4}-\d{2}-\d{2}" after)
-          (if-let [d (common/parse-iso-date after)]
-            (assoc v :expires-on-date d)
-            ;; Well-shaped but calendar-invalid ("2026-02-30"): a
-            ;; silent nil would just never expire anything.
-            (log/warn "Ignoring expiry rule with invalid calendar date:"
-                      (pr-str after)))
-          (when-let [d (parse-delay-safe after)]
-            (assoc v :delay-days d)))
+        (and (string? after) (re-matches #"\d{4}-\d{2}-\d{2}" after))
+        (if-let [d (common/parse-iso-date after)]
+          (assoc v :expires-on-date d)
+          ;; Well-shaped but calendar-invalid ("2026-02-30"): a
+          ;; silent nil would just never expire anything.
+          (log/warn "Ignoring expiry rule with invalid calendar date:"
+                    (pr-str after)))
 
         :else
         (when-let [d (parse-delay-safe after)]
@@ -116,7 +113,7 @@
                          :email/subject          (str "Auto-expired: " report-mid)}])]
           (get (:tempids tx) tempid)))))
 
-(defn should-expire?
+(defn- should-expire?
   "True when a report matches its explicit :expiry-value or the
   source-level expiry rule for its type."
   [report-data source-map src rtype now]
@@ -128,21 +125,17 @@
         (when-let [rule (parse-expiry-rule rule-raw)]
           (rule-matches? rule report-data now))))))
 
-(defn filter-expirable
-  "Seq of {:rid :rtype :src :report-mid} for candidates that should
-  expire (open + matching the expiry rule)."
+(defn- filter-expirable
+  "Seq of {:rid :rtype :src :report-mid} for the open-report
+  `candidates` matching their expiry rule."
   [candidates db-snap source-map now]
   (keep (fn [[rid rtype src]]
           (let [report-data (d/pull db-snap [:report/message-id
                                              :report/acked :report/owned
                                              :report/urgent :report/important
-                                             :report/closed
                                              :report/expiry-value :report/deadline-value
                                              :report/last-activity] rid)]
-            ;; Defensive: expire-reports! already excludes closed
-            ;; reports, but direct callers may pass any candidates.
-            (when (and (nil? (:report/closed report-data))
-                       (should-expire? report-data source-map src rtype now))
+            (when (should-expire? report-data source-map src rtype now)
               {:rid rid :rtype rtype :src src
                :report-mid (:report/message-id report-data)})))
         candidates))

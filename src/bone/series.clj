@@ -50,7 +50,7 @@
          :where
          [?s :series/topic ?topic] [?s :series/sender ?sender]
          [?s :series/expected ?exp] (not [?s :series/closed _])]
-       db (or topic "") sender total))
+       db topic sender total))
 
 (defn find-open-series-by-topic-sender [db topic sender]
   (when (and topic sender)
@@ -180,18 +180,16 @@
     (let [email-eid (:db/id email)
           topic  (:topic report-info)
           db     (d/db conn)
-          existing-series (when topic
-                            (find-open-series-by-topic-sender db topic from-addr))
+          existing-series (find-open-series-by-topic-sender db topic from-addr)
           parent-mids (when (and (seq existing-series) (seq parent-report-eids))
                         (set (d/q '[:find [?mid ...]
                                     :in $ [?r ...]
                                     :where [?r :report/message-id ?mid]]
                                   db parent-report-eids)))
-          to-close (when (seq existing-series)
-                     (series-restart-plan
-                      n
-                      (mapv #(series-restart-info db %) existing-series)
-                      (or parent-mids #{})))]
+          to-close (series-restart-plan
+                    n
+                    (mapv #(series-restart-info db %) existing-series)
+                    (or parent-mids #{}))]
       (doseq [sid to-close]
         (close-series! conn sid email-eid)
         (when (:version report-info)
