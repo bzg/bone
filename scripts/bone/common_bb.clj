@@ -15,7 +15,7 @@
 ;; Datalevin pod (bb-only -- JVM uses datalevin.core directly)
 ;; ---------------------------------------------------------------------------
 
-(def datalevin-version "1.1.0")
+(def ^:private datalevin-version "1.1.0")
 
 (defn load-datalevin-pod! []
   (require '[babashka.pods :as pods])

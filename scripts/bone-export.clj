@@ -30,14 +30,20 @@
 ;;   bb export html          -- generate index.html for each source
 ;;   bb export stats         -- generate stats.json for each source
 ;;   bb export patches       -- export patch files for each source
-;;   bb export events        -- export ICS event files and events.ics for each source
+;;   bb export events        -- export ICS event files and announcements*.ics for each source
 ;;   bb export text          -- export text/plain and text/x-log attachments
 ;;   bb export root          -- regenerate public/index.html (source listing)
+;;   bb export --index-only  -- same as "root"
 ;;   bb export all           -- all formats (still incremental)
 ;;   bb export --force       -- force full export, ignore timestamps
 ;;   bb export json -n src   -- export only source "src"
 ;;   bb export json -p 2     -- only priority >= 2
 ;;   bb export json -s 3     -- only status >= 3
+;;   bb export --closed-retention 90d  -- drop reports closed before a date/duration
+;;   bb export --topics-filter a,b     -- only reports with one of these topics
+;;   bb export --html-theme <name|path|url> --html-page-size <n>
+;;             --html-columns <cols> --html-columns-sort <col>
+;;                           -- forwarded to the index/stats/docs sub-scripts
 ;;
 ;; Environment / defaults:
 ;;   BONE_DB -- path to db (default: ./data/bone-db)
@@ -48,7 +54,7 @@
             [clojure.string :as str]
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
-            [bone.common :refer [parse-headers slugify mid-hash
+            [bone.common :refer [parse-headers get-header slugify mid-hash
                                  format-date format-date-iso
                                  extract-bracketed-id-raw
                                  report-priority report-status report-descendant-count
@@ -142,15 +148,8 @@
   even though no report's :report/updated-at moved."
   [db source-name ^java.util.Date since]
   (boolean
-   (when since
-     (let [st    (.getTime since)
-           froms (d/q '[:find [?t ...] :in $ ?src
-                        :where [?e :maint-tenure/source ?src] [?e :maint-tenure/from ?t]]
-                      db source-name)
-           tos   (d/q '[:find [?t ...] :in $ ?src
-                        :where [?e :maint-tenure/source ?src] [?e :maint-tenure/to ?t]]
-                      db source-name)]
-       (some (fn [^java.util.Date dt] (> (.getTime dt) st)) (concat froms tos))))))
+   (some (fn [^java.util.Date dt] (.after dt since))
+         (mapcat (juxt :from :to) (get-tenures db source-name)))))
 
 (defn- preserve-shell!
   "When `regen?` is false, copy a previously-exported top-level file from
@@ -361,28 +360,19 @@
        (if (:report/owned report) "O" "-")
        (close-flag report)))
 
-(defn- votes-str
-  "Format vote counts as \"score/total\" from a seq of vote maps, or nil."
-  [votes]
-  (when (seq votes)
-    (let [{:keys [up down null]} (vote-counts votes)
-          total                  (+ up down null)]
-      (when (pos? total)
-        (str (- up down) "/" total)))))
-
 (defn- build-maintainers
   "Gather per-source currently-active maintainer sets from DB tenures.
    Returns source-name -> #{maintainer-emails}."
   [db source-map]
   (into {}
-        (map (fn [[source-name _]]
+        (map (fn [source-name]
                [source-name
                 (->> (get-tenures db source-name)
                      (remove :to)
                      (keep :email)
                      (map str/lower-case)
                      set)]))
-        source-map))
+        (keys source-map)))
 
 (defn- build-author-names
   "Build a {lowercased-addr -> latest-known author-name} map by scanning
@@ -497,6 +487,9 @@
                 m))
             m proxy-address-pairs)))
 
+(defn- strip-angle-brackets [s]
+  (when s (str/replace s #"^<|>$" "")))
+
 (defn- archive-url
   "Compute the archive URL for a report, or nil."
   [report email source-map]
@@ -507,7 +500,7 @@
             ;; and RSS <link>: http(s) only (no javascript:/data:).
             raw (when-let [aa (archived-at email)]
                   (when (re-matches #"(?i)https?://\S+" aa) aa))
-            mid (some-> (export-mid report email) (str/replace #"^<|>$" ""))
+            mid (strip-angle-brackets (export-mid report email))
             fmt (get-in source-map [source-name :archive-format-string])]
         (if (and fmt mid) (str/replace fmt "%s" mid) raw)))))
 
@@ -515,13 +508,13 @@
   "Build vote-related fields from vote data."
   [report-votes]
   (when (seq report-votes)
-    (let [votes  (votes-str report-votes)
-          counts (vote-counts report-votes)]
+    (let [{:keys [up down null]} (vote-counts report-votes)
+          total                  (+ up down null)]
       (cond-> {}
-        votes                   (assoc :votes votes)
-        (pos? (:up counts 0))   (assoc :votes-up (:up counts))
-        (pos? (:down counts 0)) (assoc :votes-down (:down counts))
-        (pos? (:null counts 0)) (assoc :votes-null (:null counts))))))
+        (pos? total) (assoc :votes (str (- up down) "/" total))
+        (pos? up)    (assoc :votes-up up)
+        (pos? down)  (assoc :votes-down down)
+        (pos? null)  (assoc :votes-null null)))))
 
 (defn- report-series-fields [series]
   (when series
@@ -637,13 +630,12 @@
   string) otherwise dominates the report->map pass at scale."
   [headers-edn header-name]
   (when headers-edn
-    (let [cache  (ctx-headers-cache)
-          parsed (or (get @cache headers-edn)
-                     (let [p (parse-headers headers-edn)]
-                       (swap! cache assoc headers-edn p)
-                       p))
-          lname  (str/lower-case header-name)]
-      (some (fn [[k v]] (when (= (str/lower-case k) lname) v)) parsed))))
+    (let [cache (ctx-headers-cache)]
+      (get-header (or (get @cache headers-edn)
+                      (let [p (parse-headers headers-edn)]
+                        (swap! cache assoc headers-edn p)
+                        p))
+                  header-name))))
 
 (def ^:private default-awaiting-delay-days 14)
 
@@ -730,11 +722,11 @@
                {}
                (group-by first (concat out in-related)))))
 
-(defn report->map [report source-map maintainers-map report-votes db]
+(defn report->map [report source-map maintainers-map report-votes]
   (let [email       (:report/email report)
         source-name (:email/source email)
-        att-data    (delay (when db
-                             (fetch-attachment-data db (:report/message-id report))))
+        db          (ctx-db)
+        att-data    (delay (fetch-attachment-data db (:report/message-id report)))
         att-email   (delay (:report/email @att-data))
         from        (or (:email/author-address email) "")
         from-name   (or (get (ctx-author-names) (str/lower-case from))
@@ -796,12 +788,11 @@
   mapping cost only once."
   [reports source-map maintainers-map]
   (let [av    (ctx-votes)
-        db    (ctx-db)
         cache (ctx-report-cache)]
     (mapv (fn [r]
             (let [eid (:db/id r)]
               (or (get @cache eid)
-                  (let [m (report->map r source-map maintainers-map (get av eid) db)]
+                  (let [m (report->map r source-map maintainers-map (get av eid))]
                     (swap! cache assoc eid m)
                     m))))
           reports)))
@@ -857,13 +848,12 @@
 
 (defn- updated-since?
   "True when a report changed after `since`, so its per-mid files
-  (patches/, text/, events/) must be (re)written.  A nil `since` means
-  no incremental cutoff (write everything).  A report without
+  (patches/, text/, events/) must be (re)written.  A report without
   :report/updated-at is treated as changed -- we never skip a write we
   are unsure about."
   [report ^java.util.Date since]
   (if-let [^java.util.Date updated (:report/updated-at report)]
-    (or (nil? since) (.after updated since))
+    (.after updated since)
     true))
 
 ;; ---------------------------------------------------------------------------
@@ -904,16 +894,13 @@
   `json-unchanged?`)."
   ([reports out-dir source-name source-map maintainers-map]
    (dump-json! reports out-dir source-name source-map maintainers-map "all.json" nil))
-  ([reports out-dir source-name source-map maintainers-map basename]
-   (dump-json! reports out-dir source-name source-map maintainers-map basename nil))
   ([reports out-dir source-name source-map maintainers-map basename extra-meta]
    (let [data     (map-reports reports source-map maintainers-map)
-         meta     (source-metadata source-name source-map)
-         envelope (cond-> {:bone-format bone-format
-                           :source      source-name
-                           :reports     data}
-                    (seq meta)       (merge meta)
-                    (seq extra-meta) (merge extra-meta))
+         envelope (merge {:bone-format bone-format
+                          :source      source-name
+                          :reports     data}
+                         (source-metadata source-name source-map)
+                         extra-meta)
          filename (str out-dir "/" basename)
          json-str (json/generate-string envelope {:pretty true})]
      (if (json-unchanged? filename json-str envelope)
@@ -949,8 +936,7 @@
         mid  (:message-id m)]
     (cond
       (seq arch) {:value (xml-escape arch) :permalink true}
-      mid        {:value (xml-escape (str "urn:message-id:" mid)) :permalink false}
-      :else      nil)))
+      mid        {:value (xml-escape (str "urn:message-id:" mid)) :permalink false})))
 
 (defn- report->rss-item [m]
   (let [title   (xml-escape (:subject m))
@@ -990,11 +976,11 @@
   [members]
   (let [patches (remove #(str/starts-with? (or (:patch-seq %) "") "0/") members)
         counts  (reduce (fn [acc m]
-                          (let [flags (or (:flags m) "---")]
-                           (cond
-                             (not= \- (nth flags 2 \-)) (update acc :closed (fnil inc 0))
-                             (not= \- (nth flags 0 \-)) (update acc :acked (fnil inc 0))
-                             :else                      (update acc :open (fnil inc 0)))))
+                          (let [flags (:flags m)]
+                            (cond
+                              (not= \- (nth flags 2)) (update acc :closed (fnil inc 0))
+                              (not= \- (nth flags 0)) (update acc :acked (fnil inc 0))
+                              :else                   (update acc :open (fnil inc 0)))))
                         {} patches)
         parts   (cond-> []
                   (:acked counts)  (conj (str (:acked counts) " acked"))
@@ -1086,9 +1072,6 @@
                     (.setTimeZone (java.util.TimeZone/getTimeZone "UTC")))]
       (str "[" (.format out-fmt d) "]"))))
 
-(defn- strip-angle-brackets [s]
-  (when s (str/replace s #"^<|>$" "")))
-
 (defn- org-safe
   "Strip characters that would break Org structure: newlines (which
   would split a headline or property) and the :END: token (which
@@ -1101,53 +1084,52 @@
 
 (def ^:private org-property-rows
   "Ordered :PROPERTIES: entries used by `report->org-entry`.  Each row:
-  `[<key in report-map> <:LABEL:> <xf> <default>]`.
-  An entry is emitted when `(get m key default)` is non-nil; `xf`, when
+  `[<key in report-map> <:LABEL:> <xf>]`.
+  An entry is emitted when `(get m key)` is non-nil; `xf`, when
   non-nil, transforms the value before stringification.  Vector order
   dictates property-drawer order."
-  [[:from         "FROM"         org-safe                                  ""]
-   [:date-raw     "DATE"         format-org-inactive-ts                    nil]
-   [:message-id   "MESSAGE-ID"   #(some-> % strip-angle-brackets org-safe) nil]
-   [:archived-at  "ARCHIVED-AT"  org-safe                                  nil]
-   [:flags        "FLAGS"        nil                                       "---"]
-   [:status       "STATUS"       nil                                       0]
-   [:replies      "REPLIES"      nil                                       0]
-   [:version      "VERSION"      org-safe                                  nil]
-   [:topic        "TOPIC"        org-safe                                  nil]
-   [:votes        "VOTES"        nil                                       nil]
-   [:votes-up     "VOTES-UP"     nil                                       nil]
-   [:votes-down   "VOTES-DOWN"   nil                                       nil]
-   [:votes-null   "VOTES-NULL"   nil                                       nil]
-   [:acked        "ACKED"        org-safe                                  nil]
-   [:owned        "OWNED"        org-safe                                  nil]
-   [:closed       "CLOSED"       org-safe                                  nil]
-   [:close-reason "CLOSE-REASON" nil                                       nil]
-   [:urgent       "URGENT"       org-safe                                  nil]
-   [:important    "IMPORTANT"    org-safe                                  nil]
-   [:deadline     "DEADLINE"     nil                                       nil]
-   [:expiry       "EXPIRY"       nil                                       nil]])
+  [[:from         "FROM"         org-safe]
+   [:date-raw     "DATE"         format-org-inactive-ts]
+   [:message-id   "MESSAGE-ID"   #(some-> % strip-angle-brackets org-safe)]
+   [:archived-at  "ARCHIVED-AT"  org-safe]
+   [:flags        "FLAGS"        nil]
+   [:status       "STATUS"       nil]
+   [:replies      "REPLIES"      nil]
+   [:version      "VERSION"      org-safe]
+   [:topic        "TOPIC"        org-safe]
+   [:votes        "VOTES"        nil]
+   [:votes-up     "VOTES-UP"     nil]
+   [:votes-down   "VOTES-DOWN"   nil]
+   [:votes-null   "VOTES-NULL"   nil]
+   [:acked        "ACKED"        org-safe]
+   [:owned        "OWNED"        org-safe]
+   [:closed       "CLOSED"       org-safe]
+   [:close-reason "CLOSE-REASON" nil]
+   [:urgent       "URGENT"       org-safe]
+   [:important    "IMPORTANT"    org-safe]
+   [:deadline     "DEADLINE"     nil]
+   [:expiry       "EXPIRY"       nil]])
 
 (defn- org-property-line
   "Render one :PROPERTIES: entry from a row of `org-property-rows`,
   or `nil` to skip it."
-  [m [k label xf default]]
-  (let [raw (get m k default)]
-    (when (some? raw)
-      (str ":" label ": " (if xf (xf raw) raw)))))
+  [m [k label xf]]
+  (when-some [raw (get m k)]
+    (str ":" label ": " (if xf (xf raw) raw))))
 
 (defn- report->org-entry [m]
   (let [;; Flag position 2 is the close flag: C/E/S/R, or - when open.
-        todo    (if (= (nth (:flags m "---") 2 \-) \-) "TODO" "DONE")
-        prio    (case (:priority m 0)
+        todo    (if (= (nth (:flags m) 2) \-) "TODO" "DONE")
+        prio    (case (:priority m)
                   3 "[#A] " 2 "[#B] " 1 "[#C] " "")
-        subject (org-safe (:subject m ""))
-        tags    (when-let [t (:type m)] (str ":" t ":"))
-        props   (cond-> (keep #(org-property-line m %) org-property-rows)
+        subject (org-safe (:subject m))
+        tags    (str ":" (:type m) ":")
+        props  (cond-> (keep #(org-property-line m %) org-property-rows)
                   (:series m)
                   (concat [(let [s (:series m)]
                              (str ":SERIES: " (:received s) "/" (:expected s)
                                   (when (:closed s) " closed")))]))]
-    (str "* " todo " " prio subject (when tags (str "  " tags)) "\n"
+    (str "* " todo " " prio subject "  " tags "\n"
          (when-let [d (:deadline m)]
            (str "DEADLINE: <" d ">\n"))
          ":PROPERTIES:\n"
@@ -1316,44 +1298,6 @@
     (when (pos? total)
       (log/info "Wrote" total "ICS event file(s)"))))
 
-(defn dump-events-filtered!
-  "Export events.json/org (open) and events-closed.json/org (closed)
-  for announcements that have ICS content."
-  [reports reports-dir source-name source-map maintainers-map fmts]
-  (let [events        (ics-announcements reports)
-        open-events   (vec (open-reports events))
-        closed-events (vec (filter :report/closed events))]
-    (if (seq open-events)
-      (do
-        (when (fmts "json")
-          (dump-json! open-events reports-dir source-name source-map maintainers-map
-                      "events.json"))
-        (when (fmts "org")
-          (dump-org! open-events reports-dir source-name source-map maintainers-map
-                     "events.org" "events"))
-        (when (fmts "rss")
-          (dump-rss! open-events reports-dir source-name source-map maintainers-map
-                     "events.xml" "events")))
-      (do
-        (delete-stale-file! reports-dir "events.json")
-        (delete-stale-file! reports-dir "events.org")
-        (delete-stale-file! reports-dir "events.xml")))
-    (if (seq closed-events)
-      (do
-        (when (fmts "json")
-          (dump-json! closed-events reports-dir source-name source-map maintainers-map
-                      "events-closed.json"))
-        (when (fmts "org")
-          (dump-org! closed-events reports-dir source-name source-map maintainers-map
-                     "events-closed.org" "events (closed)"))
-        (when (fmts "rss")
-          (dump-rss! closed-events reports-dir source-name source-map maintainers-map
-                     "events-closed.xml" "events (closed)")))
-      (do
-        (delete-stale-file! reports-dir "events-closed.json")
-        (delete-stale-file! reports-dir "events-closed.org")
-        (delete-stale-file! reports-dir "events-closed.xml")))))
-
 (defn- report-vcal-blocks
   "Extract {:vevents [...] :vtimezones [...]} (CRLF-normalized) from a
   report's ICS sources: every .ics attachment plus the inline body.  The
@@ -1396,9 +1340,9 @@
     (write! "announcements-closed.ics" "events (closed)" (filter :closed? tagged))))
 
 (defn dump-html!
-  "Generate index.html for a single source.
-  Uses all-open.json so only open reports are server-rendered;
-  closed reports are lazy-loaded by the client from all-closed.json."
+  "Generate the index.html shell for a single source.  The shell is
+  data-independent: bone-index.clj reads only source metadata from
+  all-open.json, and the client fetches the reports at runtime."
   [base-dir reports-dir cli-args]
   (let [json-file (str reports-dir "/all-open.json")]
     (apply process/shell "bb" "scripts/bone-index.clj"
@@ -1421,11 +1365,11 @@
 (defn dump-docs!
   "Generate docs.html for a single source."
   [base-dir source-name cli-args]
-  (apply process/shell (cond-> ["bb" "scripts/bone-docs.clj"
-                                "-o" (str base-dir "/docs.html")
-                                "--dir" base-dir]
-                         source-name (into ["-n" source-name])
-                         true        (into cli-args))))
+  (apply process/shell "bb" "scripts/bone-docs.clj"
+         "-o" (str base-dir "/docs.html")
+         "--dir" base-dir
+         "-n" source-name
+         cli-args))
 
 ;; ---------------------------------------------------------------------------
 ;; Per-type export
@@ -1445,11 +1389,6 @@
 ;; consumes.  Built once in `export-source!` and propagated as a map
 ;; to avoid positional-argument errors.
 
-(defn- with-reports
-  "Return scope with :reports swapped (other keys preserved)."
-  [scope reports]
-  (assoc scope :reports reports))
-
 (defn- dump-typed-formats!
   "Write scope's reports in every format enabled by `fmts`: JSON
   (when `fmts \"json\"` or `:json-always?`), RSS (when `fmts \"rss\"`),
@@ -1468,24 +1407,40 @@
     (dump-org! reports reports-dir source-name source-map maintainers-map
                (str basename ".org") label)))
 
+(defn- dump-slice!
+  "dump-typed-formats! for the `reports` slice of scope, or -- when the
+  slice is empty -- delete the files a previous export left for it."
+  [{:keys [reports-dir] :as scope} reports fmts basename label]
+  (if (seq reports)
+    (dump-typed-formats! (assoc scope :reports reports) fmts basename label)
+    (delete-stale-typed! reports-dir basename)))
+
 (defn- dump-per-type!
   "Export per-type JSON, Org, and RSS files for all report types
   present.  When `changed-types` is non-nil, only re-export files for
   those types."
-  [{:keys [reports reports-dir] :as scope} fmts & {:keys [changed-types]}]
+  [{:keys [reports] :as scope} fmts & {:keys [changed-types]}]
   (doseq [rtype report-types
           :when (or (nil? changed-types) (changed-types rtype))
-          :let  [typed  (filter-reports reports {:type rtype})
-                 plural (type->plural rtype)]]
-    (if (seq typed)
-      (dump-typed-formats! (with-reports scope typed) fmts plural plural)
-      (delete-stale-typed! reports-dir plural))))
+          :let  [plural (type->plural rtype)]]
+    (dump-slice! scope (filter-reports reports {:type rtype}) fmts plural plural)))
+
+(defn dump-events-filtered!
+  "Export events.{json,org,xml} (open) and events-closed.{json,org,xml}
+  (closed) for announcements that have ICS content, in the formats
+  enabled by `fmts`."
+  [{:keys [reports] :as scope} fmts]
+  (let [events (ics-announcements reports)]
+    (dump-slice! scope (open-reports events) fmts "events" "events")
+    (dump-slice! scope (filter :report/closed events) fmts
+                 "events-closed" "events (closed)")))
 
 (defn- dump-open-closed!
   "Export open/closed split files and meta.json with summary counts.
   all-open.json is loaded by index.html on first paint (fast).
   all-closed.json is lazy-loaded when user deactivates the Open filter.
-  meta.json contains summary counts per type, used by data.html for KPIs.
+  meta.json is the per-source manifest: summary counts, report and
+  stats file lists, maintainers.
   Produces per-type -open and -closed files in all enabled formats.
   When `changed-types` is non-nil, only re-export per-type files for
   those types (aggregate all-open/all-closed and meta.json are always
@@ -1524,7 +1479,7 @@
                                             (seq t-open)   (conj (str plural "-open.json"))
                                             (seq t-closed) (conj (str plural "-closed.json")))]
                                 f))))
-        tenures     (when-let [db (ctx-db)] (get-tenures db source-name))
+        tenures     (get-tenures (ctx-db) source-name)
         generated   (str (java.util.Date.))
         meta-data   (merge counts
                            {:bone-format   bone-format
@@ -1536,7 +1491,7 @@
                             ;; (KPIs + chart specs); the data.html shell reads
                             ;; this list to know what to fetch.
                             :stats-files   ["stats.json"]
-                            :maintainers   (tenures-snapshot (or tenures []))}
+                            :maintainers   (tenures-snapshot tenures)}
                           (source-metadata source-name source-map))]
     (spit (str reports-dir "/meta.json")
           (json/generate-string meta-data {:pretty true}))
@@ -1548,23 +1503,17 @@
       (log/info "Wrote config.edn"))
     ;; all-open.json carries :generated so the (now data-independent)
     ;; index.html shell can show a freshness timestamp client-side.
-    (dump-typed-formats! (with-reports scope open) fmts "all-open" "open reports"
+    (dump-typed-formats! (assoc scope :reports open) fmts "all-open" "open reports"
                          :json-always? true :counts (assoc counts :generated generated))
-    (dump-typed-formats! (with-reports scope closed) fmts "all-closed" "closed reports"
+    (dump-typed-formats! (assoc scope :reports closed) fmts "all-closed" "closed reports"
                          :json-always? true :counts counts)
     (doseq [rtype report-types
             :when (or (nil? changed-types) (changed-types rtype))
-            :let  [plural   (type->plural rtype)
-                   t-open   (filter-reports open {:type rtype})
-                   t-closed (filter-reports closed {:type rtype})]]
-      (if (seq t-open)
-        (dump-typed-formats! (with-reports scope t-open) fmts
-                             (str plural "-open") (str plural " (open)"))
-        (delete-stale-typed! reports-dir (str plural "-open")))
-      (if (seq t-closed)
-        (dump-typed-formats! (with-reports scope t-closed) fmts
-                             (str plural "-closed") (str plural " (closed)"))
-        (delete-stale-typed! reports-dir (str plural "-closed"))))))
+            :let  [plural (type->plural rtype)]]
+      (dump-slice! scope (filter-reports open {:type rtype}) fmts
+                   (str plural "-open") (str plural " (open)"))
+      (dump-slice! scope (filter-reports closed {:type rtype}) fmts
+                   (str plural "-closed") (str plural " (closed)")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Root index -- public/index.html listing all sources
@@ -1644,14 +1593,14 @@
 
 (defn export-source!
   "Export a single source in the given format(s).
-  Always produces all-open.json and all-closed.json (used by index.html).
+  The \"all\", \"json\" and \"html\" formats always produce all-open.json
+  and all-closed.json (used by index.html).
   When format is \"all\", per-type feeds respect :export-formats from config.
   `changed-types` (optional map {report-type count}, used as a set-like
   predicate) limits per-type file regeneration to those types during
   incremental export; aggregate files are always rebuilt."
   [format reports base-dir source-name source-map maintainers-map cli-extra
-   & {:keys [changed-types since regen-shell? regen-docs?]
-      :or   {regen-shell? true regen-docs? true}}]
+   & {:keys [changed-types since regen-shell? regen-docs?]}]
   (let [reports-dir (str base-dir "/reports")
         patches-dir (str base-dir "/patches")
         events-dir  (str base-dir "/events")
@@ -1679,7 +1628,7 @@
             "patches" (dump-patches! reports patches-dir :since since)
             "text"    (dump-text! reports text-dir :since since)
             "events"  (do (dump-events! reports events-dir :since since)
-                          (dump-events-filtered! reports reports-dir source-name source-map maintainers-map ef)
+                          (dump-events-filtered! scope ef)
                           (dump-events-ics! reports events-dir source-name))
             "html"    (do (dump-json! reports reports-dir source-name source-map maintainers-map)
                           (dump-votes! reports reports-dir)
@@ -1699,7 +1648,7 @@
           (dump-patches! reports patches-dir :since since)
           (dump-text! reports text-dir :since since)
           (dump-events! reports events-dir :since since)
-          (dump-events-filtered! reports reports-dir source-name source-map maintainers-map ef)
+          (dump-events-filtered! scope ef)
           (dump-events-ics! reports events-dir source-name)
           ;; stats.json is a data file (always refreshed); data.html, like
           ;; index.html/docs.html, is a data-independent shell skipped on
@@ -1785,7 +1734,7 @@
         ;; so we can determine which sources actually need re-export.
         (let [effective-theme (or theme (:theme config))
               _               (when effective-theme (set-theme! effective-theme))
-              source-map      (if config (build-source-map config) {})
+              source-map      (build-source-map config)
               source-names    (if source-name
                                 (if (contains? source-map source-name)
                                   [source-name]
@@ -1796,15 +1745,15 @@
                                 (mapv :name (:sources config)))
               ;; Per-source, per-type change detection: {source -> {type count}}.
               ;; Enables both source-level skip and intra-source per-type skip.
-              changed-st      (when (and incremental? last-export)
+              changed-st      (when incremental?
                                 (changed-source-types-since db last-export))
               ;; Split the cron notification's counts: genuine additions
               ;; (new reports, by origin-email date) vs effective report
               ;; modifications (status/flags/relations/expiry), excluding
               ;; mere thread growth.  changed-st still drives re-export.
-              new-st          (when (and incremental? last-export)
+              new-st          (when incremental?
                                 (new-source-types-since db last-export))
-              state-st        (when (and incremental? last-export)
+              state-st        (when incremental?
                                 (state-changed-source-types-since db last-export))
               export-names    (if (and incremental? (seq changed-st))
                                 ;; Maintainers-only changes don't bump any
@@ -1829,7 +1778,7 @@
           ;; root index when nothing changed and notify on the cron mail.
           (let [exported-srcs
                 (if (and (not= format "root") (seq export-names))
-                  (let [maintainers-map (if config (build-maintainers db source-map) {})
+                  (let [maintainers-map (build-maintainers db source-map)
                         all-reps        (all-reports-by-date db)
                         votes           (votes-by-report
                                          (d/q '[:find ?r ?val ?voter ?emid ?hdrs
@@ -1870,7 +1819,7 @@
                                       staging     (str "public/.staging-" slug)
                                       final-dir   (str "public/" slug)
                                       exported-before? (.exists (io/file final-dir))
-                                      src-changed (when (seq changed-st) (get changed-st src-name))
+                                      src-changed (get changed-st src-name)
                                       ;; HTML shells: a full run (incremental? false,
                                       ;; which also covers config/asset changes) rebuilds
                                       ;; both.  On an incremental run we rebuild only when
