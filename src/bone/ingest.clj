@@ -253,11 +253,12 @@
         ;; Stored verbatim (multi-value headers joined): `ancestor-mids-from`
         ;; re-runs normalization/dedup at read time, so normalizing here
         ;; would only duplicate that work.
-        references  (when-let [v (get headers "References")]
-                      (let [s (if (vector? v)
-                                (str/join " " (keep identity v))
-                                v)]
-                        (when-not (str/blank? s) s)))
+        ;; Looked up case-insensitively, like every other header:
+        ;; mailseq keeps the case the sender wrote.
+        references  (let [s (str/join " " (keep identity
+                                                (common/get-header-values
+                                                 headers "References")))]
+                      (when-not (str/blank? s) s))
         ancestor-mids (common/ancestor-mids-from references in-reply-to)
         attachments (mapv #(attachment->txdata % max-att-size)
                           (remove nil? (:attachments body)))]

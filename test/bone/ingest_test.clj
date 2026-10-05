@@ -180,6 +180,29 @@
     (when (.exists dir)
       (doseq [f (reverse (file-seq dir))] (.delete f)))))
 
+(deftest email->txdata-references-header-case
+  (doseq [k ["References" "references" "REFERENCES"]]
+    (testing (str "header written as " k)
+      (let [tx (ingest/email->txdata
+                {:uid 200
+                 :message-id "<child@test.org>"
+                 :subject "Re: thread"
+                 :from [{:address "alice@test.org"}]
+                 :headers {k "<root@test.org> <parent@test.org>"}
+                 :body {:text "Reply."}})]
+        (is (= "<root@test.org> <parent@test.org>" (:email/references tx)))
+        (is (= 2 (count (:email/ancestor-mid-hashes tx)))))))
+  (testing "a repeated header is joined"
+    (is (= "<root@test.org> <parent@test.org>"
+           (:email/references
+            (ingest/email->txdata
+             {:uid 201
+              :message-id "<child2@test.org>"
+              :subject "Re: thread"
+              :from [{:address "alice@test.org"}]
+              :headers {"References" ["<root@test.org>" "<parent@test.org>"]}
+              :body {:text "Reply."}}))))))
+
 (defn- minimal-msg
   "Minimal mailseq-shaped msg with stable defaults."
   [{:keys [id mid]}]
