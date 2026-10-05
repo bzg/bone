@@ -1270,14 +1270,18 @@
                               (= :report/acked (:attr d))
                               reporter
                               (= (some-> (:email-address d) str/lower-case) reporter)))
+        closed?       (some? (:report/closed (d/pull db [:report/closed] report-eid)))
         ;; Scope-filter implicit ack/own without a failure-ctx: the user
         ;; never typed those commands, so a denial must not surface as an
         ;; :insufficient-scope failure in maintainer notifications.
-        word-result   (cond-> (merge (filter-words-by-scope implicit overrides
-                                                            is-maint? nil)
-                                     (filter-words-by-scope body-words overrides
-                                                            is-maint? fail-ctx))
-                        self-ack? (dissoc :report/acked))
+        ;; Barewords are ignored on a closed report: skip them before
+        ;; the scope check, so a no-op word records no failure either.
+        word-result   (when-not closed?
+                        (cond-> (merge (filter-words-by-scope implicit overrides
+                                                              is-maint? nil)
+                                       (filter-words-by-scope body-words overrides
+                                                              is-maint? fail-ctx))
+                          self-ack? (dissoc :report/acked)))
         keep-line?    (case line-filter
                         :carrier-only #(contains? carrier-eligible-ids (:id %))
                         :no-carrier   #(not (contains? carrier-eligible-ids (:id %)))
@@ -1289,8 +1293,7 @@
                                            (:line-patterns src-cmds))
                              (filter keep-line?)
                              (remove self-ack-line?)
-                             vec))
-        closed?       (some? (:report/closed (d/pull db [:report/closed] report-eid)))]
+                             vec))]
     (if closed?
       (let [{rel-lines true, other-lines false}
             (group-by #(contains? closure-command-ids (:id %)) lines)]

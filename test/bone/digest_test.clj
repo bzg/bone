@@ -2916,3 +2916,45 @@
     (testing "finalize with nothing found leaves :nearest nil"
       (is (= {:all #{} :nearest nil}
              (digest/finalize-thread-lookup s0))))))
+
+;; ---------------------------------------------------------------------------
+;; Failure recording: no duplicate, no noise
+;; ---------------------------------------------------------------------------
+
+(deftest closed-report-bareword-records-no-scope-failure
+  (testing "A bareword that cannot apply to a closed report is not scope-checked."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          recorded (atom [])
+          smap     (assoc-in source-map ["direct" :commands]
+                             {:closed {:scope :maintainer}})
+          process! (fn [m]
+                     (d/transact! conn [(assoc m :email/source "direct")])
+                     (let [eid (lookup/email-eid (d/db conn) (:email/message-id m))]
+                       (digest/process-email!
+                        conn smap sources
+                        (d/pull (d/db conn) digest/email-pull-pattern eid))))]
+      (try
+        (with-redefs [commands/record-failure! (fn [entry] (swap! recorded conj entry))]
+          (process! (mk-email {:mid "<cl-bug@test.org>"
+                               :subject "[BUG] crash"
+                               :from "user@test.org"
+                               :date #inst "2026-05-01T10:00:00"
+                               :body "broken\n"}))
+          (process! (mk-email {:mid "<cl-close@test.org>"
+                               :subject "Re: [BUG] crash"
+                               :from "admin@test.org"
+                               :date #inst "2026-05-01T11:00:00"
+                               :in-reply-to "<cl-bug@test.org>"
+                               :body "Closed.\n"}))
+          (is (some? (:report/closed (get-report (d/db conn) "<cl-bug@test.org>"))))
+          (is (empty? @recorded))
+          (process! (mk-email {:mid "<cl-late@test.org>"
+                               :subject "Re: [BUG] crash"
+                               :from "user@test.org"
+                               :date #inst "2026-05-01T12:00:00"
+                               :in-reply-to "<cl-bug@test.org>"
+                               :body "Closed.\n"}))
+          (is (empty? @recorded)
+              "no :insufficient-scope failure for a no-op word on a closed report"))
+        (finally
+          (teardown! ctx))))))
