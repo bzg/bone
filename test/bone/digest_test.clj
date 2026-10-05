@@ -2921,6 +2921,30 @@
 ;; Failure recording: no duplicate, no noise
 ;; ---------------------------------------------------------------------------
 
+(deftest pending-replay-records-denial-once
+  (testing "A denied creation on a pending email is recorded once, not at each replay."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          recorded (atom [])]
+      (try
+        (with-redefs [commands/record-failure! (fn [entry] (swap! recorded conj entry))]
+          ;; [ANN] is maintainer-only: denied on arrival, and the missing
+          ;; In-Reply-To target leaves the email pending.
+          (store-and-process! conn
+                              (mk-email {:mid "<denied-ann@test.org>"
+                                         :subject "[ANN] not allowed"
+                                         :from "user@test.org"
+                                         :date #inst "2026-04-01T11:00:00"
+                                         :in-reply-to "<never-arrives@test.org>"
+                                         :body "hello\n"})
+                              "direct")
+          (is (true? (pending? (d/db conn) "<denied-ann@test.org>")))
+          (is (= 1 (count @recorded)) "denial recorded on arrival")
+          (digest/flush-stale-pending! conn source-map sources 1)
+          (is (false? (pending? (d/db conn) "<denied-ann@test.org>")))
+          (is (= 1 (count @recorded)) "the TTL flush does not record it again"))
+        (finally
+          (teardown! ctx))))))
+
 (deftest closed-report-bareword-records-no-scope-failure
   (testing "A bareword that cannot apply to a closed report is not scope-checked."
     (let [{:keys [conn] :as ctx} (setup-db!)

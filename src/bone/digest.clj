@@ -644,8 +644,10 @@
 
 (defn- maybe-create-report!
   "Detect report type, check permissions, create if allowed.
-  Returns [report-eid report-info] or [nil report-info]."
-  [conn eid message-id email from-addr source-name source-cfg via-channel? rroles]
+  Returns [report-eid report-info] or [nil report-info].
+  `replay?` is true when a pending email is processed again: the
+  denial was recorded on arrival and must not be recorded twice."
+  [conn eid message-id email from-addr source-name source-cfg via-channel? rroles replay?]
   (let [subj-patterns (detect/resolve-labels (or source-cfg {}))
         allowed-types (:report-types source-cfg)
         report-info   (detect/detect-report email subj-patterns allowed-types)
@@ -669,7 +671,8 @@
       (:denied-channel :denied-role)
       (do (log/warn "Denied:" from-addr "cannot create" (name (:type report-info))
                     (str "(" (denial-reason-labels decision) ")"))
-          (record-creation-denial! source-name from-addr email report-info decision)
+          (when-not replay?
+            (record-creation-denial! source-name from-addr email report-info decision))
           [nil report-info])
 
       ;; nil -- no report detected
@@ -1014,14 +1017,19 @@
             via-channel? (common/sent-via-source-channel? delivery source-cfg)
             rroles       (roles/get-tenures (d/db conn) source-name)]
 
-        ;; Phase 1: apply controls (may mutate roles)
-        (apply-controls! conn rroles source-name source-cfg from-addr email via-channel?)
+        ;; Phase 1: apply controls (may mutate roles).  Phases 1-2 run
+        ;; before the pending check, so a pending email already went
+        ;; through them on arrival: replaying the controls would record
+        ;; their denials a second time.
+        (when-not was-pending?
+          (apply-controls! conn rroles source-name source-cfg from-addr email via-channel?))
 
         ;; Phase 2: detect and maybe create report (re-fetch roles after controls)
         (let [rroles      (roles/get-tenures (d/db conn) source-name)
               [report-eid report-info]
               (maybe-create-report! conn eid message-id email from-addr
-                                    source-name source-cfg via-channel? rroles)
+                                    source-name source-cfg via-channel? rroles
+                                    was-pending?)
               db           (d/db conn)]
 
           (if (or force-thread? (thread-anchorable? db email))
