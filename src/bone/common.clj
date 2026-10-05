@@ -358,6 +358,14 @@
   pasted below the reply text cannot leak its own Signed-off-by."
   #"^(?:From [0-9a-f]{40} |diff --git |--- a/)")
 
+(defn lines-before-patch
+  "Lines of `body` that precede the first line of a patch pasted
+  inline.  What follows is patch content, not something the sender
+  says: its trailers, and the \"+1\" or \"-1\" of its hunk headers,
+  must not be read as the sender's."
+  [body]
+  (take-while #(not (re-find patch-start-line-re %)) (str/split-lines body)))
+
 (defn extract-trailers
   "Collect git person trailers from a reply body.
   Returns a distinct vector of \"Key: Name <addr>\" strings for the
@@ -368,8 +376,7 @@
   b4 does.  Keys are canonicalized, values trimmed.  Nil-safe on body."
   [body]
   (when body
-    (->> (str/split-lines body)
-         (take-while #(not (re-find patch-start-line-re %)))
+    (->> (lines-before-patch body)
          (keep (fn [line]
                  (when-let [[_ k v] (re-matches #"([A-Za-z][A-Za-z-]*):\s*(\S.*?)\s*" line)]
                    (when-let [ck (get trailer-keys (str/lower-case k))]

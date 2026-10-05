@@ -311,17 +311,25 @@
 ;; Vote detection (pure)
 ;; ---------------------------------------------------------------------------
 
-(def vote-up-pattern   #"(?m)(?:^|\s)(?:\+1|1\+)(?![a-zA-Z0-9])")
-(def vote-down-pattern #"(?m)(?:^|\s)(?:-1|1-)(?![a-zA-Z0-9])")
-(def vote-null-pattern #"(?m)(?:^|\s)(?:\+0|0\+|-0|0-)(?![a-zA-Z0-9])")
+;; A vote token stands alone: it ends the line, or is followed by
+;; whitespace, or by sentence punctuation that itself ends the word.
+;; This keeps code and markup from voting: "(foo -1))", "1-\nu", or the
+;; "+1,7" of a hunk header.
+(def ^:private vote-end "(?=$|\\s|[.,!?;:]+(?:\\s|$))")
+
+(def vote-up-pattern   (re-pattern (str "(?m)(?:^|\\s)(?:\\+1|1\\+)" vote-end)))
+(def vote-down-pattern (re-pattern (str "(?m)(?:^|\\s)(?:-1|1-)" vote-end)))
+(def vote-null-pattern (re-pattern (str "(?m)(?:^|\\s)(?:\\+0|0\\+|-0|0-)" vote-end)))
 
 (defn- unquoted
-  "Body text with quoted lines (starting with \">\") removed.  Vote
-  patterns accept a whitespace anchor, so without this a quoted
-  \"> +1\" would count -- and, tested before :down, could even invert
-  the polarity of the sender's actual vote."
+  "Body text up to the first pasted patch, with quoted lines (starting
+  with \">\") removed.  Vote patterns accept a whitespace anchor, so
+  without this a quoted \"> +1\" would count -- and, tested before
+  :down, could even invert the polarity of the sender's actual vote.
+  A pasted patch is cut off for the same reason: \"@@ -1 +1 @@\" is a
+  hunk header, not two votes."
   [s]
-  (->> (str/split-lines s)
+  (->> (common/lines-before-patch s)
        (remove #(str/starts-with? % ">"))
        (str/join "\n")))
 

@@ -236,6 +236,22 @@
              (commands/partition-lines-by-scope lines (delay {}) "x@y.z" false
                                                 (constantly false)))))))
 
+(deftest detect-vote-ignores-code-and-patches
+  (testing "numbers in code or markup are not votes"
+    (is (nil? (commands/detect-vote "  (S-left lambda nil (org-ref-swap-citation-link -1))")))
+    (is (nil? (commands/detect-vote "1-\\nu & \\nu & 0 \\\\")))
+    (is (nil? (commands/detect-vote "see +1/-1 in the table"))))
+  (testing "hunk headers of a pasted patch are not votes"
+    (is (nil? (commands/detect-vote
+               "Quick fix below.\n\ndiff --git a/x.el b/x.el\n--- a/x.el\n+++ b/x.el\n@@ -1 +1 @@\n-a\n+b")))
+    (is (nil? (commands/detect-vote "@@ -1,7 +1,7 @@ (defun foo ()"))))
+  (testing "a vote before the pasted patch still counts"
+    (is (= :up (commands/detect-vote
+                "+1, and here is a fixup:\n\ndiff --git a/x.el b/x.el\n@@ -1 +1 @@\n-a\n+b"))))
+  (testing "votes followed by punctuation still count"
+    (is (= :up (commands/detect-vote "+1!!")))
+    (is (= :down (commands/detect-vote "-1: this breaks the agenda")))))
+
 (deftest detect-vote-ignores-quoted-lines
   (testing "a vote appearing only in quoted text does not count"
     (is (nil? (commands/detect-vote "> +1")))
