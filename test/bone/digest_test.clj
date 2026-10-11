@@ -656,14 +656,17 @@
                  (detect-lines :bug "Deadline: 2026-06-15\n")))
           (is (= [{:action :unset-deadline :scope :user :id :undeadline}]
                  (detect-lines :bug "No deadline\n")))
-          (is (= [{:action :unset-topic :scope :user :id :untopic}]
-                 (detect-lines :bug "No topic\n")))
-          (is (= [{:action :set-topic :topic "my-topic" :scope :user :id :topic}]
-                 (detect-lines :bug "Topic: my-topic\n")))
+          (is (= [{:action :unset-topics :scope :user :id :untopic}]
+                 (detect-lines :bug "No topics\n")))
+          (is (= [{:action :set-topics :topics [[:add "my-topic"]] :scope :user :id :topic}]
+                 (detect-lines :bug "Topics: my-topic\n")))
+          (is (= [{:action :set-topics :topics [[:remove "parser"] [:add "lexer"]]
+                   :scope :user :id :topic}]
+                 (detect-lines :bug "Topics: -parser lexer.\n")))
           (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}
                   {:action :set-deadline :date (parse-date-iso "2026-07-01") :scope :user :id :deadline}
-                  {:action :set-topic :topic "urgent-fix" :scope :user :id :topic}]
-                 (detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopic: urgent-fix\n")))
+                  {:action :set-topics :topics [[:add "urgent-fix"]] :scope :user :id :topic}]
+                 (detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopics: urgent-fix\n")))
           (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
                  (detect-lines :bug "Thanks for the report.\nOwned-by: x@y.com\nWill look into it.\n")))
           ;; RFC 5322 "Display Name <addr>" format
@@ -722,19 +725,24 @@
           (is (= {:set {} :unset #{} :deadline (parse-date-iso "2026-06-01")}
                  (commands/resolve-commands [{:action :unset-deadline}
                                              {:action :set-deadline :date (parse-date-iso "2026-06-01")}])))
-          (is (= {:set {} :unset #{} :topic "second"}
-                 (commands/resolve-commands [{:action :set-topic :topic "first"}
-                                             {:action :set-topic :topic "second"}])))
+          (is (= {:set {} :unset #{} :topics [[:add "first"] [:remove "second"]]}
+                 (commands/resolve-commands [{:action :set-topics :topics [[:add "first"]]}
+                                             {:action :set-topics :topics [[:remove "second"]]}])))
           ;; Expiry resolve
           (is (= {:set {} :unset #{} :expiry (parse-date-iso "2026-09-01")}
                  (commands/resolve-commands [{:action :set-expiry :date (parse-date-iso "2026-09-01")}])))
           (is (= {:set {} :unset #{} :unexpiry? true}
                  (commands/resolve-commands [{:action :set-expiry :date (parse-date-iso "2026-09-01")}
                                              {:action :unset-expiry}])))
-          ;; Untopic resolve
+          ;; Untopic resolve: a clear drops the edits before it and
+          ;; keeps the ones after it
           (is (= {:set {} :unset #{} :untopic? true}
-                 (commands/resolve-commands [{:action :set-topic :topic "foo"}
-                                             {:action :unset-topic}]))))
+                 (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
+                                             {:action :unset-topics}])))
+          (is (= {:set {} :unset #{} :untopic? true :topics [[:add "bar"]]}
+                 (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
+                                             {:action :unset-topics}
+                                             {:action :set-topics :topics [[:add "bar"]]}]))))
 
         ;; --- Bug 81 directives ---
         (testing "Bug 81 Acked-by / Owned-by credit third parties"
@@ -780,8 +788,8 @@
           (let [r (get-report db "<93@test.org>")]
             (is (some? (:report/acked r)))))
 
-        ;; --- Bug 90 Topic directive ---
-        (testing "Bug 90 Topic directive"
+        ;; --- Bug 90 Topics directive ---
+        (testing "Bug 90 Topics directive"
           (is (= "regression" (:report/topic-value (get-report db "<90@test.org>")))))
 
         ;; --- Bug 93 Undeadline ---
@@ -1135,8 +1143,8 @@
                 r217 (get-report db "<217@test.org>")]
             (is (= :patch (:report/type r216)))
             (is (= :patch (:report/type r217)))
-            (is (= "lexer" (:report/topic-value r216))
-                "Topic directive lands on v1 (nearest), overriding the label topic")
+            (is (= "parser lexer" (:report/topic-value r216))
+                "Topics directive lands on v1 (nearest), adding to the label topic")
             (is (some? (:report/important r216))
                 "Important trigger lands on v1 (nearest), not on the new v2")
             (is (= "parser" (:report/topic-value r217))
@@ -2990,5 +2998,40 @@
                                :body "Closed.\n"}))
           (is (empty? @recorded)
               "no :insufficient-scope failure for a no-op word on a closed report"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest topics-line-edits-subject-topics
+  (testing "Topics: edits the list set by the subject, No topics: clears it"
+    (let [{:keys [conn] :as ctx} (setup-db!)]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<tp-bug@test.org>"
+                                       :subject "[BUG parser input] Crash on empty input"
+                                       :from "user@test.org"
+                                       :date #inst "2026-03-01T10:00:00"
+                                       :body "It crashes.\n"})
+                            "direct")
+        (store-and-process! conn
+                            (mk-email {:mid "<tp-edit@test.org>"
+                                       :subject "Re: [BUG parser input] Crash on empty input"
+                                       :from "maint@test.org"
+                                       :date #inst "2026-03-01T11:00:00"
+                                       :in-reply-to "<tp-bug@test.org>"
+                                       :body "Topics: -parser lexer.\n"})
+                            "direct")
+        (is (= "input lexer"
+               (:report/topic-value (get-report (d/db conn) "<tp-bug@test.org>")))
+            "-parser drops the subject topic, lexer is appended")
+        (store-and-process! conn
+                            (mk-email {:mid "<tp-clear@test.org>"
+                                       :subject "Re: [BUG parser input] Crash on empty input"
+                                       :from "maint@test.org"
+                                       :date #inst "2026-03-01T12:00:00"
+                                       :in-reply-to "<tp-edit@test.org>"
+                                       :body "No topics.\n"})
+                            "direct")
+        (is (nil? (:report/topic-value (get-report (d/db conn) "<tp-bug@test.org>")))
+            "No topics. clears the list")
         (finally
           (teardown! ctx))))))

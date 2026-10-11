@@ -201,7 +201,7 @@
  ;;            Applies uniformly to triggers (!Closed., !Urgent.),
  ;;            negatives (!Not acked), -by directives (!Acked-by:
  ;;            x@y.com), date/topic directives (!Deadline: 2026-06-01,
- ;;            !Topic: event), supersede (!Superseded-by: <mid>), role
+ ;;            !Topics: event), supersede (!Superseded-by: <mid>), role
  ;;            controls (!Add maintainer: x@y.com) and notifications
  ;;            (!Notify:).
 

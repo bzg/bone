@@ -277,3 +277,71 @@
                               :current :up :vote :down}))))
   (testing "an unchanged revote is a no-op"
     (is (nil? (commands/vote-tx {:existing 7 :current :up :vote :up})))))
+
+;; ---------------------------------------------------------------------------
+;; Topics: line -- signed space-separated tokens, no comma
+;; ---------------------------------------------------------------------------
+
+(defn- topics-line [body]
+  (let [lines (detect-with false body)]
+    (is (= 1 (count lines)) body)
+    (:topics (first lines))))
+
+(deftest topics-line-parsing
+  (testing "bare words add, - removes, + adds explicitly"
+    (is (= [[:add "easy"]] (topics-line "Topics: easy.\n")))
+    (is (= [[:remove "parser"] [:add "lexer"]]
+           (topics-line "Topics: -parser lexer\n")))
+    (is (= [[:add "a"] [:remove "b"] [:add "c"]]
+           (topics-line "Topics: +a -b c.\n"))))
+  (testing "dotted and slashed subject topics are tokens"
+    (is (= [[:remove "org-demo.html"] [:add "net/mlx5e"]]
+           (topics-line "Topics: -org-demo.html net/mlx5e.\n"))))
+  (testing "non-ASCII letters are word characters"
+    (is (= [[:remove "éditeur"] [:add "lexer"]]
+           (topics-line "Topics: -éditeur lexer.\n"))))
+  (testing "a sign needs a word behind it"
+    (is (empty? (detect-with false "Topics: -\n")))
+    (is (empty? (detect-with false "Topics: --foo\n"))))
+  (testing "a trailing dot is line punctuation, not part of the token"
+    (is (= [[:add "lexer"]] (topics-line "Topics: lexer.\n"))))
+  (testing "comma-separated and prose lines are not commands"
+    (is (empty? (detect-with false "Topics: a, b.\n")))
+    (is (empty? (detect-with false "Topics: async LaTeX preview, org-ql integration, and multi-page export.\n"))))
+  (testing "strict mode requires the ! prefix"
+    (is (empty? (detect-with true "Topics: easy.\n")))
+    (is (= [[:add "easy"]]
+           (:topics (first (detect-with true "!Topics: easy.\n")))))))
+
+(deftest apply-topic-ops-folds-over-current
+  (testing "adds append, removes drop, case-insensitively"
+    (is (= "topic2 topic3"
+           (commands/apply-topic-ops "topic1 topic2"
+                                     [[:remove "topic1"] [:add "topic3"]])))
+    (is (= "parser" (commands/apply-topic-ops "parser" [[:add "Parser"]])))
+    (is (= "b" (commands/apply-topic-ops "A b" [[:remove "a"]]))))
+  (testing "nil when nothing is left, from nil or from a full list"
+    (is (nil? (commands/apply-topic-ops nil [[:remove "x"]])))
+    (is (nil? (commands/apply-topic-ops "x" [[:remove "x"]])))
+    (is (= "easy" (commands/apply-topic-ops nil [[:add "easy"]])))))
+
+(deftest topics-tx-reads-current-value
+  (let [tx (fn [current resolved]
+             (commands/build-lines-tx 42 7 (merge {:set {} :unset #{}} resolved) current))]
+    (testing "edits fold over the stored list"
+      (is (= [[:db/add 42 :report/topic 7]
+              [:db/add 42 :report/topic-value "topic2 topic3"]]
+             (tx {:report/topic-value "topic1 topic2"}
+                 {:topics [[:remove "topic1"] [:add "topic3"]]}))))
+    (testing "an edit that changes nothing transacts nothing"
+      (is (empty? (tx {:report/topic-value "parser"} {:topics [[:add "parser"]]}))))
+    (testing "No topics retracts the pair"
+      (is (= [[:db/retract 42 :report/topic 9]
+              [:db/retract 42 :report/topic-value "parser"]]
+             (tx {:report/topic {:db/id 9} :report/topic-value "parser"}
+                 {:untopic? true}))))
+    (testing "No topics then Topics: starts from an empty list"
+      (is (= [[:db/add 42 :report/topic 7]
+              [:db/add 42 :report/topic-value "easy"]]
+             (tx {:report/topic {:db/id 9} :report/topic-value "parser"}
+                 {:untopic? true :topics [[:add "easy"]]}))))))

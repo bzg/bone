@@ -14,7 +14,7 @@
 ;;                        Owned-by:, Superseded-by:, Duplicate-of:).
 ;;   :kind :annotation -- property set; applies to the report the mail
 ;;                        creates, else to the nearest in-thread report
-;;                        (Urgent., Topic:, Supersedes:, Related-to:).
+;;                        (Urgent., Topics:, Supersedes:, Related-to:).
 ;;
 ;; Form is orthogonal: bareword (`:words`) or colon line (`:syntax` +
 ;; optional `:param`).
@@ -90,10 +90,12 @@
     :syntax "Expiry" :param :date-or-duration}
    {:id :unexpiry    :kind :annotation :action :unset-expiry :attr :report/expiry :scope :user
     :syntax "No expiry"}
-   {:id :topic       :kind :annotation :action :set-topic   :attr :report/topic :scope :user
-    :syntax "Topic" :param :word}
-   {:id :untopic     :kind :annotation :action :unset-topic :attr :report/topic :scope :user
-    :syntax "No topic"}
+   ;; Topics: edits the topic list (each word adds, a `-` prefix
+   ;; removes); No topics: clears it.
+   {:id :topic       :kind :annotation :action :set-topics   :attr :report/topic :scope :user
+    :syntax "Topics" :param :topics}
+   {:id :untopic     :kind :annotation :action :unset-topics :attr :report/topic :scope :user
+    :syntax "No topics"}
    ;; Supersedes -- inverse role of Superseded-by (posed on the replacement;
    ;; current = :rel/to, target = :rel/from = the closed report).
    {:id :supersedes   :kind :annotation :action :set-supersedes   :attr :rel/supersedes    :scope :user

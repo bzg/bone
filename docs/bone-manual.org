@@ -132,7 +132,7 @@ or "No" command:
 : Not important.
 : No deadline.
 : No expiry.
-: No topic.
+: No topics.
 : Not superseded-by: <new-message-id@example.com>
 : Not supersedes: <old-message-id@example.com>
 : Not duplicate-of: <target-message-id@example.com>
@@ -159,7 +159,7 @@ The =Name <addr>= form is also accepted:
 The credited address becomes the state holder; the email that posed
 the line is kept for audit.
 
-** Setting a topic
+** Setting topics
 
 A /topic/ is a short string, without whitespace, attached to a
 report; a report may carry several. Set topics from the subject in
@@ -173,11 +173,21 @@ two ways:
   followed by =:= and a space; a sentence containing a colon (or a
   URL) sets no topic.
 
-To change the topic on an existing report, reply with:
+To edit the topics of an existing report, reply with a =Topics:=
+line. Each word adds a topic; a word prefixed with =-= removes one,
+whether it came from the subject or from an earlier =Topics:= line:
 
-: Topic: new-topic.
+: Topics: easy.
+: Topics: -parser lexer.
 
-To remove it, reply with =No topic.=.
+On a report opened as =[BUG parser input]=, the second line leaves
+"input" and "lexer". Words are separated by spaces; a comma is not a
+separator, so a prose line such as =Topics: a, b, and c.= is ignored.
+Matching is case-insensitive and adding a topic already present is a
+no-op. A word is letters, digits, =_= and =-=, possibly joined by =.=
+or =/= (=org-demo.html=, =net/mlx5e=); a subject topic made of other
+characters cannot be removed this way. To remove every topic, reply
+with =No topics.=.
 
 ** Setting a deadline
 
@@ -474,12 +484,12 @@ BONE distinguishes two kinds of commands:
   topic, deadline, expiry, or a non-closing relation. When the
   carrying mail itself becomes a new report, the annotation applies to
   it; otherwise it targets the nearest report in the thread. Examples:
-  =Urgent.=, =Important.=, =Topic:=, =Deadline:=, =Supersedes:=, =Related-to:=.
+  =Urgent.=, =Important.=, =Topics:=, =Deadline:=, =Supersedes:=, =Related-to:=.
 
-Colon-prefixed commands -- =Topic:=, =Deadline:=, =Expiry:=, =Acked-by:=,
+Colon-prefixed commands -- =Topics:=, =Deadline:=, =Expiry:=, =Acked-by:=,
 =Owned-by:=, =Closed-by:=, =Superseded-by:=, =Supersedes:=, =Duplicate-of:=,
 =Related-to:= -- require at least one whitespace character between the
-colon and the value. =Topic: parser= is recognised; =Topic:parser= is
+colon and the value. =Topics: parser= is recognised; =Topics:parser= is
 silently ignored.
 
 ** Status commands
@@ -578,13 +588,13 @@ Here are the six possible command patterns:
 |-------------------------+----------------------------+-----------------------------------------|
 | =X.=                      | set a state                | =Acked.=, =Closed.=, =Urgent.=                |
 | =Not X.=                  | retract a state            | =Not acked.=, =Not urgent.=                 |
-| =X: <value>=              | set an annotation          | =Topic: parser=, =Deadline: 30d=            |
-| =No X.=                   | clear an annotation        | =No deadline.=, =No topic.=                 |
+| =X: <value>=              | set an annotation          | =Topics: parser=, =Deadline: 30d=           |
+| =No X.=                   | clear an annotation        | =No deadline.=, =No topics.=                |
 | =X-by: <addr>=            | credit the update to X     | =Acked-by: a@x=, =Closed-by: a@x=           |
 | =X: <mid>= / =Not X: <mid>= | pose or retract a relation | =Superseded-by: <m@x>=, =Related-to: <m@x>= |
 
 The "Not" form negates a state; the "No" form removes a property
-(deadline, expiry, topic).  Every word that sets acked, owned, urgent
+(deadline, expiry, topics).  Every word that sets acked, owned, urgent
 or important -- built-in defaults and per-source =:words= synonyms
 alike -- is accepted in its =Not <word>= form: =Confirmed.= is undone
 by =Not confirmed.=.  =Not closed.= is the only reopening form.
@@ -630,10 +640,10 @@ and inter-report links.
 
 **** Classification
 
-| ID       | Syntax / Words | Permission | Report types |
-|----------+----------------+------------+--------------|
-| =:topic=   | =Topic: word=    | any user   | all          |
-| =:untopic= | =No topic=       | any user   | all          |
+| ID       | Syntax / Words      | Permission | Report types |
+|----------+---------------------+------------+--------------|
+| =:topic=   | =Topics: [-]word ...= | any user   | all          |
+| =:untopic= | =No topics=           | any user   | all          |
 
 **** Scheduling
 
@@ -1313,7 +1323,7 @@ every command, removing false positives on common English words
 | Negative bareword | =Not acked= / =!Not acked= | =!Not acked=             |
 | =-by= line          | =Acked-by: a@b.c=        | =!Acked-by: a@b.c=       |
 | Date line         | =Deadline: 2026-06-01=   | =!Deadline: 2026-06-01=  |
-| Topic             | =Topic: event=           | =!Topic: event=          |
+| Topics            | =Topics: event=          | =!Topics: event=         |
 | Supersede         | =Superseded-by: <mid>=   | =!Superseded-by: <mid>=  |
 | Supersede (sym.)  | =Supersedes: <mid>=      | =!Supersedes: <mid>=     |
 | Role control      | =Add maintainer: a@b.c=  | =!Add maintainer: a@b.c= |

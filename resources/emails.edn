@@ -1241,7 +1241,7 @@
   :email/references "<93@test.org>"
   :email/body-text  "Confirmed.\nDeadline: 2026-06-01\n"}
 
- ;; 95 -- Maintainer reply with trigger (Confirmed.) + Topic directive
+ ;; 95 -- Maintainer reply with trigger (Confirmed.) + Topics directive
  {:email/id        "95"
   :email/message-id  "<95@test.org>"
   :email/subject     "Re: [BUG] Mixed trigger and directive test"
@@ -1251,7 +1251,7 @@
   :email/ingested-at #inst "2026-01-29T13:00:00"
   :email/in-reply-to "<90@test.org>"
   :email/references "<90@test.org>"
-  :email/body-text  "Confirmed.\nTopic: regression\n"}
+  :email/body-text  "Confirmed.\nTopics: regression\n"}
 
  ;; 96 -- Admin sets deadline then unsets it in email 97
  {:email/id        "96"
@@ -2001,7 +2001,7 @@
  ;; new report (here, a v2 patch via Re: [PATCH] + attachment) carries
  ;; its commands and directives onto that new report, not onto the v1
  ;; parent.  v1 (216) is superseded automatically; v2 (217) is the one
- ;; that receives Topic and Important.
+ ;; that receives Topics and Important.
  ;; =========================================================================
  {:email/id        "216"
   :email/source      "direct"
@@ -2024,7 +2024,7 @@
   :email/ingested-at #inst "2026-03-17T10:00:00"
   :email/in-reply-to "<216@test.org>"
   :email/references  "<216@test.org>"
-  :email/body-text  "Updated version.\nTopic: lexer.\nImportant.\n"
+  :email/body-text  "Updated version.\nTopics: lexer.\nImportant.\n"
   :email/attachments [{:attachment/filename "v2.patch"
                        :attachment/content-type "text/x-patch"
                        :attachment/data "diff --git a/p.el b/p.el\n--- a/p.el\n+++ b/p.el\n@@ -1,3 +1,3 @@\n-old\n+v2\n"}]}

@@ -30,6 +30,56 @@
 (def trailing-punct "[.,;:?!]")
 
 ;; ---------------------------------------------------------------------------
+;; Topics: payload
+;;
+;; Space-separated words, each optionally signed: `-word` removes,
+;; `+word` or `word` adds.  A word starts with a letter, digit or `_`
+;; and continues with those or `-`, possibly joined by `.` or `/` (so
+;; subject topics like org-demo.html or net/mlx5e can be removed); a
+;; trailing `.` stays line punctuation.  No comma: a prose line such
+;; as "Topics: async preview, org-ql, and export." must not parse as
+;; a command.
+;; ---------------------------------------------------------------------------
+
+(def ^:private topics-word-re
+  (let [w "[\\p{L}\\p{N}_][\\p{L}\\p{N}_-]*"]
+    (str w "(?:[./]" w ")*")))
+
+(def ^:private topic-ops-re
+  (str "[+-]?" topics-word-re "(?:\\s+[+-]?" topics-word-re ")*"))
+
+(defn parse-topic-ops
+  "Split a matched Topics: payload into [[:add|:remove word] ...],
+  left to right."
+  [s]
+  (mapv (fn [tok]
+          (if (str/starts-with? tok "-")
+            [:remove (subs tok 1)]
+            [:add (str/replace tok #"^\+" "")]))
+        (str/split s #"\s+")))
+
+(defn format-topic-ops
+  "Render ops back to the Topics: payload form: `-tok` for removes,
+  bare for adds."
+  [ops]
+  (str/join " " (map (fn [[op t]] (str (when (= :remove op) "-") t)) ops)))
+
+(defn apply-topic-ops
+  "Fold `ops` into the space-separated topic string `current` (nil or
+  blank = none).  Adds append unless already present, removes drop
+  every match; both compare case-insensitively.  Returns the new
+  string, nil when no topic is left."
+  [current ops]
+  (let [same? (fn [a b] (= (str/lower-case a) (str/lower-case b)))
+        v     (reduce (fn [acc [op t]]
+                        (case op
+                          :add    (if (some #(same? % t) acc) acc (conj acc t))
+                          :remove (into [] (remove #(same? % t)) acc)))
+                      (if (str/blank? current) [] (str/split current #"\s+"))
+                      ops)]
+    (when (seq v) (str/join " " v))))
+
+;; ---------------------------------------------------------------------------
 ;; Pattern compilation
 ;; ---------------------------------------------------------------------------
 
@@ -59,7 +109,7 @@
      (case param
        :email-address    (str "^" prefix qs ":\\s+(?:.*<(" addr ")>|(" addr "))" trailing-punct "?\\s*$")
        :date-or-duration (str "^" prefix qs ":\\s+(\\d{4}-\\d{2}-\\d{2}|\\d+[dwmy](?:\\s+\\d+[dwmy])*)" trailing-punct "?\\s*$")
-       :word             (str "^" prefix qs ":\\s+([a-zA-Z0-9_-]+)" trailing-punct "?\\s*$")
+       :topics           (str "^" prefix qs ":\\s+(" topic-ops-re ")" trailing-punct "?\\s*$")
        :message-id       (str "^" prefix qs ":\\s+(?:.*<(" mid ")>|.*/(" mid-path ")/?|(" mid-path "))" trailing-punct "?\\s*$")
        (str "^" prefix qs trailing-punct "?\\s*$")))))
 
@@ -184,7 +234,7 @@
                                                                   :email-address (capture)}
                                                :date-or-duration (when-let [d (parse-date-or-duration (capture) email-date)]
                                                                    {:action action :date d})
-                                               :word             {:action action :topic (capture)}
+                                               :topics           {:action action :topics (parse-topic-ops (capture))}
                                                :message-id       {:action action :attr attr
                                                                   :target-message-id (str "<" (capture) ">")}
                                                (cond-> {:action action}
@@ -266,7 +316,7 @@
   "Fold a seq of parsed colon-line commands into a summary map.
   NOT for bareword results (which map attrs to `true`, not addresses)."
   [lines]
-  (reduce (fn [acc {:keys [action attr email-address date topic target-message-id]}]
+  (reduce (fn [acc {:keys [action attr email-address date topics target-message-id]}]
             (case action
               :set   (-> acc (assoc-in [:set attr] email-address) (update :unset disj attr))
               :unset (-> acc (update :set dissoc attr) (update :unset conj attr))
@@ -274,8 +324,11 @@
               :unset-deadline (-> acc (dissoc :deadline) (assoc :undeadline? true))
               :set-expiry     (-> acc (assoc :expiry date) (dissoc :unexpiry?))
               :unset-expiry   (-> acc (dissoc :expiry) (assoc :unexpiry? true))
-              :set-topic      (assoc acc :topic topic)
-              :unset-topic    (-> acc (dissoc :topic) (assoc :untopic? true))
+              ;; Topic edits accumulate in order; a clear drops the
+              ;; edits before it and leaves :untopic? as the base for
+              ;; the ones after it.
+              :set-topics     (update acc :topics (fnil into []) topics)
+              :unset-topics   (-> acc (dissoc :topics) (assoc :untopic? true))
               ;; All relation actions carry a mid (the `:param :message-id`
               ;; in the registry guarantees the parser captured one).
               ;; Superseded-by: and Duplicate-of: both close this report,
@@ -503,8 +556,7 @@
     - unset-key -- flag in the resolved map that triggers a retraction
     - attr      -- report attribute the pair targets"
   [[:deadline :undeadline? :report/deadline]
-   [:expiry   :unexpiry?   :report/expiry]
-   [:topic    :untopic?    :report/topic]])
+   [:expiry   :unexpiry?   :report/expiry]])
 
 (defn- build-paired-line-tx
   "Apply every set/unset from `paired-line-attrs` to `tx`, reading
@@ -517,6 +569,18 @@
               (get resolved unset-k)
               (into (retract-ref-value-tx report-eid current attr))))
           tx paired-line-attrs))
+
+(defn- build-topics-tx
+  "Datoms for the topic edits in `resolved` (:topics ops and/or
+  :untopic?), folded over the report's current topics.  Empty when
+  nothing was asked or the fold lands on the current value."
+  [report-eid email-eid current {:keys [topics untopic?]}]
+  (let [old (:report/topic-value current)
+        new (apply-topic-ops (when-not untopic? old) topics)]
+    (cond
+      (= old new) []
+      new         (set-ref-value-tx report-eid email-eid :report/topic new)
+      :else       (retract-ref-value-tx report-eid current :report/topic))))
 
 (defn- close-with-reason-tx
   "Tx datoms to close `report-eid` with `close-reason`.  The relation
@@ -573,13 +637,14 @@
         (into (build-unset-tx report-eid current unset))
         (cond-> (and (contains? unset :report/closed) (:report/close-reason current))
           (conj [:db/retract report-eid :report/close-reason (:report/close-reason current)]))
-        (build-paired-line-tx report-eid email-eid current resolved))))
+        (build-paired-line-tx report-eid email-eid current resolved)
+        (into (build-topics-tx report-eid email-eid current resolved)))))
 
 (defn describe-lines
   "Build a human-readable summary of applied colon-line commands."
   [resolved]
   (let [{:keys [set unset deadline undeadline? expiry unexpiry?
-                topic untopic?
+                topics untopic?
                 superseded-by unsuperseded-by? unsuperseded-by-mid
                 supersedes    unsupersedes?    unsupersedes-mid
                 duplicate-of  unduplicate-of?  unduplicate-of-mid
@@ -593,8 +658,8 @@
                     (when undeadline?      "no deadline")
                     (when expiry           (str "expiry " expiry))
                     (when unexpiry?        "no expiry")
-                    (when topic            (str "topic:" topic))
-                    (when untopic?         "no topic")
+                    (when untopic?         "no topics")
+                    (when (seq topics)     (str "topics:" (format-topic-ops topics)))
                     (when superseded-by    (str "superseded-by:" superseded-by))
                     (when unsuperseded-by? (str "not superseded-by:" unsuperseded-by-mid))
                     (when supersedes       (str "supersedes:" supersedes))
@@ -639,13 +704,13 @@
   (yyyy-MM-dd) so the failure record stays readable when rendered
   verbatim in a notification email.  Falls back to the :syntax of the
   looked-up command when the command carries no parameter."
-  [{:keys [id action email-address date topic target-message-id]}]
+  [{:keys [id action email-address date topics target-message-id]}]
   (let [syntax (:syntax (get commands-by-id id))]
     (case action
       :set              (str syntax ": " email-address)
       :set-deadline     (str syntax ": " (common/format-date-iso date))
       :set-expiry       (str syntax ": " (common/format-date-iso date))
-      :set-topic        (str syntax ": " topic)
+      :set-topics       (str syntax ": " (format-topic-ops topics))
       :set-superseded   (str syntax ": " target-message-id)
       :set-supersedes   (str syntax ": " target-message-id)
       :set-duplicate    (str syntax ": " target-message-id)

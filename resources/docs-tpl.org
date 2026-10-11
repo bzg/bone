@@ -44,6 +44,10 @@ parser: input: crash= sets the two topics "parser" and "input". A topic
 is a single word followed by =:= and a space; a sentence containing a
 colon sets no topic.
 
+To edit the topics of an existing report, reply with a =Topics:=
+line: each word adds a topic, a =-= prefix removes one (=Topics:
+-parser lexer.=), and =No topics.= clears them all.
+
 ** Status & priority commands
 
 Replies to a report update it with command keywords such as
