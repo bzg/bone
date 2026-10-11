@@ -26,7 +26,8 @@
          '[bone.html-bb :refer [set-theme! head-hiccup
                                 footer-css theme-toggle-css bone-footer wrap-js
                                 spit-html theme-toggle-js nav-bar
-                                org-inline parse-org-table html-escape]])
+                                org-inline parse-org-table html-escape
+                                source-feeds]])
 
 (load-datalevin-pod!)
 
@@ -299,14 +300,14 @@
   .meta { font-size: 0.78rem; color: var(--pico-muted-color); margin-bottom: 2rem; }
 " footer-css))
 
-(defn docs-page [body-html {:keys [ical website source]}]
+(defn docs-page [body-html {:keys [ical website source feeds]}]
   (let [title        "BONE - Docs"
         generated-at (str (java.util.Date.))]
     (str
      "<!DOCTYPE html>\n"
      (h/html
       [:html {:lang "en" :data-theme "light"}
-       (head-hiccup {:title title :css docs-css})
+       (head-hiccup {:title title :css docs-css :feeds feeds})
        [:body
         [:main.container
          (nav-bar title "docs")
@@ -429,7 +430,10 @@
                                                         "announcements.ics"))]
                       (docs-page body-html {:ical has-ical?
                                             :website (:website source-cfg)
-                                            :source source-name}))
+                                            :source source-name
+                                            :feeds (source-feeds
+                                                    (str (io/file effective-dir "reports"))
+                                                    source-name (:base-url source-cfg))}))
                     (finally
                       (d/close conn)))]
   (io/make-parents out-file)

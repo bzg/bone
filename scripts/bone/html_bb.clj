@@ -7,6 +7,7 @@
   <head> builder, nav bar, org->HTML helpers, and an optional
   `tidy` pretty-printer."
   (:require [babashka.process]
+            [bone.common :refer [report-type-spec]]
             [clojure.string :as str]
             [hiccup2.core :as h]))
 
@@ -115,14 +116,50 @@
         (str/replace ">" "&gt;")
         (str/replace "\"" "&quot;"))))
 
+;; RSS autodiscovery (https://www.rssboard.org/rss-autodiscovery): one
+;; <link rel="alternate" type="application/rss+xml"> per feed in <head>,
+;; the first one being the default feed.  The spec recommends absolute
+;; hrefs, so :base-url is used when the source sets it.
+
+(defn feed-url
+  "Absolute feed URL when `base-url` is set, else `rel` as is (resolved
+  by the browser against the page)."
+  [base-url rel]
+  (if (str/blank? base-url)
+    rel
+    (str (str/replace base-url #"/+$" "") "/" rel)))
+
+(def ^:private feed-files
+  "[basename label] pairs, all.xml first so it is the default feed.
+  Labels match the channel titles written by bone-export.clj."
+  (into [["all.xml" "reports"]]
+        (map (fn [{:keys [plural]}] [(str plural ".xml") plural]))
+        report-type-spec))
+
+(defn source-feeds
+  "Autodiscovery links ({:href :title} maps) for the feeds present in
+  `reports-dir`, for a page served next to that directory."
+  [reports-dir source-name base-url]
+  (for [[file label] feed-files
+        :when (.exists (java.io.File. ^String reports-dir ^String file))]
+    {:href  (feed-url base-url (str "reports/" file))
+     :title (str "BONE " source-name " " label)}))
+
+(defn- feed-link-hiccup [{:keys [href title]}]
+  [:link {:rel "alternate" :type "application/rss+xml" :title title :href href}])
+
+(defn- feed-link-html [{:keys [href title]}]
+  (str "<link rel=\"alternate\" type=\"application/rss+xml\" title=\""
+       (html-escape title) "\" href=\"" (html-escape href) "\">\n"))
+
 (defn head-hiccup
   "The shared <head> block as a hiccup vector.
    opts keys:
      :title    -- page <title> (required)
      :css      -- inline CSS string (optional)
-     :rss-href -- href for <link rel=alternate> RSS (optional)
+     :feeds    -- RSS autodiscovery links, see `source-feeds` (optional)
      :extra    -- hiccup appended before </head> (optional)"
-  [{:keys [title css rss-href extra]}]
+  [{:keys [title css feeds extra]}]
   [:head
    [:meta {:charset "UTF-8"}]
    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
@@ -136,9 +173,7 @@
      (if link
        [:link {:rel "stylesheet" :href link}]
        [:style (h/raw inline)]))
-   (when rss-href
-     [:link {:rel "alternate" :type "application/rss+xml"
-             :title "BONE Reports RSS" :href rss-href}])
+   (map feed-link-hiccup feeds)
    [:title title]
    (when css [:style (h/raw css)])
    extra])
@@ -149,8 +184,9 @@
    opts keys:
      :title      -- page <title> (required)
      :css        -- inline CSS string (optional)
+     :feeds      -- RSS autodiscovery links, see `source-feeds` (optional)
      :extra-head -- raw HTML string inserted before </head> (optional)"
-  [{:keys [title css extra-head]}]
+  [{:keys [title css feeds extra-head]}]
   (let [title (html-escape title)]
     (str "<head>\n"
          "<meta charset=\"UTF-8\">\n"
@@ -167,6 +203,7 @@
                               (str "<link rel=\"stylesheet\" href=\"" link "\">\n")
                               (str "<style>\n" inline "\n</style>\n")))
                           entries)))
+         (str/join (map feed-link-html feeds))
          "<title>" title "</title>\n"
          (when css (str "<style>\n" css "\n</style>\n"))
          (or extra-head "")

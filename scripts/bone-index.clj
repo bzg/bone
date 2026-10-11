@@ -21,7 +21,7 @@
          '[hiccup2.core :as h]
          '[taoensso.timbre :as log]
          '[bone.common :refer [parse-cli-args escape-script-payload]]
-         '[bone.html-bb :refer [set-theme! head-hiccup page-title
+         '[bone.html-bb :refer [set-theme! head-hiccup page-title source-feeds
                                 footer-css theme-toggle-css
                                 bone-footer wrap-js spit-html
                                 noscript-banner wrap-template
@@ -236,7 +236,7 @@
         website      (get envelope "website")
         contribute   (get envelope "contribute-url")
         title        (page-title "Reports" source-name)
-        has-rss?     (.exists (clojure.java.io/file reports-dir "all.xml"))
+        feeds        (source-feeds reports-dir source-name (get envelope "base-url"))
         ;; ICS lives one level up from reports-dir, in events/
         base-dir     (.getParent (clojure.java.io/file reports-dir))
         has-ical?    (and base-dir (.exists (clojure.java.io/file base-dir "events" "announcements.ics")))
@@ -313,7 +313,7 @@
       [:html {:lang "en" :data-theme "light"}
        (head-hiccup {:title    title
                      :css      page-css
-                     :rss-href (when has-rss? "reports/all.xml")
+                     :feeds    feeds
                      :extra    (when mask-css [:style (h/raw mask-css)])})
        [:body
         (noscript-banner title)

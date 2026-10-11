@@ -74,7 +74,8 @@
                                     new-source-types-since
                                     state-changed-source-types-since]]
             [bone.html-bb :refer [set-theme! html-head footer-css bone-footer
-                                  wrap-js spit-html theme-toggle-js nav-bar]]
+                                  wrap-js spit-html theme-toggle-js nav-bar
+                                  feed-url]]
             [hiccup2.core :as h]))
 
 (load-datalevin-pod!)
@@ -1046,7 +1047,10 @@
          data     (map-reports open source-map maintainers-map)
          data     (->> data fold-series (take rss-limit))
          items    (str/join "\n" (map report->rss-item data))
-         list-url (get-in source-map [source-name :list-archive] "")
+         ;; RSS 2.0 requires a channel <link>: fall back on the BONE
+         ;; pages, then the project website, when no archive is set.
+         cfg      (get source-map source-name)
+         list-url (or (:list-archive cfg) (:base-url cfg) (:website cfg) "")
          filename (str out-dir "/" basename)]
      (if (seq data)
        (do (spit filename
@@ -1546,7 +1550,16 @@
                 :total        (or (:total meta) 0)
                 :open         (or (:open-count meta) 0)
                 :closed       (or (:closed-count meta) 0)
-                :list-archive (:list-archive meta)})
+                :list-archive (:list-archive meta)
+                :base-url     (:base-url meta)})
+        ;; RSS autodiscovery: one link per source, main feed only.
+        ;; :base-url is where the source directory itself is served.
+        feed-links (for [{:keys [name slug formats base-url]} rows
+                         :when (formats "rss")]
+                     {:href  (if (str/blank? base-url)
+                               (str slug "/reports/all.xml")
+                               (feed-url base-url "reports/all.xml"))
+                      :title (str "BONE " name " reports")})
         row-html
         (fn [{:keys [name slug formats total open closed list-archive]}]
           (let [feeds (cond-> []
@@ -1569,6 +1582,7 @@
         (str
          "<!DOCTYPE html>\n<html lang=\"en\">\n"
          (html-head {:title "BONE - Sources"
+                     :feeds feed-links
                      :css   (str "table{margin-top:1.5rem}"
                                "td.num,th.num{text-align:right}"
                                "a.archive{font-size:0.82rem;margin-left:0.4rem;opacity:0.7}"

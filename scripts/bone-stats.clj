@@ -23,7 +23,7 @@
          '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
          '[bone.html-bb :refer [set-theme! page-title
                                 bone-footer wrap-js spit-html theme-toggle-js
-                                nav-bar html-head wrap-template
+                                nav-bar html-head wrap-template source-feeds
                                 parse-org-table]])
 
 (load-datalevin-pod!)
@@ -515,9 +515,10 @@
   \"Available data\" table, and the scripts.  Carries no report data --
   bone-stats.js fetches stats.json (via meta.json) and fills it in, so the
   file stays byte-stable across data-only changes."
-  [out-dir source-name {:keys [website]}]
+  [out-dir source-name {:keys [website base-url]}]
   (let [title        (page-title "Data" source-name)
         has-ical?    (.exists (io/file out-dir "events" "announcements.ics"))
+        feeds        (source-feeds (str (io/file out-dir "reports")) source-name base-url)
         data-section (render-data-section out-dir)
         vega-scripts (str "<script src=\"https://cdn.jsdelivr.net/npm/vega@5/build/vega.min.js\"></script>\n"
                           "<script src=\"https://cdn.jsdelivr.net/npm/vega-lite@5/build/vega-lite.min.js\"></script>\n"
@@ -544,6 +545,7 @@
      "<html lang=\"en\" data-theme=\"light\">\n"
      (html-head {:title      title
                  :css        stats-css
+                 :feeds      feeds
                  :extra-head vega-scripts})
      "<body>\n"
      "<noscript><h1>" title "</h1></noscript>\n"
@@ -602,7 +604,7 @@
   (let [src (some #(when (= source-name (:name %)) %)
                   (:sources (load-config)))]
     (spit-html out-file (render-shell out-dir source-name
-                                      (select-keys src [:website]))))
+                                      (select-keys src [:website :base-url]))))
   (log/info "Wrote shell" out-file))
 
 (defn -main [& args]

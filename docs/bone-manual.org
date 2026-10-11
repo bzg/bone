@@ -705,7 +705,11 @@ Running =bb export all= generates, for each source:
 RSS feeds carry up to 50 items, most recent first. Reports posted by
 a maintainer carry a =<category>maintainer</category>= element and a
 =role:maintainer= field in the item description, so feed readers can
-filter or highlight them. Export is incremental: only sources
+filter or highlight them. Every HTML page advertises its feeds with
+=<link rel="alternate" type="application/rss+xml">= elements ([[https://www.rssboard.org/rss-autodiscovery][RSS
+autodiscovery]]), =all.xml= first, so a reader given the page URL finds
+them by itself; set =:base-url= to make those links absolute, as the
+specification recommends. Export is incremental: only sources
 modified since the last export are regenerated. Use =--force= to
 rebuild everything, or =bb export
 {json|rss|org|html|stats|text|events}= to rebuild a single format.
@@ -1058,7 +1062,7 @@ Emails that match no source are discarded at ingestion.
 | =:list-archive=          | URL of the list archive (shown in HTML reports)                                             |
 | =:archive-format-string= | URL template for message-ids (=%s= is replaced), used when the                                |
 |                        | =Archived-At= header is absent                                                                |
-| =:base-url=              | Base URL where this source's public directory is served                                     |
+| =:base-url=              | Base URL where this source's public directory is served (absolute RSS autodiscovery links)  |
 | =:website=               | Project website: links the source name in page titles and the footer                        |
 | =:contribute-url=        | Contribution guide: drives the "Create new" button on the reports page                      |
 | =:post-address=          | Posting address shown on =docs.html= (mailbox sources fall back to =:to=)                       |

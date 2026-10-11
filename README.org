@@ -190,7 +190,7 @@ exactly one of the three type keys:
 | =:maintainers=           | no       | Initial maintainers; first entry is the lead (see below)              |
 | =:list-archive=          | no       | URL of the list archive (shown in HTML reports)                       |
 | =:archive-format-string= | no       | URL template for message-ids (=%s= is replaced)                         |
-| =:base-url=              | no       | Base URL where this source's public directory is served               |
+| =:base-url=              | no       | Base URL of this source's public directory (absolute RSS feed links)  |
 | =:website=               | no       | Project website, linked from page titles and footers                  |
 | =:contribute-url=        | no       | Contribution guide; drives the "Create new" button                    |
 | =:post-address=          | no       | Posting address shown on =docs.html= (mailbox sources fall back to =:to=) |
