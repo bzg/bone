@@ -298,14 +298,19 @@
 
   A literal </script> in `body` would close the outer template, so it
   is replaced with a placeholder and restored client-side.  The match
-  is case-insensitive, like the HTML parser's end-tag scan."
+  is case-insensitive, like the HTML parser's end-tag scan.
+
+  The bootstrap carries LibreJS license tags like every other inline
+  script, otherwise LibreJS blocks it as non-trivial unlicensed code."
   [id body]
   (str "<script type=\"text/x-html\" id=\"" id "\">"
        (str/replace body #"(?i)</script>" "__BONE_END_SCRIPT__")
        "</script>\n"
-       "<script>document.write("
-       "document.getElementById('" id "').textContent"
-       ".replace(/__BONE_END_SCRIPT__/g,'<\\/script>'));</script>\n"))
+       "<script>\n"
+       (wrap-js (str "document.write("
+                     "document.getElementById('" id "').textContent"
+                     ".replace(/__BONE_END_SCRIPT__/g,'<\\/script>'));"))
+       "\n</script>\n"))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared footer (hiccup vector)
