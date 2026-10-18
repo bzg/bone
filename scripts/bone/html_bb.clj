@@ -78,7 +78,7 @@
 ;; Shared metadata
 ;; ---------------------------------------------------------------------------
 
-(def bone-description "BONE (Bug And Report Keeper) -- track bugs, patches, and requests.")
+(def bone-description "BONE (Backlog Of Notable Emails) -- track bugs, patches, and requests.")
 (def ^:private bone-repo-url "https://codeberg.org/bzg/bone")
 
 ;; ---------------------------------------------------------------------------

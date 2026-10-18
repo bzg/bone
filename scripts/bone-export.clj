@@ -1059,7 +1059,7 @@
                       "  <channel>\n"
                       "    <title>BONE " (xml-escape source-name) " " (xml-escape feed-label) "</title>\n"
                       "    <link>" (xml-escape list-url) "</link>\n"
-                      "    <description>Reports from the Bug And Report Keeper</description>\n"
+                      "    <description>Reports from BONE, the Backlog Of Notable Emails</description>\n"
                       items "\n"
                       "  </channel>\n"
                       "</rss>\n"))

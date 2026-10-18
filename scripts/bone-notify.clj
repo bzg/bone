@@ -2,7 +2,7 @@
 
 ;; bone-notify.clj -- Send notification emails to subscribers.
 ;;
-;; BONE: Bug And Report Keeper
+;; BONE: Backlog Of Notable Emails
 ;;
 ;; Reads the subscriber list from config.edn (:notifications
 ;; :subscribers), builds plain-text summaries from the DB (read-only),
