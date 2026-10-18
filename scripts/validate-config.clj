@@ -14,6 +14,7 @@
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
             [bone.common :as common]
+            [bone.config :as config]
             [bone.commands.registry :as reg]
             [bone.periods :as periods]))
 
@@ -476,12 +477,12 @@
     (do (log/error "Config file not found:" path)
         (System/exit 1))
     (let [config (try
-                   (common/load-config path)
+                   (config/load-config path)
                    (catch Exception e
                      (log/error "Invalid EDN:" (.getMessage e))
                      (System/exit 1)))
           result (validate-config config)
-          inline-pwds (common/inline-password-locations path)]
+          inline-pwds (config/inline-password-locations path)]
       (doseq [loc inline-pwds]
         (log/warn "Inline :password in" loc
                   "-- consider :password-file or #bone/env to keep"

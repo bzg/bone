@@ -26,10 +26,10 @@
          '[taoensso.timbre :as log]
          '[bone.common :refer [get-header-values format-date format-date-iso
                                report-priority report-status report-descendant-count
-                               load-config db-path build-source-map
                                bone-schema mid-hash
                                failures-file-path read-failures-file
                                reason-labels]]
+         '[bone.config :refer [load-config db-path build-source-map]]
          '[bone.common-bb :refer [load-datalevin-pod! all-reports]])
 
 (load-datalevin-pod!)

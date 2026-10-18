@@ -1,7 +1,7 @@
 (ns bone.common-test
   "Unit tests for bone.common pure functions:
   classify-delivery, classify-source, parse-duration-str,
-  gate-related helpers, and build-source-map edge cases."
+  gate-related helpers."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [clojure.edn :as edn]
@@ -179,44 +179,6 @@
   (is (= :alias        (common/source-type {:alias "x"})))
   (is (= :mailbox      (common/source-type {:to "x"})))
   (is (nil?            (common/source-type {:name "broken"}))))
-
-;; ---------------------------------------------------------------------------
-;; build-source-map -- nil source-type exclusion (fix 11)
-;; ---------------------------------------------------------------------------
-
-(deftest build-source-map-excludes-nil-type
-  (let [config {:sources [{:name "good" :list "bugs.example.org"}
-                           {:name "bad"}]}
-        sm     (common/build-source-map config)]
-    (is (contains? sm "good"))
-    (is (not (contains? sm "bad")))))
-
-(deftest build-source-map-propagates-runtime-options
-  (let [config {:restricted-types #{:bug}
-                :patch-triggers? false
-                :sources [{:name "global" :list "global.example.org"}
-                          {:name "source" :list "source.example.org"
-                           :restricted-types #{}
-                           :patch-triggers? true}]}
-        sm     (common/build-source-map config)]
-    (testing "global values apply when a source does not override them"
-      (is (= #{:bug} (get-in sm ["global" :restricted-types])))
-      (is (false? (get-in sm ["global" :patch-triggers?]))))
-    (testing "source values override globals, including empty/falsey values"
-      (is (= #{} (get-in sm ["source" :restricted-types])))
-      (is (true? (get-in sm ["source" :patch-triggers?]))))))
-
-(deftest build-source-map-keeps-project-links
-  (testing "the project-link keys survive the source-map whitelist --
-            they feed the JSON envelope and the exported pages"
-    (let [sm (common/build-source-map
-              {:sources [{:name "s" :list "l.example.org"
-                          :website        "https://p.example.org"
-                          :contribute-url "https://p.example.org/contribute"
-                          :post-address   "bugs@example.org"}]})]
-      (is (= "https://p.example.org" (get-in sm ["s" :website])))
-      (is (= "https://p.example.org/contribute" (get-in sm ["s" :contribute-url])))
-      (is (= "bugs@example.org" (get-in sm ["s" :post-address]))))))
 
 ;; ---------------------------------------------------------------------------
 ;; slugify
@@ -475,10 +437,6 @@
     (is (false? (common/sent-via-source-channel? :list {})))))
 
 ;; ---------------------------------------------------------------------------
-;; ics-file?
-;; ---------------------------------------------------------------------------
-
-;; ---------------------------------------------------------------------------
 ;; parse-cli-args -- --topics-filter
 ;; ---------------------------------------------------------------------------
 
@@ -486,18 +444,6 @@
   (is (= "event,security"
          (:topics-filter (common/parse-cli-args ["--topics-filter" "event,security"]))))
   (is (nil? (:topics-filter (common/parse-cli-args ["--force"])))))
-
-;; ---------------------------------------------------------------------------
-;; ics-file?
-;; ---------------------------------------------------------------------------
-
-(deftest ics-file-test
-  (is (true?  (common/ics-file? "event.ics")))
-  (is (true?  (common/ics-file? "Meeting.ICS")))
-  (is (true?  (common/ics-file? "path/to/file.ics")))
-  (is (false? (common/ics-file? "readme.txt")))
-  (is (false? (common/ics-file? "ics-like.doc")))
-  (is (false? (common/ics-file? nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; text-attachment?
@@ -518,38 +464,6 @@
                                           :attachment/filename     "0001-fix.patch"})))
     (is (false? (common/text-attachment? {:attachment/content-type "text/plain; charset=us-ascii"
                                           :attachment/filename     "changes.DIFF"})))))
-
-;; ---------------------------------------------------------------------------
-;; fold-ics-line
-;; ---------------------------------------------------------------------------
-
-(defn- physical-lines [folded] (str/split folded #"\r\n"))
-
-(defn- octets [^String s] (alength (.getBytes s "UTF-8")))
-
-(defn- unfold [folded] (str/replace folded "\r\n " ""))
-
-(deftest fold-ics-line-test
-  (let [emoji (String. (Character/toChars 0x1F600))] ; non-BMP, 4 UTF-8 octets
-    (testing "long ASCII line folds to <= 75 octets per physical line"
-      (let [line   (apply str (repeat 200 "a"))
-            folded (common/fold-ics-line line)]
-        (is (every? #(<= (octets %) 75) (physical-lines folded)))
-        (is (= line (unfold folded)))))
-
-    (testing "a fold never splits a surrogate pair (74 ASCII + emoji)"
-      (let [line   (str (apply str (repeat 74 "a")) emoji)
-            folded (common/fold-ics-line line)]
-        (is (> (count (physical-lines folded)) 1) "the line did fold")
-        (is (every? #(<= (octets %) 75) (physical-lines folded)))
-        (is (= line (unfold folded)) "round-trip keeps the emoji intact")))
-
-    (testing "a run of 30 emoji folds on code-point boundaries"
-      (let [line   (apply str (repeat 30 emoji))
-            folded (common/fold-ics-line line)]
-        (is (> (count (physical-lines folded)) 1) "the line did fold")
-        (is (every? #(<= (octets %) 75) (physical-lines folded)))
-        (is (= line (unfold folded)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; valid-config-name?

@@ -12,7 +12,7 @@
 
 (require '[babashka.pods :as pods]
          '[clojure.string :as str]
-         '[bone.common :refer [load-config]])
+         '[bone.config :refer [load-config]])
 
 ;; ---------------------------------------------------------------------------
 ;; Config validation

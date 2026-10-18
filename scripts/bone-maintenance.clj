@@ -23,10 +23,10 @@
 (require '[clojure.string :as str]
          '[taoensso.timbre :as log]
          '[bone.common :refer [parse-cutoff-date
-                               load-config db-path build-source-map
                                bone-schema format-date
                                failures-file-path read-failures-file
                                reason-labels]]
+         '[bone.config :refer [load-config db-path build-source-map]]
          '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]])
 
 ;; ---------------------------------------------------------------------------

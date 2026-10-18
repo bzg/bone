@@ -18,8 +18,8 @@
          '[clojure.java.io :as io]
          '[hiccup2.core :as h]
          '[taoensso.timbre :as log]
-         '[bone.common :refer [parse-cli-args load-config load-mailmap db-path bone-schema
-                               votes-by-report vote-counts]]
+         '[bone.common :refer [parse-cli-args bone-schema votes-by-report vote-counts]]
+         '[bone.config :refer [load-config load-mailmap db-path]]
          '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
          '[bone.html-bb :refer [set-theme! page-title
                                 bone-footer wrap-js spit-html theme-toggle-js

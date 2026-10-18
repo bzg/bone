@@ -38,24 +38,26 @@ scripts in `scripts/` are read-only.
 
 ### JVM namespaces (`src/bone/`)
 
-| Namespace       | Role                                               |
-|-----------------|----------------------------------------------------|
-| `bone.main`     | Entry point (batch by default, `--watch` for IDLE) |
-| `bone.ingest`   | Datalevin connection, email parsing and storage    |
-| `bone.digest`   | Single-email processing (classify, detect, thread) |
-| `bone.detect`   | Report type detection from subject + attachments   |
-| `bone.commands` | Commands (triggers, annotations) and votes         |
-| `bone.roles`    | Permission checks and role management              |
-| `bone.relations`| Qualified relations between reports                |
-| `bone.series`   | Patch series tracking                              |
-| `bone.expire`   | Periodic report expiry (runs inside the daemon)    |
-| `bone.periods`  | Per-source time-windowed config overrides          |
-| `bone.tracking` | Change-tracking for incremental export             |
-| `bone.common`   | Shared utilities (JVM + Babashka)                  |
-| `bone.logging`  | File and email log appenders                       |
+| Namespace        | Role                                                 |
+|------------------|------------------------------------------------------|
+| `bone.main`      | Entry point (batch by default, `--watch` for IDLE)   |
+| `bone.ingest`    | Datalevin connection, email parsing and storage      |
+| `bone.digest`    | Single-email processing (classify, detect, thread)   |
+| `bone.detect`    | Report type detection from subject + attachments     |
+| `bone.commands`  | Commands (triggers, annotations) and votes           |
+| `bone.roles`     | Permission checks and role management                |
+| `bone.relations` | Qualified relations between reports                  |
+| `bone.series`    | Patch series tracking                                |
+| `bone.expire`    | Periodic report expiry (runs inside the daemon)      |
+| `bone.periods`   | Per-source time-windowed config overrides            |
+| `bone.tracking`  | Change-tracking for incremental export               |
+| `bone.common`    | Shared utilities (JVM + Babashka)                    |
+| `bone.config`    | config.edn loading, source map, DB path (JVM + bb)   |
+| `bone.ics`       | iCalendar detection, parsing and assembly (JVM + bb) |
+| `bone.logging`   | File and email log appenders                         |
 
-`bone.common` carries no Datalevin dependency, so both the JVM and
-Babashka scripts load it. All other namespaces under `src/bone/`
+`bone.common`, `bone.config` and `bone.ics` carry no Datalevin
+dependency, so both the JVM and Babashka scripts load them. All other namespaces under `src/bone/`
 are JVM-only.
 
 ### Babashka scripts (`scripts/`)
@@ -136,7 +138,7 @@ When BONE does not digest an email as expected:
 
 ## Code conventions
 
-- Pure functions where possible.  `bone.common`, `bone.detect`,
+- Pure functions where possible.  `bone.common`, `bone.ics`, `bone.detect`,
   `bone.commands.registry` and the tx-builders in `bone.relations`
   must stay pure (no `datalevin.core` import).
 - Side-effecting functions end with `!`.  Predicates end with `?`.

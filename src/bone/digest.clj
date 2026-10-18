@@ -11,6 +11,7 @@
             [datalevin.core :as d]
             [taoensso.timbre :as log]
             [bone.common :as common]
+            [bone.ics :as ics]
             [bone.lookup :as lookup]
             [bone.tracking :as tracking]
             [bone.detect :as detect]
@@ -199,8 +200,8 @@
         ;; dump-events*), so the flag stays false elsewhere rather than
         ;; recording ICS we will never publish.
         has-ics     (and (= :announcement (:type report-info))
-                         (or (common/has-ics-attachment? attachments)
-                             (common/has-inline-ics? body-text)))
+                         (or (ics/has-ics-attachment? attachments)
+                             (ics/has-inline-ics? body-text)))
         has-text    (boolean (some common/text-attachment? attachments))
         patches     (detect/build-patch-entities email)]
     (into {:report/type (:type report-info) :report/email email-eid

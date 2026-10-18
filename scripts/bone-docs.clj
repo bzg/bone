@@ -20,8 +20,8 @@
          '[bone.common :refer [default-labels default-commands close-reasons
                                resolve-labels-map resolve-commands-map
                                resolve-command-syntax reproducible-config-str
-                               parse-cli-args load-config load-mailmap db-path build-source-map
-                               format-date-iso bone-schema lead-maintainer]]
+                               parse-cli-args format-date-iso bone-schema lead-maintainer]]
+         '[bone.config :refer [load-config load-mailmap db-path build-source-map]]
          '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
          '[bone.html-bb :refer [set-theme! head-hiccup
                                 footer-css theme-toggle-css bone-footer wrap-js

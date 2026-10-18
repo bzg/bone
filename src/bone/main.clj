@@ -10,6 +10,7 @@
   (:require [bone.ingest :as ingest]
             [bone.logging :as blog]
             [bone.common :as common]
+            [bone.config :as config]
             [bone.lookup :as lookup]
             [bone.digest :as digest]
             [bone.expire :as expire]
@@ -613,13 +614,13 @@
   Called once in batch mode, on every reconnect in watch mode (so
   config edits take effect without restart).  Idempotent."
   [db-conn config-path]
-  (let [config (common/load-config config-path)]
+  (let [config (config/load-config config-path)]
     (when-not config
       (throw (ex-info (str "Config file not found: " config-path)
                       {:config-path config-path})))
     (validate-source-periods! config)
     (roles/sync-all-sources! db-conn config)
-    {:source-map (common/build-source-map config)
+    {:source-map (config/build-source-map config)
      :sources    (or (:sources config) [])}))
 
 (defn- close-mailbox! [src]
@@ -635,7 +636,7 @@
   silently dropping a live mailbox would be more confusing than
   carrying on with the last known state."
   [mailbox-cfg ingest-cfg cli-fetch-map config-path]
-  (let [config      (common/load-config config-path)
+  (let [config      (config/load-config config-path)
         live-mb     (or (some #(when (= (:name %) (:name mailbox-cfg)) %)
                               (:mailboxes config))
                         mailbox-cfg)
@@ -943,7 +944,7 @@
              (catch clojure.lang.ExceptionInfo e
                (log/error (.getMessage e))
                (System/exit 1)))
-        config (common/load-config config-path)]
+        config (config/load-config config-path)]
     (when (nil? config)
       (log/error "Config file not found:" config-path)
       (System/exit 1))
@@ -951,7 +952,7 @@
     (let [mailboxes     (validate-mailboxes! config)
           ingest-cfg    (:ingest config)
           cli-fetch-map (some-> cli-fetch cli-fetch->map)
-          db-path       (common/expand-home (common/db-path config))]
+          db-path       (common/expand-home (config/db-path config))]
       ;; Single-instance guard: taken before the --fresh wipe so a
       ;; running daemon cannot have its DB wiped out from under it.
       (if-let [lock (acquire-instance-lock! db-path)]

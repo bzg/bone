@@ -59,15 +59,15 @@
                                  extract-bracketed-id-raw
                                  report-priority report-status report-descendant-count
                                  parse-cli-args parse-delay parse-cutoff-date
-                                 load-config load-mailmap db-path build-source-map
                                  reproducible-config-str
                                  bone-schema bone-format
                                  report-type-spec type->plural
                                  votes-by-report vote-counts
-                                 ics-file? text-attachment? email-body-text
-                                 normalize-ics-eol
-                                 extract-vevents extract-vtimezones
-                                 dedupe-vevents dedupe-vtimezones build-vcalendar]]
+                                 text-attachment? email-body-text]]
+            [bone.config :refer [load-config load-mailmap db-path build-source-map]]
+            [bone.ics :refer [ics-file? normalize-ics-eol
+                              extract-vevents extract-vtimezones
+                              dedupe-vevents dedupe-vtimezones build-vcalendar]]
             [bone.common-bb :refer [load-datalevin-pod! all-reports dq dpull
                                     fetch-attachment-data get-tenures tenures-snapshot
                                     get-last-modified changed-source-types-since

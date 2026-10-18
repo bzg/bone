@@ -5,6 +5,7 @@
 (ns bone.ingest
   "Email ingestion: Datalevin connection, storage, and email=>txdata transform."
   (:require [bone.common :as common]
+            [bone.ics :as ics]
             [bone.lookup :as lookup]
             [datalevin.core :as d]
             [clojure.string :as str]
@@ -185,7 +186,7 @@
   content.  Bytes are decoded as UTF-8."
   [{:keys [filename content-type data]}]
   (let [is-text? (or (common/patch-file? filename)
-                     (common/ics-file? filename)
+                     (ics/ics-file? filename)
                      (common/text-attachment? {:attachment/content-type content-type}))]
     (when (and is-text? data)
       (cond
