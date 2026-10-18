@@ -7,6 +7,7 @@
   and DB queries that run via the pod.  Scripts require this ns
   alongside `bone.common`; there is no more `load-file` dance."
   (:require [bone.common :as common]
+            [clojure.edn :as edn]
             [taoensso.timbre :as log]))
 
 (log/merge-config! {:min-level :info})
@@ -15,7 +16,13 @@
 ;; Datalevin pod (bb-only -- JVM uses datalevin.core directly)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private datalevin-version "1.2.5")
+(def ^:private datalevin-version
+  "Taken from deps.edn so the bb pod can never drift from the JVM
+  library: two Datalevin versions on one LMDB directory risk
+  corrupting it."
+  (or (-> (slurp "deps.edn") edn/read-string
+          (get-in [:deps 'datalevin/datalevin :mvn/version]))
+      (throw (ex-info "datalevin/datalevin not found in deps.edn" {}))))
 
 (defn load-datalevin-pod! []
   (require '[babashka.pods :as pods])
