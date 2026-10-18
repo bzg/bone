@@ -26,7 +26,7 @@
          '[bone.html-bb :refer [set-theme! head-hiccup
                                 footer-css theme-toggle-css bone-footer wrap-js
                                 spit-html theme-toggle-js nav-bar
-                                org-inline parse-org-table html-escape
+                                org-inline parse-org-table
                                 source-feeds]])
 
 (load-datalevin-pod!)
@@ -300,7 +300,10 @@
   .meta { font-size: 0.78rem; color: var(--pico-muted-color); margin-bottom: 2rem; }
 " footer-css))
 
-(defn docs-page [body-html {:keys [ical website source feeds]}]
+(defn docs-page
+  "Assemble docs.html: `body-html` is the rendered Org template (a raw
+  HTML string from org->html), `sections` the hiccup appended after it."
+  [body-html sections {:keys [ical website source feeds]}]
   (let [title        "BONE - Docs"
         generated-at (str (java.util.Date.))]
     (str
@@ -313,6 +316,7 @@
          (nav-bar title "docs")
          [:p.meta (str "Generated " generated-at)]
          (h/raw body-html)
+         sections
          [:script (h/raw (wrap-js theme-toggle-js))]]
         (bone-footer {:ical ical
                       :website website
@@ -337,62 +341,57 @@
                  (if (str/blank? name) acc (assoc acc email name)))
                {})))
 
-(defn build-maintainers-html
-  "Build an HTML section listing all maintainer tenures (active and closed),
+(defn maintainers-section
+  "Hiccup section listing all maintainer tenures (active and closed),
   with :from/:to dates when known. The lead maintainer is highlighted.
-  Identical rendered lines are deduplicated: when several email
+  Identical rendered entries are deduplicated: when several email
   addresses resolve to the same display name (via mailmap.edn) with
-  the same date range and lead status, only one line is shown."
+  the same date range and lead status, only one entry is shown."
   [db source-name]
   (when source-name
-    (let [tenures     (get-tenures db source-name)
-          lead        (lead-maintainer tenures)
-          names       (merge (participant-names-for-source db source-name)
-                             (load-mailmap))
+    (let [tenures  (get-tenures db source-name)
+          lead     (lead-maintainer tenures)
+          names    (merge (participant-names-for-source db source-name)
+                          (load-mailmap))
           ;; Sort: lead first, then alphabetical by email (case-insensitive).
-          sort-key    (fn [{:keys [email to]}]
-                        [(if (and (nil? to) (= email lead)) 0 1)
-                         (str/lower-case (or email ""))])
-          ordered     (sort-by sort-key tenures)
-          entries     (mapv
-                       (fn [{:keys [email from to]}]
-                         (let [display (or (get names (some-> email str/lower-case)) email)
-                               escaped (html-escape display)
-                               range   (cond
-                                         (and from to)
-                                         (str " <small>(" (format-date-iso from) " -- " (format-date-iso to) ")</small>")
-                                         from
-                                         (str " <small>(since " (format-date-iso from) ")</small>")
-                                         to
-                                         (str " <small>(until " (format-date-iso to) ")</small>")
-                                         :else "")
-                               badge   (when (and (nil? to) (= email lead))
-                                         " <small><em>(lead)</em></small>")]
-                           (str escaped range badge)))
-                       ordered)
-          entries     (vec (distinct entries))]
+          sort-key (fn [{:keys [email to]}]
+                     [(if (and (nil? to) (= email lead)) 0 1)
+                      (str/lower-case (or email ""))])
+          entries  (->> (sort-by sort-key tenures)
+                        (map (fn [{:keys [email from to]}]
+                               (let [display (or (get names (some-> email str/lower-case)) email)
+                                     dates   (cond
+                                               (and from to)
+                                               [:small (str "(" (format-date-iso from) " -- " (format-date-iso to) ")")]
+                                               from
+                                               [:small (str "(since " (format-date-iso from) ")")]
+                                               to
+                                               [:small (str "(until " (format-date-iso to) ")")])
+                                     badge   (when (and (nil? to) (= email lead))
+                                               [:small [:em "(lead)"]])]
+                                 [:li display
+                                  (when dates (list " " dates))
+                                  (when badge (list " " badge))])))
+                        distinct)]
       (when (seq entries)
-        (str "<h2 id=\"maintainers\">Maintainers</h2>\n<ul>\n"
-             (str/join "\n" (map #(str "<li>" % "</li>") entries))
-             "\n</ul>")))))
+        (list [:h2#maintainers "Maintainers"]
+              [:ul entries])))))
 
-(defn build-configuration-html
-  "Build the Configuration section: a complete, self-contained config.edn
-  the reader drops into their own BONE instance to reproduce this source
-  on their own copy of the mail.  Global :labels/:commands/... are folded
-  in and secrets/operator-internal keys are dropped (see
+(defn configuration-section
+  "Hiccup section with a complete, self-contained config.edn the reader
+  drops into their own BONE instance to reproduce this source on their
+  own copy of the mail.  Global :labels/:commands/... are folded in and
+  secrets/operator-internal keys are dropped (see
   `bone.common/effective-source-config`)."
   [config source-name]
   (when-let [edn (and source-name (reproducible-config-str config source-name))]
-    (str "<h2 id=\"configuration\">Configuration</h2>\n"
-         "<p>To reproduce this dashboard on your own copy of the mail, run "
-         "BONE with this <code>config.edn</code> "
-         "(<a href=\"reports/config.edn\">download</a>). Replace "
-         "<code>:mailboxes</code> with your own local source -- the operator's "
-         "mailbox is private and not needed -- then run <code>bb export</code>.</p>\n"
-         "<pre><code>"
-         (html-escape (str/trim edn))
-         "</code></pre>")))
+    (list [:h2#configuration "Configuration"]
+          [:p "To reproduce this dashboard on your own copy of the mail, run "
+           "BONE with this " [:code "config.edn"] " ("
+           [:a {:href "reports/config.edn"} "download"] "). Replace "
+           [:code ":mailboxes"] " with your own local source -- the operator's "
+           "mailbox is private and not needed -- then run " [:code "bb export"] "."]
+          [:pre [:code (str/trim edn)]])))
 
 ;; ---------------------------------------------------------------------------
 ;; Main
@@ -417,18 +416,16 @@
       ;; slurp or rendering throws (same pattern as the other scripts).
       html        (try
                     (let [db          (d/db conn)
-                          maint-html  (build-maintainers-html db source-name)
-                          config-html (build-configuration-html config source-name)
+                          sections    (list (maintainers-section db source-name)
+                                            (configuration-section config source-name))
                           org-text    (-> (slurp "resources/docs-tpl.org")
                                           (substitute-version (bone-version))
                                           (substitute-source-links source-cfg)
                                           (substitute-template labels cmds prefix))
-                          body-html   (cond-> (org->html org-text)
-                                        maint-html  (str "\n" maint-html)
-                                        config-html (str "\n" config-html))
+                          body-html   (org->html org-text)
                           has-ical?   (.exists (io/file effective-dir "events"
                                                         "announcements.ics"))]
-                      (docs-page body-html {:ical has-ical?
+                      (docs-page body-html sections {:ical has-ical?
                                             :website (:website source-cfg)
                                             :source source-name
                                             :feeds (source-feeds

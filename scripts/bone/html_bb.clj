@@ -105,17 +105,6 @@
 ;; Shared <head> builder
 ;; ---------------------------------------------------------------------------
 
-(defn html-escape
-  "Escape HTML special characters in a string (element and attribute
-  contexts)."
-  [s]
-  (when s
-    (-> s
-        (str/replace "&" "&amp;")
-        (str/replace "<" "&lt;")
-        (str/replace ">" "&gt;")
-        (str/replace "\"" "&quot;"))))
-
 ;; RSS autodiscovery (https://www.rssboard.org/rss-autodiscovery): one
 ;; <link rel="alternate" type="application/rss+xml"> per feed in <head>,
 ;; the first one being the default feed.  The spec recommends absolute
@@ -148,10 +137,6 @@
 (defn- feed-link-hiccup [{:keys [href title]}]
   [:link {:rel "alternate" :type "application/rss+xml" :title title :href href}])
 
-(defn- feed-link-html [{:keys [href title]}]
-  (str "<link rel=\"alternate\" type=\"application/rss+xml\" title=\""
-       (html-escape title) "\" href=\"" (html-escape href) "\">\n"))
-
 (defn head-hiccup
   "The shared <head> block as a hiccup vector.
    opts keys:
@@ -177,37 +162,6 @@
    [:title title]
    (when css [:style (h/raw css)])
    extra])
-
-(defn html-head
-  "Render a <head> block as a string, for the pages assembled from
-  strings (see `head-hiccup` for the hiccup ones).
-   opts keys:
-     :title      -- page <title> (required)
-     :css        -- inline CSS string (optional)
-     :feeds      -- RSS autodiscovery links, see `source-feeds` (optional)
-     :extra-head -- raw HTML string inserted before </head> (optional)"
-  [{:keys [title css feeds extra-head]}]
-  (let [title (html-escape title)]
-    (str "<head>\n"
-         "<meta charset=\"UTF-8\">\n"
-         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-         "<meta name=\"color-scheme\" content=\"light dark\">\n"
-         "<meta name=\"description\" content=\"" bone-description "\">\n"
-         "<meta property=\"og:title\" content=\"" title "\">\n"
-         "<meta property=\"og:description\" content=\"" bone-description "\">\n"
-         "<meta property=\"og:type\" content=\"website\">\n"
-         "<link rel=\"stylesheet\" href=\"" pico-cdn "\">\n"
-         (when-let [entries (resolved-theme)]
-           (str/join (map (fn [{:keys [link inline]}]
-                            (if link
-                              (str "<link rel=\"stylesheet\" href=\"" link "\">\n")
-                              (str "<style>\n" inline "\n</style>\n")))
-                          entries)))
-         (str/join (map feed-link-html feeds))
-         "<title>" title "</title>\n"
-         (when css (str "<style>\n" css "\n</style>\n"))
-         (or extra-head "")
-         "</head>\n")))
 
 (def theme-toggle-css
   ".theme-toggle { cursor: pointer; background: none; border: none; font-size: 1.2rem; padding: 0.3rem; }")

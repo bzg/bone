@@ -73,7 +73,7 @@
                                     get-last-modified changed-source-types-since
                                     new-source-types-since
                                     state-changed-source-types-since]]
-            [bone.html-bb :refer [set-theme! html-head footer-css bone-footer
+            [bone.html-bb :refer [set-theme! head-hiccup footer-css theme-toggle-css bone-footer
                                   wrap-js spit-html theme-toggle-js nav-bar
                                   feed-url]]
             [hiccup2.core :as h]))
@@ -1533,6 +1533,21 @@
       (try (json/parse-string (slurp f) true)
            (catch Exception _ nil)))))
 
+(defn- root-index-row
+  [{:keys [name slug formats total open closed list-archive]}]
+  [:tr
+   [:td [:a {:href (str slug "/index.html")} name]
+    (when list-archive
+      (list " " [:a.archive {:href list-archive :title "List archive"} "↗"]))]
+   [:td.num open]
+   [:td.num closed]
+   [:td.num total]
+   [:td.num.feeds
+    (interpose " · "
+               (cond-> []
+                 (formats "rss")  (conj [:a {:href (str slug "/reports/all.xml")} "RSS"])
+                 (formats "json") (conj [:a {:href (str slug "/reports/all.json")} "JSON"])))]])
+
 (defn dump-root-index!
   "Generate public/index.html listing all exported sources.
   Reads each source's reports/meta.json for summary counts.
@@ -1541,8 +1556,8 @@
   [source-names source-map]
   (let [rows (for [src-name source-names
                    :let     [slug     (slugify src-name)
-                         base-dir (str "public/" slug)
-                         meta     (load-source-meta base-dir)]
+                             base-dir (str "public/" slug)
+                             meta     (load-source-meta base-dir)]
                    :when    meta]
                {:name         src-name
                 :slug         slug
@@ -1560,50 +1575,27 @@
                                (str slug "/reports/all.xml")
                                (feed-url base-url "reports/all.xml"))
                       :title (str "BONE " name " reports")})
-        row-html
-        (fn [{:keys [name slug formats total open closed list-archive]}]
-          (let [feeds (cond-> []
-                        (formats "rss")
-                        (conj (str "<a href=\"" slug "/reports/all.xml\">RSS</a>"))
-                        (formats "json")
-                        (conj (str "<a href=\"" slug "/reports/all.json\">JSON</a>")))]
-            (str "<tr>"
-                 "<td><a href=\"" slug "/index.html\">" (xml-escape name) "</a>"
-                 (when list-archive
-                   (str " <a class=\"archive\" href=\"" (xml-escape list-archive)
-                        "\" title=\"List archive\">↗</a>"))
-                 "</td>"
-                 "<td class=\"num\">" open "</td>"
-                 "<td class=\"num\">" closed "</td>"
-                 "<td class=\"num\">" total "</td>"
-                 "<td class=\"num feeds\">" (str/join " · " feeds) "</td>"
-                 "</tr>\n")))
         page
         (str
-         "<!DOCTYPE html>\n<html lang=\"en\">\n"
-         (html-head {:title "BONE - Sources"
-                     :feeds feed-links
-                     :css   (str "table{margin-top:1.5rem}"
-                               "td.num,th.num{text-align:right}"
-                               "a.archive{font-size:0.82rem;margin-left:0.4rem;opacity:0.7}"
-                               ".feeds{font-size:0.82rem;white-space:nowrap}"
-                               ".theme-toggle{cursor:pointer;background:none;border:none;font-size:1.2rem;padding:0.3rem}"
-                               footer-css)})
-         "<body>\n<main class=\"container\">\n"
-         (h/html (nav-bar "BONE" nil))
-         "\n<table>\n"
-         "<thead><tr>"
-         "<th>Source</th>"
-         "<th class=\"num\">Open</th>"
-         "<th class=\"num\">Closed</th>"
-         "<th class=\"num\">Total</th>"
-         "<th class=\"num\">Feeds</th>"
-         "</tr></thead>\n<tbody>\n"
-         (apply str (map row-html rows))
-         "</tbody></table>\n"
-         (h/html (bone-footer {:feeds false}))
-         "\n<script>\n" (wrap-js theme-toggle-js) "\n</script>\n"
-         "</main>\n</body>\n</html>\n")]
+         "<!DOCTYPE html>\n"
+         (h/html
+          [:html {:lang "en"}
+           (head-hiccup {:title "BONE - Sources"
+                         :feeds feed-links
+                         :css   (str "table{margin-top:1.5rem}"
+                                     "td.num,th.num{text-align:right}"
+                                     "a.archive{font-size:0.82rem;margin-left:0.4rem;opacity:0.7}"
+                                     ".feeds{font-size:0.82rem;white-space:nowrap}"
+                                     theme-toggle-css footer-css)})
+           [:body
+            [:main.container
+             (nav-bar "BONE" nil)
+             [:table
+              [:thead [:tr [:th "Source"] [:th.num "Open"] [:th.num "Closed"]
+                       [:th.num "Total"] [:th.num "Feeds"]]]
+              [:tbody (map root-index-row rows)]]
+             (bone-footer {:feeds false})
+             [:script (h/raw (wrap-js theme-toggle-js))]]]]))]
     (spit-html "public/index.html" page)
     (log/info "Wrote public/index.html with" (count rows) "source(s)")))
 

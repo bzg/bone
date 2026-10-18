@@ -23,7 +23,7 @@
          '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
          '[bone.html-bb :refer [set-theme! page-title
                                 bone-footer wrap-js spit-html theme-toggle-js
-                                nav-bar html-head wrap-template source-feeds
+                                nav-bar head-hiccup wrap-template source-feeds
                                 parse-org-table]])
 
 (load-datalevin-pod!)
@@ -520,11 +520,11 @@
         has-ical?    (.exists (io/file out-dir "events" "announcements.ics"))
         feeds        (source-feeds (str (io/file out-dir "reports")) source-name base-url)
         data-section (render-data-section out-dir)
-        vega-scripts (str "<script src=\"https://cdn.jsdelivr.net/npm/vega@5/build/vega.min.js\"></script>\n"
-                          "<script src=\"https://cdn.jsdelivr.net/npm/vega-lite@5/build/vega-lite.min.js\"></script>\n"
-                          "<script src=\"https://cdn.jsdelivr.net/npm/vega-embed@6/build/vega-embed.min.js\"></script>\n"
-                          "<script>\n" (wrap-js theme-toggle-js) "\n</script>\n"
-                          "<script>\n" (wrap-js stats-js) "\n</script>\n")
+        scripts      (list [:script {:src "https://cdn.jsdelivr.net/npm/vega@5/build/vega.min.js"}]
+                           [:script {:src "https://cdn.jsdelivr.net/npm/vega-lite@5/build/vega-lite.min.js"}]
+                           [:script {:src "https://cdn.jsdelivr.net/npm/vega-embed@6/build/vega-embed.min.js"}]
+                           [:script (h/raw (wrap-js theme-toggle-js))]
+                           [:script (h/raw (wrap-js stats-js))])
         ;; Injected only when JS runs (wrap-template).  JS-less browsers skip
         ;; <script> bodies, so the page reduces to <noscript><h1></h1></noscript>
         ;; + the Available-data table.
@@ -532,31 +532,26 @@
                                            {:source source-name
                                             :source-href website}))
                           "\n<p class=\"meta\" id=\"generated-at\"></p>\n")
-        tpl-stats    (str "<section class=\"stats-section\">\n"
-                          "<h3>Statistics</h3>\n"
-                          "<div id=\"kpi-area\" class=\"kpis\"></div>\n"
-                          "<div id=\"chart-grid\" class=\"grid\"></div>\n"
-                          "</section>\n")
+        tpl-stats    (str (h/html [:section.stats-section
+                                   [:h3 "Statistics"]
+                                   [:div#kpi-area.kpis]
+                                   [:div#chart-grid.grid]]))
         tpl-footer   (str (h/html (bone-footer {:ical has-ical?
                                                 :website website
                                                 :source source-name})))]
     (str
      "<!DOCTYPE html>\n"
-     "<html lang=\"en\" data-theme=\"light\">\n"
-     (html-head {:title      title
-                 :css        stats-css
-                 :feeds      feeds
-                 :extra-head vega-scripts})
-     "<body>\n"
-     "<noscript><h1>" title "</h1></noscript>\n"
-     "<main class=\"container\">\n"
-     (wrap-template "tpl-nav" tpl-nav)
-     ;; Available data: always visible -- the only content rendered for JS-less browsers.
-     (when data-section (str data-section "\n"))
-     (wrap-template "tpl-stats" tpl-stats)
-     "</main>\n"
-     (wrap-template "tpl-footer" tpl-footer)
-     "</body>\n</html>\n")))
+     (h/html
+      [:html {:lang "en" :data-theme "light"}
+       (head-hiccup {:title title :css stats-css :feeds feeds :extra scripts})
+       [:body
+        [:noscript [:h1 title]]
+        [:main.container
+         (h/raw (wrap-template "tpl-nav" tpl-nav))
+         ;; Available data: always visible -- the only content rendered for JS-less browsers.
+         (when data-section (h/raw data-section))
+         (h/raw (wrap-template "tpl-stats" tpl-stats))]
+        (h/raw (wrap-template "tpl-footer" tpl-footer))]]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Main
