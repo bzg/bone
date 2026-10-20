@@ -432,7 +432,7 @@
                                                     (str (io/file effective-dir "reports"))
                                                     source-name (:base-url source-cfg))}))
                     (finally
-                      (d/close conn)))]
+                      (try (d/close conn) (catch Exception _ nil))))]
   (io/make-parents out-file)
   (spit-html out-file html)
   ;; Routine progress on stdout (captured in the export log), not stderr:

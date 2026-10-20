@@ -227,4 +227,4 @@
                   (log/info "Dry run -- no changes made. Pass --delete to remove.")
                   (log/info "Tip: use --verbose to list individual orphan message-ids."))))))
         (finally
-          (d/close conn))))))
+          (try (d/close conn) (catch Exception _ nil)))))))

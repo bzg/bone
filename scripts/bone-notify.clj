@@ -411,4 +411,4 @@
                    (catch Exception e
                      (log/error "Failed to persist last-notify-failures:"
                                 (.getMessage e)))))
-            (d/close conn)))))))
+            (try (d/close conn) (catch Exception _ nil))))))))
