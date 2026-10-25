@@ -196,7 +196,9 @@ To set a /deadline/ on a report, reply with:
 : Deadline: 2026-03-10.
 
 The value is an ISO date (=yyyy-MM-dd=) or a duration (=2d=, =3w=, =1m=, =1y=)
-resolved relative to today. A trailing punctuation mark is optional.
+resolved relative to the day the email was sent: =Deadline: 2d.= sent on
+June 1 sets the deadline to June 3. A trailing punctuation mark is
+optional.
 Deadlines appear in JSON exports, in Org output as a =DEADLINE:= line,
 and in notification emails.
 
@@ -211,9 +213,13 @@ To set an expiry, reply with one of:
 : Expiry: 2026-06-15.
 : Expiry: 30d.
 
-Like =Deadline:=, the value is an ISO date or a duration. The expiry
-appears in JSON exports under =:expiry=, in Org output as an =:EXPIRY:=
-property, and in the HTML index as a tooltip on the date column.
+Like =Deadline:=, the value is an ISO date or a duration resolved to a
+calendar day, and that day is included: the report is closed once it
+is over, in UTC (=Expiry: 1d.= sent on June 14 closes it at the end of
+June 15). The same holds for =:inactive-after :deadline= and for an
+ISO date in =:inactive-after=. The expiry appears in JSON exports
+under =:expiry=, in Org output as an =:EXPIRY:= property, and in the
+HTML index as a tooltip on the date column.
 
 To expire reports at their deadline, use =:inactive-after :deadline= in
 the source-level expiry rules (see [[#report-expiry][report expiry]]).
@@ -1141,8 +1147,8 @@ filters.
 | =:inactive-after= value | Trigger                                                                |
 |-----------------------+------------------------------------------------------------------------|
 | Duration (e.g. =30d=)   | Last email in the thread is older than the duration (any reply resets) |
-| ISO date              | The fixed date has passed, regardless of activity                      |
-| =:deadline=             | The report's deadline is in the past (no deadline => never expires)    |
+| ISO date              | The fixed date is over (in UTC), regardless of activity                |
+| =:deadline=             | The report's deadline day is over (no deadline => never expires)       |
 
 The =:max-status= value uses an activity score that only counts acked
 and owned (since expiry candidates are always open reports):

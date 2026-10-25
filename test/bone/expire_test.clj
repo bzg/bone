@@ -353,7 +353,7 @@
           source-map {"test-src" {}}
           eid (insert-email! conn {:mid "<explicit-yes@test>" :date-sent (days-ago 5)})
           rid (insert-report! conn {:mid "<explicit-yes@test>" :type :bug :email-eid eid})
-          _   (d/transact! conn [[:db/add rid :report/expiry-value (days-ago 1)]])]
+          _   (d/transact! conn [[:db/add rid :report/expiry-value (days-ago 2)]])]
       (expire/expire-reports! conn source-map)
       (is (report-closed? conn "<explicit-yes@test>"))
       (teardown! ctx)))
@@ -385,3 +385,39 @@
                           (d/pull (d/db conn) [:report/close-reason]
                                   (lookup/report-eid (d/db conn) "<closed@test>")))))
       (teardown! ctx))))
+
+(defn- utc-midnight
+  "UTC midnight, n days from today, as Deadline: and Expiry: are stored."
+  [n]
+  (Date/from (.toInstant (.atStartOfDay (.plusDays (java.time.LocalDate/now java.time.ZoneOffset/UTC) n)
+                                        java.time.ZoneOffset/UTC))))
+
+(deftest deadline-day-is-inclusive-test
+  (testing "a deadline or expiry passes once its day is over"
+    (doseq [[n closed?] [[0 false] [-1 true]]]
+      (let [{:keys [conn] :as ctx} (setup-db!)
+            source-map {"test-src" {:expiry {:bug {:inactive-after :deadline}}}}
+            e1 (insert-email! conn {:mid "<dl@test>" :date-sent (days-ago 10)})
+            r1 (insert-report! conn {:mid "<dl@test>" :type :bug :email-eid e1})
+            e2 (insert-email! conn {:mid "<ex@test>" :date-sent (days-ago 10)})
+            r2 (insert-report! conn {:mid "<ex@test>" :type :bug :email-eid e2})]
+        (d/transact! conn [[:db/add r1 :report/deadline-value (utc-midnight n)]
+                           [:db/add r2 :report/expiry-value (utc-midnight n)]])
+        (expire/expire-reports! conn source-map)
+        (is (= closed? (report-closed? conn "<dl@test>")) (str "Deadline: day " n))
+        (is (= closed? (report-closed? conn "<ex@test>")) (str "Expiry: day " n))
+        (teardown! ctx))))
+
+  (testing "an ISO date in an :inactive-after rule is inclusive too"
+    (let [today (java.time.LocalDate/now java.time.ZoneOffset/UTC)]
+      (doseq [[date closed?] [[(str today) false]
+                              [(str (.minusDays today 1)) true]]]
+        (let [{:keys [conn] :as ctx} (setup-db!)
+              mid (str "<rule-" date "@test>")
+              source-map {"test-src" {:expiry {:bug {:inactive-after date}}}}
+              eid (insert-email! conn {:mid mid :date-sent (days-ago 10)})
+              _   (insert-report! conn {:mid mid :type :bug :email-eid eid})]
+          (expire/expire-reports! conn source-map)
+          (is (= closed? (report-closed? conn mid))
+              (str ":inactive-after " date))
+          (teardown! ctx))))))

@@ -58,11 +58,18 @@
   (+ (if (:report/owned report) 2 0)
      (if (:report/acked report) 1 0)))
 
+(defn- day-over?
+  "True once the UTC day starting at `day` (stored at UTC midnight) is
+  over: the named day itself is still within the deadline."
+  [^Date day ^Date now]
+  (<= (+ (.getTime day) (* 24 60 60 1000)) (.getTime now)))
+
 (defn- rule-matches?
   "Check whether a report matches all expiry rule conditions.  A delay
   rule needs strictly more than `delay-days` whole days of inactivity
-  (\"0d\" = after one full day; the Expiry: command path expires at
-  the deadline itself)."
+  (\"0d\" = after one full day).  A calendar date -- the report's
+  deadline or the rule's fixed date -- is inclusive: it expires once
+  its day is over (see day-over?), like an explicit Expiry: date."
   [rule report-data now]
   (let [{:keys [delay-days expires-on-deadline expires-on-date max-status max-priority]} rule
         last-activity (:report/last-activity report-data)]
@@ -71,9 +78,9 @@
      (cond
        expires-on-deadline
        (when-let [deadline (:report/deadline-value report-data)]
-         (.before ^Date deadline now))
+         (day-over? deadline now))
        expires-on-date
-       (.before ^Date expires-on-date now)
+       (day-over? expires-on-date now)
        :else
        ;; .before guards against a forged future Date: header --
        ;; days-between is absolute, so "future" would look "old".
@@ -119,7 +126,7 @@
   [report-data source-map src rtype now]
   (let [explicit-expiry (:report/expiry-value report-data)]
     (if explicit-expiry
-      (.before ^Date explicit-expiry now)
+      (day-over? explicit-expiry now)
       (let [expiry-cfg (:expiry (get source-map src))
             rule-raw   (get expiry-cfg rtype)]
         (when-let [rule (parse-expiry-rule rule-raw)]
