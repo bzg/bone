@@ -29,6 +29,8 @@
               (.setTimeZone (TimeZone/getTimeZone "UTC")))]
     (.parse fmt s)))
 
+(def ^:private release-mid-ownership! (var-get #'digest/release-mid-ownership!))
+
 (def ^:private loose-line-patterns
   (:line-patterns (commands/build-source-commands {})))
 
@@ -3035,3 +3037,348 @@
             "No topics. clears the list")
         (finally
           (teardown! ctx))))))
+
+;; ---------------------------------------------------------------------------
+;; Regression tests: pending flag kept on failure, untagged v1 guard,
+;; release scoped to its source
+;; ---------------------------------------------------------------------------
+
+(deftest pending-flag-kept-when-commands-throw
+  (testing "A pending email whose Phase 3 throws stays pending for the
+            TTL flush, without failing the email that rescues it nor
+            the flush itself."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          orig   @#'digest/dispatch-commands!
+          poison (fn [conn email & more]
+                   (if (= "<pk-reply@test.org>" (:email/message-id email))
+                     (throw (ex-info "boom" {}))
+                     (apply orig conn email more)))]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<pk-reply@test.org>"
+                                       :subject "Re: [BUG] crash"
+                                       :from "admin@test.org"
+                                       :date #inst "2026-05-01T11:00:00"
+                                       :in-reply-to "<pk-bug@test.org>"
+                                       :body "Closed.\n"})
+                            "direct")
+        (is (true? (pending? (d/db conn) "<pk-reply@test.org>"))
+            "Setup: the reply is pending while its parent is absent")
+        (with-redefs [digest/dispatch-commands! poison]
+          ;; The parent arrives; the rescued reply blows up in Phase 3.
+          (store-and-process! conn
+                              (mk-email {:mid "<pk-bug@test.org>"
+                                         :subject "[BUG] crash"
+                                         :from "user@test.org"
+                                         :date #inst "2026-05-01T10:00:00"
+                                         :body "broken\n"})
+                              "direct")
+          ;; A flush while it still fails does not throw either.
+          (digest/flush-stale-pending! conn source-map sources 1))
+        (let [db (d/db conn)]
+          (is (some? (get-report db "<pk-bug@test.org>"))
+              "the parent is processed despite its failing reply")
+          (is (true? (pending? db "<pk-reply@test.org>"))
+              "the failed reply must stay pending")
+          (is (nil? (:report/closed (get-report db "<pk-bug@test.org>")))
+              "its command was not applied"))
+        ;; Once the failure is gone, the TTL flush applies the command.
+        (digest/flush-stale-pending! conn source-map sources 1)
+        (let [db (d/db conn)]
+          (is (false? (pending? db "<pk-reply@test.org>"))
+              "the flush clears the flag once processing succeeds")
+          (is (some? (:report/closed (get-report db "<pk-bug@test.org>")))
+              "the deferred command is applied by the flush"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest stale-untagged-v1-does-not-close-newer
+  (testing "A late copy of an untagged [PATCH] spares the live v3,
+            sent after it."
+    (let [{:keys [conn] :as ctx} (setup-db!)]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<uv-v1@test.org>"
+                                       :subject "[PATCH] gadget: fix the frobnicator"
+                                       :from "user@test.org"
+                                       :date #inst "2026-06-01T10:00:00"
+                                       :body "Initial patch.\n"})
+                            "direct")
+        (store-and-process! conn
+                            (assoc (mk-email {:mid "<uv-v3@test.org>"
+                                              :subject "Re: [PATCH v3] gadget: fix the frobnicator"
+                                              :from "user@test.org"
+                                              :date #inst "2026-06-03T10:00:00"
+                                              :in-reply-to "<uv-v1@test.org>"
+                                              :body "Third version.\n"})
+                                   :email/attachments [{:attachment/filename "0003-fix.patch"}])
+                            "direct")
+        (store-and-process! conn
+                            (assoc (mk-email {:mid "<uv-v1-copy@test.org>"
+                                              :subject "Re: [PATCH] gadget: fix the frobnicator"
+                                              :from "user@test.org"
+                                              :date #inst "2026-06-01T11:00:00"
+                                              :in-reply-to "<uv-v1@test.org>"
+                                              :body "Initial patch (copy).\n"})
+                                   :email/attachments [{:attachment/filename "0001-fix.patch"}])
+                            "direct")
+        (let [db (d/db conn)]
+          (is (some? (get-report db "<uv-v1-copy@test.org>"))
+              "the late v1 copy still creates its own report")
+          (is (nil? (:report/closed (get-report db "<uv-v3@test.org>")))
+              "the live v3 must NOT be closed by the untagged v1 copy"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest release-closes-only-its-own-source-changes
+  (testing "[REL x] closes the open [CHG x] of its own source only."
+    (let [{:keys [conn] :as ctx} (setup-db!)]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<rs-chg-direct@test.org>"
+                                       :subject "[CHG 7.7] Drop the old exporter"
+                                       :from "admin@test.org"
+                                       :date #inst "2026-06-01T10:00:00"
+                                       :body "Change.\n"})
+                            "direct")
+        (store-and-process! conn
+                            (mk-email {:mid "<rs-chg-other@test.org>"
+                                       :subject "[CHG 7.7] Rename the frobnicator"
+                                       :from "admin@test.org"
+                                       :date #inst "2026-06-01T11:00:00"
+                                       :body "Change.\n"})
+                            "no-triggers")
+        (store-and-process! conn
+                            (mk-email {:mid "<rs-rel@test.org>"
+                                       :subject "[REL 7.7] Version 7.7 released"
+                                       :from "admin@test.org"
+                                       :date #inst "2026-06-02T10:00:00"
+                                       :body "Released.\n"})
+                            "direct")
+        (let [db (d/db conn)]
+          (is (= :change (:report/type (get-report db "<rs-chg-other@test.org>")))
+              "Setup: the other source's change exists")
+          (is (some? (:report/closed (get-report db "<rs-chg-direct@test.org>")))
+              "the release closes the change of its own source")
+          (is (nil? (:report/closed (get-report db "<rs-chg-other@test.org>")))
+              "the release must NOT close another source's change"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest untagged-resend-closes-earlier-revision
+  (testing "An untagged [PATCH RESEND] sent after v2 replaces it: only a
+            candidate sent after the untagged patch is spared."
+    (let [{:keys [conn] :as ctx} (setup-db!)]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<rs-v1@test.org>"
+                                       :subject "[PATCH] gizmo: fix the frobnicator"
+                                       :from "user@test.org"
+                                       :date #inst "2026-06-01T10:00:00"
+                                       :body "Initial patch.\n"})
+                            "direct")
+        (store-and-process! conn
+                            (assoc (mk-email {:mid "<rs-v2@test.org>"
+                                              :subject "Re: [PATCH v2] gizmo: fix the frobnicator"
+                                              :from "user@test.org"
+                                              :date #inst "2026-06-02T10:00:00"
+                                              :in-reply-to "<rs-v1@test.org>"
+                                              :body "Second version.\n"})
+                                   :email/attachments [{:attachment/filename "0002-fix.patch"}])
+                            "direct")
+        (store-and-process! conn
+                            (assoc (mk-email {:mid "<rs-resend@test.org>"
+                                              :subject "Re: [PATCH RESEND] gizmo: fix the frobnicator"
+                                              :from "user@test.org"
+                                              :date #inst "2026-06-05T10:00:00"
+                                              :in-reply-to "<rs-v1@test.org>"
+                                              :body "Resend.\n"})
+                                   :email/attachments [{:attachment/filename "0002-fix.patch"}])
+                            "direct")
+        (let [db (d/db conn)]
+          (is (nil? (:report/closed (get-report db "<rs-resend@test.org>")))
+              "the resend stays open")
+          (is (= :superseded (:report/close-reason (get-report db "<rs-v2@test.org>")))
+              "the earlier v2 is superseded by the later untagged resend"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest flush-skips-pending-owned-by-another-thread
+  (testing "A flush that finds a pending email owned by another thread
+            leaves it a forced run, done on release."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          mid "<own-reply@test.org>"]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid mid
+                                       :subject "Re: [BUG] crash"
+                                       :from "user@test.org"
+                                       :date #inst "2026-05-01T11:00:00"
+                                       :in-reply-to "<own-bug@test.org>"
+                                       :body "Same here.\n"})
+                            "direct")
+        (is (true? (pending? (d/db conn) mid)) "Setup: the reply is pending")
+        (is (true? (digest/take-mid-ownership! mid)))
+        (try
+          (digest/flush-stale-pending! conn source-map sources 0)
+          (is (true? (pending? (d/db conn) mid))
+              "the flush must not process an email another thread owns")
+          (finally
+            (digest/run-requested-rescue! conn source-map sources mid
+                                          (lookup/email-eid (d/db conn) mid))))
+        (is (false? (pending? (d/db conn) mid))
+            "the owner runs the flush on release, still forced (no parent)")
+        (finally
+          (teardown! ctx))))))
+
+(deftest rescue-requested-while-owned-runs-on-release
+  (testing "A rescue that finds the pending email owned by another
+            thread is not lost: the owner runs it on release."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          mid "<rq-reply@test.org>"]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid mid
+                                       :subject "Re: [BUG] crash"
+                                       :from "admin@test.org"
+                                       :date #inst "2026-05-01T11:00:00"
+                                       :in-reply-to "<rq-bug@test.org>"
+                                       :body "Closed.\n"})
+                            "direct")
+        (is (true? (pending? (d/db conn) mid)) "Setup: the reply is pending")
+        ;; Another thread owns the reply when its parent arrives.
+        (is (true? (digest/take-mid-ownership! mid)))
+        (try
+          (store-and-process! conn
+                              (mk-email {:mid "<rq-bug@test.org>"
+                                         :subject "[BUG] crash"
+                                         :from "user@test.org"
+                                         :date #inst "2026-05-01T10:00:00"
+                                         :body "broken\n"})
+                              "direct")
+          (is (true? (pending? (d/db conn) mid))
+              "the rescue does not process an email another thread owns")
+          (finally
+            (digest/run-requested-rescue! conn source-map sources mid
+                                          (lookup/email-eid (d/db conn) mid))))
+        (let [db (d/db conn)]
+          (is (false? (pending? db mid))
+              "the owner runs the requested rescue on release")
+          (is (some? (:report/closed (get-report db "<rq-bug@test.org>")))
+              "the rescued reply's command is applied"))
+        (is (nil? (release-mid-ownership! mid))
+            "the request is consumed")
+        (finally
+          (teardown! ctx))))))
+
+(deftest ancestor-committed-during-pending-check-is-caught
+  (testing "An ancestor that lands between the anchor check and the
+            pending flag is caught by the re-check after indexing."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          orig  @#'digest/thread-anchorable?
+          calls (atom 0)]
+      (try
+        (store-and-process! conn
+                            (mk-email {:mid "<ac-bug@test.org>"
+                                       :subject "[BUG] crash"
+                                       :from "user@test.org"
+                                       :date #inst "2026-05-01T10:00:00"
+                                       :body "broken\n"})
+                            "direct")
+        ;; The first anchor check runs as if the parent were not
+        ;; committed yet; the following ones see the DB as it is.
+        (with-redefs [digest/thread-anchorable?
+                      (fn [db email]
+                        (and (> (swap! calls inc) 1)
+                             (orig db email)))]
+          (store-and-process! conn
+                              (mk-email {:mid "<ac-reply@test.org>"
+                                         :subject "Re: [BUG] crash"
+                                         :from "admin@test.org"
+                                         :date #inst "2026-05-01T11:00:00"
+                                         :in-reply-to "<ac-bug@test.org>"
+                                         :body "Closed.\n"})
+                              "direct"))
+        (let [db (d/db conn)]
+          (is (> @calls 1) "Setup: the anchor check ran again")
+          (is (false? (pending? db "<ac-reply@test.org>"))
+              "the reply does not stay pending")
+          (is (some? (:report/closed (get-report db "<ac-bug@test.org>")))
+              "its command is applied"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest undigested-ancestor-does-not-anchor
+  (testing "A parent stored but not yet digested (another thread is on
+            it) leaves the reply pending: its digest then rescues the
+            reply and applies the command."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          orig  @#'digest/thread-anchorable?
+          calls (atom 0)
+          bug   (assoc (mk-email {:mid "<ua-bug@test.org>"
+                                  :subject "[BUG] crash"
+                                  :from "user@test.org"
+                                  :date #inst "2026-05-01T10:00:00"
+                                  :body "broken\n"})
+                       :email/source "direct")]
+      (try
+        ;; The parent is stored between the reply's two anchor checks.
+        (with-redefs [digest/thread-anchorable?
+                      (fn [db email]
+                        (when (= 1 (swap! calls inc))
+                          (d/transact! conn [bug]))
+                        (orig db email))]
+          (store-and-process! conn
+                              (mk-email {:mid "<ua-reply@test.org>"
+                                         :subject "Re: [BUG] crash"
+                                         :from "admin@test.org"
+                                         :date #inst "2026-05-01T11:00:00"
+                                         :in-reply-to "<ua-bug@test.org>"
+                                         :body "Closed.\n"})
+                              "direct"))
+        (is (true? (pending? (d/db conn) "<ua-reply@test.org>"))
+            "the reply waits for its parent's digest")
+        ;; The other thread now digests the parent.
+        (let [db (d/db conn)]
+          (digest/process-email! conn source-map sources
+                                 (d/pull db digest/email-pull-pattern
+                                         (lookup/email-eid db "<ua-bug@test.org>"))))
+        (let [db (d/db conn)]
+          (is (false? (pending? db "<ua-reply@test.org>"))
+              "the parent's digest rescues the reply")
+          (is (some? (:report/closed (get-report db "<ua-bug@test.org>")))
+              "the reply's command is applied"))
+        (finally
+          (teardown! ctx))))))
+
+;; ---------------------------------------------------------------------------
+;; Mid lock -- prevents concurrent digest of the same email when two
+;; mailboxes subscribe to the same source in watch mode.
+;; ---------------------------------------------------------------------------
+
+(deftest mid-ownership-first-caller-wins
+  ;; Use a unique mid to avoid colliding with other tests via the
+  ;; shared atom.
+  (let [mid "<lock-test-1@example.org>"]
+    (try
+      (testing "first take-mid-ownership! claims the mid"
+        (is (true? (digest/take-mid-ownership! mid))))
+      (testing "second take-mid-ownership! observes the claim and returns false"
+        (is (false? (digest/take-mid-ownership! mid))))
+      (testing "after release another caller can take it again"
+        (release-mid-ownership! mid)
+        (is (true? (digest/take-mid-ownership! mid))))
+      (finally
+        (release-mid-ownership! mid)))))
+
+(deftest mid-ownership-independent-mids-do-not-block
+  (let [m1 "<lock-test-2a@example.org>"
+        m2 "<lock-test-2b@example.org>"]
+    (try
+      (is (true? (digest/take-mid-ownership! m1)))
+      (is (true? (digest/take-mid-ownership! m2)))
+      (is (false? (digest/take-mid-ownership! m1)))
+      (is (false? (digest/take-mid-ownership! m2)))
+      (finally
+        (release-mid-ownership! m1)
+        (release-mid-ownership! m2)))))

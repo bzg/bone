@@ -1,5 +1,9 @@
 (ns bone.main-test
   (:require [clojure.test :refer [deftest is testing]]
+            [bone.common :as common]
+            [bone.digest :as digest]
+            [bone.test-helpers :as th]
+            [datalevin.core :as d]
             [bone.main :as main])
   (:import [java.util Date]))
 
@@ -9,6 +13,7 @@
 (def load-context (var-get #'main/load-context))
 (def parse-main-args (var-get #'main/parse-main-args))
 (def max-contiguous-safe-uid (var-get #'main/max-contiguous-safe-uid))
+(def connection-loss? (var-get #'main/connection-loss?))
 
 (deftest parse-fetch-limit
   (testing "{:limit N} with positive integer"
@@ -257,34 +262,33 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Config file not found"
                           (load-context nil missing-path)))))
 
-;; ---------------------------------------------------------------------------
-;; Mid lock -- prevents concurrent digest of the same email when two
-;; mailboxes subscribe to the same source in watch mode.
-;; ---------------------------------------------------------------------------
 
-(deftest mid-ownership-first-caller-wins
-  ;; Use a unique mid to avoid colliding with other tests via the
-  ;; shared atom.
-  (let [mid "<lock-test-1@example.org>"]
-    (try
-      (testing "first take-mid-ownership! claims the mid"
-        (is (true? (main/take-mid-ownership! mid))))
-      (testing "second take-mid-ownership! observes the claim and returns false"
-        (is (false? (main/take-mid-ownership! mid))))
-      (testing "after release another caller can take it again"
-        (main/release-mid-ownership! mid)
-        (is (true? (main/take-mid-ownership! mid))))
-      (finally
-        (main/release-mid-ownership! mid)))))
+(deftest connection-loss-detection
+  (testing "dropped connections, wrapped or not"
+    (is (true? (connection-loss? (java.net.SocketException. "reset"))))
+    (is (true? (connection-loss?
+                (jakarta.mail.MessagingException.
+                 "read failed" (java.net.SocketTimeoutException. "timeout")))))
+    (is (true? (connection-loss? (jakarta.mail.FolderClosedException. nil)))))
+  (testing "a failure on a message is not a connection loss"
+    (is (false? (connection-loss? (jakarta.mail.MessagingException. "bad MIME"))))
+    (is (false? (connection-loss? (ex-info "boom" {}))))))
 
-(deftest mid-ownership-independent-mids-do-not-block
-  (let [m1 "<lock-test-2a@example.org>"
-        m2 "<lock-test-2b@example.org>"]
-    (try
-      (is (true? (main/take-mid-ownership! m1)))
-      (is (true? (main/take-mid-ownership! m2)))
-      (is (false? (main/take-mid-ownership! m1)))
-      (is (false? (main/take-mid-ownership! m2)))
-      (finally
-        (main/release-mid-ownership! m1)
-        (main/release-mid-ownership! m2)))))
+(deftest try-digest-skips-an-email-already-digested
+  (testing "A thread that loses a concurrent store (upsert) but gets the
+            mid after the winner released it does not digest again."
+    (let [db-path (str "/tmp/bone-test-" (System/currentTimeMillis))
+          conn    (d/get-conn db-path common/bone-schema)
+          calls   (atom 0)]
+      (try
+        (let [{:keys [tempids]} (d/transact! conn [{:db/id -1
+                                                    :email/message-id "<td@test.org>"
+                                                    :email/digested-at (Date.)}])
+              eid (get tempids -1)]
+          (with-redefs [digest/process-email! (fn [& _] (swap! calls inc))]
+            (is (= :ok ((var-get #'main/try-digest!)
+                        {:db-conn conn :source-map {} :sources []}
+                        {:db/id eid} "<td@test.org>" nil)))
+            (is (zero? @calls) "process-email! must not run again")))
+        (finally
+          (th/teardown! {:conn conn :db-path db-path}))))))

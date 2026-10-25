@@ -25,6 +25,11 @@
       (is (= [1] (series/series-restart-plan 1 [s1] #{"<b>"}))))
     (testing "threading back to the old cover letter is enough"
       (is (= [1] (series/series-restart-plan 0 [s1] #{"<c0>"}))))
+    (testing "a zero-padded 01/N (git format-patch, ten patches or more)
+              counts as a first patch"
+      (let [padded {:eid 3 :seqs #{"01/12" "02/12"} :mids #{"<p>"}
+                    :cover-mid "<c3>" :empty? false}]
+        (is (= [3] (series/series-restart-plan 1 [padded] #{"<p>"})))))
     (testing "a 2/N alone never restarts"
       (is (nil? (series/series-restart-plan 2 [s1] #{"<a>"}))))
     (testing "no thread link to the old series, no restart"

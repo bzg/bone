@@ -40,3 +40,9 @@
       (is (= "https://p.example.org" (get-in sm ["s" :website])))
       (is (= "https://p.example.org/contribute" (get-in sm ["s" :contribute-url])))
       (is (= "bugs@example.org" (get-in sm ["s" :post-address]))))))
+
+(deftest db-path-expands-home
+  (testing "a leading ~/ in :db :path is expanded, so the daemon and
+            the bb scripts open the same DB"
+    (is (= (str (System/getProperty "user.home") "/bone/db")
+           (config/db-path {:db {:path "~/bone/db"}})))))

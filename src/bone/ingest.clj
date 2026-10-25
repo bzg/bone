@@ -23,16 +23,6 @@
 
 (defn close [conn] (d/close conn))
 
-(defn- id-collision?
-  "True iff (:email/source, :email/id) is already stored.  Mailseq
-  ids (IMAP UID, Maildir filename) are per-folder, so dedup is
-  source-scoped."
-  [conn source-name id]
-  (when (and source-name id)
-    (some? (d/q '[:find ?e . :in $ ?src ?id
-                  :where [?e :email/source ?src] [?e :email/id ?id]]
-                (d/db conn) source-name id))))
-
 ;; Watermarks are scoped per-mailbox: each `:mailboxes` entry's
 ;; `:name` keys its own `:watermark/id` entity, so IMAP UID / Maildir
 ;; baseline state never mix between mailboxes.
@@ -303,9 +293,12 @@
 
 (defn store-email!
   "Store a parsed email.  Skips nil/oversized/duplicate Message-IDs.
-  Returns true if stored.
-  Opts: :source (stamps the email + scopes (source,id) dedup; required
-  for live ingestion), :max-attachment-size (override 1 MB default)."
+  Returns true if stored.  Dedup is by Message-ID only: a mailseq id
+  is no identity (an IMAP UID is unique per folder and UIDVALIDITY
+  only, and several mailboxes may feed one source), so an email whose
+  id is already stored with another Message-ID is a new email.
+  Opts: :source (stamps the email; required for live ingestion),
+  :max-attachment-size (override 1 MB default)."
   [conn msg opts]
   (let [message-id (or (:message-id opts)
                        (common/extract-bracketed-id (:message-id msg)))
@@ -321,11 +314,6 @@
 
       (some? (lookup/email-eid (d/db conn) message-id))
       (do (log/debug "Skipping already stored Message-ID:" message-id) false)
-
-      (id-collision? conn src-name id)
-      (do (log/warn "Skipping id collision:" id "on source" src-name
-                    "-- different Message-ID but (source,id) already stored")
-          false)
 
       :else
       (let [txdata (cond-> (email->txdata msg (assoc opts :message-id message-id))

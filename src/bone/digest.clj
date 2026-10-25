@@ -269,13 +269,17 @@
 ;; Auto-close logic
 ;; ---------------------------------------------------------------------------
 
-(defn- close-changes-for-release! [conn version release-email release-report-eid]
-  (let [open-chgs (d/q '[:find [?r ...] :in $ ?ver
+(defn- close-changes-for-release!
+  "Close the open [CHG <version>] reports of the release's own source:
+  a release on one source must not close another source's changes."
+  [conn source-name version release-email release-report-eid]
+  (let [release-email-eid (:db/id release-email)
+        open-chgs (d/q '[:find [?r ...] :in $ ?ver ?src
                          :where
                          [?r :report/type :change] [?r :report/version ?ver]
-                         (not [?r :report/closed _])]
-                       (d/db conn) version)
-        release-email-eid (:db/id release-email)]
+                         (not [?r :report/closed _])
+                         [?r :report/email ?e] [?e :email/source ?src]]
+                       (d/db conn) version source-name)]
     (when (seq open-chgs)
       (let [close-tx (mapv (fn [r] {:db/id r
                                     :report/closed release-email-eid
@@ -293,6 +297,21 @@
 
 (defn- parse-version-number [v]
   (when v (when-let [[_ n] (re-find #"^v(\d+)$" v)] (parse-long n))))
+
+(defn- later-revision?
+  "True when candidate report `r` is a later revision than the new
+  patch (`new-version`, sent at `new-date`), which must then spare it.
+  A tagged new patch compares revision numbers.  An untagged one is a
+  late v1 copy or a plain resend, so the dates tell: a candidate sent
+  after it is spared, one sent before it is closed.  Unparsable
+  versions or missing dates spare nothing."
+  [new-version new-date r]
+  (let [cand-n    (parse-version-number (:report/version r))
+        cand-date (get-in r [:report/email :email/date-sent])]
+    (if (nil? new-version)
+      (and new-date cand-date (.after ^Date cand-date ^Date new-date))
+      (let [new-n (parse-version-number new-version)]
+        (and new-n cand-n (> cand-n new-n))))))
 
 (defn- open-patch-eids-by-sender
   "Open :patch reports from `from-addr`, excluding `report-eid`.
@@ -458,22 +477,21 @@
   (Re:/[TAG] stripped).  Matching uses the full normalized subject, not
   the colon topic, which every sibling of a numbered series shares;
   when the subject normalizes to nothing, patch identifiers stand in.
-  Version guard: when both sides carry a parsable \"vN\", a candidate
-  newer than the new patch is spared (a re-ingested old v2 must not
-  close the live v3)."
+  Version guard: a candidate that is a later revision than the new
+  patch is spared (a re-ingested old v1 or v2 must not close the live
+  v3); see later-revision?."
   [conn report-eid report-info email candidate-eids]
   (let [new-subj    (normalize-subject (:email/subject email))
         new-version (:version report-info)
-        new-n       (parse-version-number new-version)
+        new-date    (:email/date-sent email)
         db          (d/db conn)
         new-idents  (patch-idents
                      (d/pull db [{:report/patches patch-pull}] report-eid))
         match?      (fn [r]
-                      (let [r-idents (patch-idents r)
-                            cand-n   (parse-version-number (:report/version r))]
+                      (let [r-idents (patch-idents r)]
                         (and
                          ;; Version-order guard (see docstring).
-                         (or (nil? new-n) (nil? cand-n) (<= cand-n new-n))
+                         (not (later-revision? new-version new-date r))
                          (if new-subj
                            (and (= new-subj
                                    (normalize-subject
@@ -487,7 +505,7 @@
             :when (not= rid report-eid)]
       (let [r (d/pull db [:report/type :report/version :report/closed
                           :report/message-id
-                          {:report/email [:email/subject]}
+                          {:report/email [:email/subject :email/date-sent]}
                           {:report/patches patch-pull}] rid)]
         (when (and (= :patch (:report/type r))
                    (not (:report/closed r))
@@ -842,12 +860,12 @@
 
 (defn- run-post-creation-hooks!
   "Execute post-creation side effects driven by the plan."
-  [conn report-eid eid email from-addr report-info
+  [conn report-eid eid email from-addr source-name report-info
    parent-eids nearest-eids patches plan]
   (when (:link-related plan)
     (link-rel! conn report-eid (:type report-info) email parent-eids))
   (when (:close-changes plan)
-    (close-changes-for-release! conn (:version report-info) email report-eid))
+    (close-changes-for-release! conn source-name (:version report-info) email report-eid))
   (when (:close-superseded-thread plan)
     (let [cand-eids (supersede-candidate-eids (d/db conn) report-eid email nearest-eids)]
       (close-superseded-thread-patches! conn report-eid report-info email cand-eids)))
@@ -875,15 +893,18 @@
 
 (defn- thread-anchorable?
   "True when the email can be threaded now: no ancestor mid at all (a
-  thread root), or at least one ancestor mid already in the DB.  Keyed
-  on `ancestor-mids` (References included), not In-Reply-To alone: any
+  thread root), or at least one ancestor already digested.  Keyed on
+  `ancestor-mids` (References included), not In-Reply-To alone: any
   known ancestor anchors the thread (public-inbox style), and a client
   setting References without In-Reply-To waits for an ancestor instead
-  of being misfiled as a root."
+  of being misfiled as a root.  An undigested ancestor does not count
+  (its report may not exist yet): its digest will rescue the email."
   [db email]
   (let [ancestors (ancestor-mids email)]
     (or (empty? ancestors)
-        (boolean (some #(lookup/email-eid db %) ancestors)))))
+        (boolean (some #(when-let [e (lookup/email-eid db %)]
+                          (:email/digested-at (d/pull db [:email/digested-at] e)))
+                       ancestors)))))
 
 ;; In-memory pending index: ancestor-mid-hash => #{pending eids}.  A
 ;; value join on the hash attr is forbidden (see bone.lookup) and
@@ -973,11 +994,16 @@
                                   source-map delivery nearest-eids nil))))
 
 (defn- mark-digested-and-rescue!
-  "Stamp :email/digested-at then rescue pending siblings in the same
-  thread.  The rescue runs AFTER the write so the recursive call sees
-  a consistent state."
-  [conn eid email source-map sources]
-  (d/transact! conn [{:db/id eid :email/digested-at (Date.)}])
+  "Stamp :email/digested-at and clear the pending flag in one
+  transaction, once Phases 3-4 have completed (an email whose commands
+  threw stays pending, so the flush retries it), then rescue pending
+  siblings in the same thread."
+  [conn eid email was-pending? source-map sources]
+  (d/transact! conn (cond-> [{:db/id eid :email/digested-at (Date.)}]
+                      was-pending? (conj [:db/retract eid :email/pending-thread? true])))
+  (when was-pending?
+    (pending-index-remove! conn eid (:email/ancestor-mid-hashes email))
+    (log/info "Cleared pending flag on" (:email/message-id email)))
   (retry-pending-in-shared-thread! conn email source-map sources))
 
 (defn process-email!
@@ -990,7 +1016,7 @@
     :force-thread?   -- bypass the pending-thread guard (TTL flush)
     :resolved-source -- pre-classified {:src-name :delivery}, skips re-resolving."
   ([conn source-map sources email] (process-email! conn source-map sources email {}))
-  ([conn source-map sources email {:keys [force-thread? resolved-source]}]
+  ([conn source-map sources email {:keys [force-thread? resolved-source] :as opts}]
   (let [message-id   (:email/message-id email)
         eid          (:db/id email)
         from-addr    (:email/author-address email)
@@ -1021,14 +1047,10 @@
           (if (or force-thread? (thread-anchorable? db email))
             ;; --- Normal path: threading, commands, post-creation hooks ---
             (do
-              (when was-pending?
-                (d/transact! conn [[:db/retract eid :email/pending-thread? true]])
-                (pending-index-remove! conn eid (:email/ancestor-mid-hashes email))
-                (log/info "Cleared pending flag on" message-id))
               (let [{parent-eids :all nearest-eids :nearest} (thread-lookup email db)
                     ;; Recover the report-eid of an interrupted pass
-                    ;; (pending retry, or crash between the pending retract
-                    ;; above and Phase 4) so the Phase 4 hooks still run.
+                    ;; (pending retry, or crash during Phases 3-4 of a
+                    ;; pending email) so the Phase 4 hooks still run.
                     ;; Safe: process-email! only runs on emails whose
                     ;; Phase 4 has not completed.
                     report-eid   (or report-eid
@@ -1054,18 +1076,93 @@
                 (when report-eid
                   (let [patches (detect/build-patch-entities email)
                         plan    (post-creation-plan report-info parent-eids patches)]
-                    (run-post-creation-hooks! conn report-eid eid email from-addr report-info
+                    (run-post-creation-hooks! conn report-eid eid email from-addr source-name report-info
                                               parent-eids nearest-eids patches plan)))
 
-                (mark-digested-and-rescue! conn eid email source-map sources)))
+                (mark-digested-and-rescue! conn eid email was-pending? source-map sources)))
 
             ;; --- Pending path: defer threading and commands ---
             (do (d/transact! conn [{:db/id eid
                                     :email/pending-thread? true
                                     :email/digested-at (Date.)}])
                 (pending-index-add! conn eid (:email/ancestor-mid-hashes email))
-                (log/info "Pending:" message-id "-- no ancestor mid in DB"
-                          "(in-reply-to" (:email/in-reply-to email) ")")))))))))
+                (log/info "Pending:" message-id "-- no digested ancestor in DB"
+                          "(in-reply-to" (:email/in-reply-to email) ")")
+                ;; An ancestor digested after the anchor check above
+                ;; may have run its rescue before this email entered
+                ;; the pending index, and missed it: check again now
+                ;; that it is indexed.
+                (when (thread-anchorable? (d/db conn) email)
+                  (log/info "Ancestor arrived meanwhile, re-processing" message-id)
+                  (process-email! conn source-map sources
+                                  (d/pull (d/db conn) email-pull-pattern eid)
+                                  opts))))))))))
+
+;; Message-ids being digested, so that two watch threads never digest
+;; one email at once (:owned).  A pending email found owned is not
+;; skipped but requested (:requested, mid => opts): its owner may have
+;; read the DB before the ancestor that rescues it, so it re-runs the
+;; email on release.
+(defonce ^:private digesting-mids (atom {:owned #{} :requested {}}))
+
+(defn- claim-or-request!
+  "Claim `mid` and return true, or, when another thread owns it, leave
+  that thread a request to re-run it with `opts` and return false.
+  :force-thread? survives a later plain request."
+  [mid opts]
+  (let [[old _] (swap-vals! digesting-mids
+                            (fn [{:keys [owned] :as m}]
+                              (if (contains? owned mid)
+                                (update-in m [:requested mid]
+                                           #(merge-with (fn [a b] (or a b)) % opts))
+                                (update m :owned conj mid))))]
+    (not (contains? (:owned old) mid))))
+
+(defn take-mid-ownership!
+  "Claim `mid` for a digest; false if another thread owns it.  Release
+  with `run-requested-rescue!`."
+  [mid]
+  (claim-or-request! mid nil))
+
+(defn- release-mid-ownership!
+  "Release `mid`; return the opts of a run requested meanwhile, or nil."
+  [mid]
+  (let [[old _] (swap-vals! digesting-mids
+                            #(-> % (update :owned disj mid)
+                                 (update :requested dissoc mid)))]
+    (get-in old [:requested mid])))
+
+(defn- try-pending!
+  "Run process-email! on pending email `eid` unless another thread owns
+  it (then request the run from it) or its flag was cleared meanwhile.
+  A failure is logged and leaves the email pending for the flush: an
+  email that keeps failing must not fail its rescuers nor the flush."
+  [conn source-map sources eid label opts]
+  (let [mid (:email/message-id (d/pull (d/db conn) [:email/message-id] eid))]
+    (when (and mid (claim-or-request! mid opts))
+      (let [requested (volatile! nil)]
+        (try
+          (let [email (d/pull (d/db conn) email-pull-pattern eid)]
+            (when (:email/pending-thread? email)
+              (log/info label mid)
+              (process-email! conn source-map sources email opts)))
+          (catch Exception e
+            (log/error e "Pending email" mid
+                       "failed, left pending for the next flush:" (.getMessage e)))
+          ;; In `finally`: an Error must not leave the mid owned.
+          (finally
+            (vreset! requested (release-mid-ownership! mid))))
+        (when-let [opts @requested]
+          (recur conn source-map sources eid
+                 "Re-running pending email (requested meanwhile):" opts))))))
+
+(defn run-requested-rescue!
+  "Release `mid` (email `eid`), claimed by take-mid-ownership!, and run
+  the pass another thread requested meanwhile, if any."
+  [conn source-map sources mid eid]
+  (when-let [opts (release-mid-ownership! mid)]
+    (try-pending! conn source-map sources eid
+                  "Re-running pending email (requested meanwhile):" opts)))
 
 (defn- retry-pending-in-shared-thread!
   "Retry pending emails that share an ancestor mid with `email` (or
@@ -1078,16 +1175,13 @@
     (when (seq hashes)
       (let [index    (pending-index-map! conn)
             pendings (into #{} (mapcat #(get index %)) hashes)]
-        (doseq [pending-eid pendings
-                :let [pending-email (d/pull (d/db conn) email-pull-pattern
-                                            pending-eid)]
-                ;; A recursive rescue triggered by an earlier iteration may
-                ;; have already processed this email and cleared its flag --
-                ;; and the index only re-checks staleness here, on pull.
-                :when (:email/pending-thread? pending-email)]
-          (log/info "Retrying pending email" (:email/message-id pending-email)
-                    "(triggered by" own-mid ")")
-          (process-email! conn source-map sources pending-email))))))
+        ;; A recursive rescue triggered by an earlier iteration may have
+        ;; already processed an email and cleared its flag -- and the
+        ;; index only goes stale that way: try-pending! re-checks it.
+        (doseq [pending-eid pendings]
+          (try-pending! conn source-map sources pending-eid
+                        (str "Retrying pending email (triggered by " own-mid "):")
+                        {}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; TTL flush -- force-process pending emails older than max-age-days
@@ -1110,11 +1204,8 @@
                 "stale pending email(s) older than" max-age-days "day(s)"))
     ;; Keep the pending flag set: process-email! retracts it itself, which
     ;; leaves the email retriable at the next flush if processing throws.
-    (doseq [eid pendings
-            :let [email (d/pull (d/db conn) email-pull-pattern eid)]
-            ;; A rescue triggered by an earlier iteration may have already
-            ;; processed this email and cleared its flag.
-            :when (:email/pending-thread? email)]
-      (log/info "TTL-flush" (:email/message-id email))
-      (process-email! conn source-map sources email {:force-thread? true}))
+    ;; A rescue triggered by an earlier iteration may have already
+    ;; processed an email and cleared its flag: try-pending! skips it.
+    (doseq [eid pendings]
+      (try-pending! conn source-map sources eid "TTL-flush" {:force-thread? true}))
     (count pendings)))

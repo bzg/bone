@@ -214,7 +214,7 @@
    :date-sent    #inst "2026-05-01"
    :body         {:text "Body."}})
 
-(deftest store-email!-composite-source-id-dedup
+(deftest store-email!-dedup-by-message-id
   (testing "same id on different sources is NOT a collision"
     (let [{:keys [conn] :as setup} (fresh-conn)]
       (try
@@ -229,15 +229,16 @@
           (is (= 2 cnt) "both emails stored"))
         (finally (cleanup! setup)))))
 
-  (testing "same id on the same source IS a collision (different Message-ID)"
+  (testing "same id on the same source with another Message-ID is a new email
+            (UID reused by a second mailbox or after a UIDVALIDITY reset)"
     (let [{:keys [conn] :as setup} (fresh-conn)]
       (try
         (is (true? (ingest/store-email! conn
                                         (minimal-msg {:id "42" :mid "<m1@x>"})
                                         {:source "src-a"})))
-        (is (false? (ingest/store-email! conn
-                                         (minimal-msg {:id "42" :mid "<m3@x>"})
-                                         {:source "src-a"})))
+        (is (true? (ingest/store-email! conn
+                                        (minimal-msg {:id "42" :mid "<m3@x>"})
+                                        {:source "src-a"})))
         (finally (cleanup! setup)))))
 
   (testing "same Message-ID on different sources is dropped as a dup (mid is globally unique)"

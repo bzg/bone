@@ -159,7 +159,9 @@
   (let [restart? (or (zero? n)
                      (and (= 1 n)
                           (some (fn [s]
-                                  (some #(str/starts-with? % "1/") (:seqs s)))
+                                  ;; Numeric compare: git format-patch pads
+                                  ;; to "01/12" from ten patches on.
+                                  (some #(= 1 (first (parse-seq %))) (:seqs s)))
                                 existing)))
         old-mids (into (set (mapcat :mids existing))
                        (keep :cover-mid)

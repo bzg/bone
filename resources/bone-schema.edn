@@ -6,10 +6,9 @@
 
 {;; --- Email (defined by bone-ingest) ---
  ;; Mailseq id (IMAP UID per folder, Maildir filename per folder).
- ;; Not globally unique -- two sources may collide on UID space or
- ;; Maildir filename across folders.  Dedup is enforced at store time
- ;; as the composite (:email/source, :email/id) pair, not at the
- ;; schema level.
+ ;; Not unique, not even per source: UIDs repeat across folders and
+ ;; after a UIDVALIDITY reset.  Store-time dedup is by Message-ID
+ ;; only; the id serves the Maildir catch-up diff.
  :email/id                    {:db/valueType :db.type/string}
  :email/source                {:db/valueType :db.type/string}
  ;; Raw Message-Id, kept verbatim for display/export.  NOT unique:

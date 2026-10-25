@@ -105,11 +105,13 @@
 
 (defn db-path
   "Resolve the Datalevin DB path: prefer :db {:path ...} from the
-  config, fall back to BONE_DB env var, then default \"data/bone-db\"."
+  config, fall back to BONE_DB env var, then default \"data/bone-db\".
+  A leading ~/ is expanded."
   [config]
-  (or (get-in config [:db :path])
-      (System/getenv "BONE_DB")
-      "data/bone-db"))
+  (common/expand-home
+   (or (get-in config [:db :path])
+       (System/getenv "BONE_DB")
+       "data/bone-db")))
 
 (defn build-source-map
   "Build source-name -> config map from config."

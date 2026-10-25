@@ -20,7 +20,8 @@
             [mailseq :as mailseq]
             [clojure.string :as str]
             [postal.core :as postal]
-            [taoensso.timbre :as log])
+            [taoensso.timbre :as log]
+            [taoensso.timbre.tools.logging :as timbre-tl])
   (:import [java.time Instant]
            [java.time.temporal ChronoUnit]
            [java.util Date])
@@ -34,6 +35,10 @@
  {:min-level [["datalevin.*"          :warn]
               ["org.eclipse.angus.*"  :warn]
               ["*"                    :info]]})
+
+;; mailseq logs through clojure.tools.logging, which would otherwise
+;; pick slf4j's no-op logger (no binding on the classpath).
+(timbre-tl/use-timbre)
 
 ;; javax.mail's default connect/read/write timeouts are infinite: a
 ;; dropping SMTP server would wedge whichever thread logged (including
@@ -88,10 +93,12 @@
 
 (defn shutting-down? [] @shutdown?)
 
-;; Futures spawned by `watch-all!`.  Stored here so the shutdown hook
-;; can wait for them to finish before closing the database.  Nil in
-;; batch mode.
-(def ^:private watch-futures (atom nil))
+;; What the shutdown hook waits for before closing the database: the
+;; futures spawned by `watch-all!`, or in batch mode a promise that
+;; -main delivers once the pass is over.  Without the latter, a
+;; SIGTERM in batch mode would close the DB under an in-flight
+;; transact on the main thread.
+(def ^:private workers (atom nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Fetch parsing -- :fetch accepts exactly one of three disjoint map
@@ -201,44 +208,29 @@
 ;; Atomic store+process
 ;; ---------------------------------------------------------------------------
 
-;; Message-ids whose digest is in flight on some thread.  Two
-;; mailboxes watching the same list can race between store and
-;; :email/digested-at; a mid in this set is claimed, concurrent
-;; callers skip.
-(def ^:private digesting-mids (atom #{}))
-
-(defn take-mid-ownership!
-  "Atomically register `mid` as digested-by-us.  Returns true if the
-  caller now owns the digest and must release via
-  `release-mid-ownership!`; false if another thread already owns it."
-  [mid]
-  (let [[old _] (swap-vals! digesting-mids conj mid)]
-    (not (contains? old mid))))
-
-(defn release-mid-ownership!
-  "Release the mid claimed by `take-mid-ownership!`."
-  [mid]
-  (swap! digesting-mids disj mid))
-
 (defn- try-digest!
-  "Run process-email!; :ok on success, :retry on exception.
-  Concurrent callers for a mid owned by a sibling thread (see
-  `digesting-mids`) return :ok without re-running -- :ok means \"the
-  watermark may advance\", not \"I digested\".  `resolved-source`
-  skips re-classifying a freshly stored email."
+  "Run process-email!; :ok on success, :retry on exception.  An email
+  digested already or by a sibling thread right now is skipped with
+  :ok (\"the watermark may advance\", not \"I digested\").
+  `resolved-source` skips re-classifying a freshly stored email."
   [{:keys [db-conn source-map sources]} email mid resolved-source]
-  (if-not (take-mid-ownership! mid)
+  (if-not (digest/take-mid-ownership! mid)
     (do (log/debug "Digest already in flight for" mid "-- skipping")
         :ok)
     (try
-      (digest/process-email! db-conn source-map sources email
-                             {:resolved-source resolved-source})
+      ;; Concurrent store-email! of one Message-ID both return true
+      ;; (upsert): the loser may get the mid once the winner is done.
+      (if (:email/digested-at (d/pull (d/db db-conn) [:email/digested-at]
+                                      (:db/id email)))
+        (log/debug "Already digested, skipping:" mid)
+        (digest/process-email! db-conn source-map sources email
+                               {:resolved-source resolved-source}))
       :ok
       (catch Exception e
         (log/error e "Failed to digest email" mid (blog/exception-msg e))
         :retry)
       (finally
-        (release-mid-ownership! mid)))))
+        (digest/run-requested-rescue! db-conn source-map sources mid (:db/id email))))))
 
 (defn- guard-reject-reason
   "Pure pre-storage guard. nil = accept; else a reason keyword:
@@ -280,36 +272,15 @@
           (let [store-opts (cond-> {:source src-name :message-id mid}
                              max-attachment-size (assoc :max-attachment-size
                                                         max-attachment-size))]
-            (if (ingest/store-email! db-conn msg store-opts)
-              (let [eid (lookup/email-eid (d/db db-conn) mid)]
-                (try-digest! ctx
-                             (d/pull (d/db db-conn) digest/email-pull-pattern eid)
-                             mid resolved))
-              ;; store-email! returned false: either dup mid (re-digest the
-              ;; existing entity) or id collision (different mid stored under
-              ;; the same Maildir filename -- skip).  On re-digest, pass no
-              ;; :resolved-source so process-email! reads the stored
-              ;; :email/source (the entity may predate a config change).
-              (if-let [eid (lookup/email-eid (d/db db-conn) mid)]
-                (let [email (d/pull (d/db db-conn) digest/email-pull-pattern eid)]
-                  (cond
-                    (:email/digested-at email)
-                    (do (log/debug "Already digested, skipping:" mid) :ok)
-
-                    :else
-                    ;; Backfill :email/source in the pulled map too (it
-                    ;; predates the transact): process-email! reads it
-                    ;; when :resolved-source is nil.
-                    (do (log/info "Re-processing previously stored email:" mid)
-                        (when-not (:email/source email)
-                          (d/transact! db-conn [{:db/id eid :email/source src-name}]))
-                        (try-digest! ctx
-                                     (cond-> email
-                                       (not (:email/source email))
-                                       (assoc :email/source src-name))
-                                     mid nil))))
-                (do (log/warn "Skipping id collision (different Message-ID stored):" mid)
-                    :skip)))))))))
+            ;; store-email! returns false when the Message-ID is already
+            ;; stored: try-digest! then skips it if digested, else
+            ;; re-digests it from its stored :email/source (no
+            ;; :resolved-source: it may predate a config change).
+            (let [stored? (ingest/store-email! db-conn msg store-opts)
+                  eid     (lookup/email-eid (d/db db-conn) mid)]
+              (try-digest! ctx
+                           (d/pull (d/db db-conn) digest/email-pull-pattern eid)
+                           mid (when stored? resolved)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Catch-up fetch (store+process per email)
@@ -535,6 +506,16 @@
 
 (def ^:private max-backoff-ms (* 5 60 1000))
 
+(defn- connection-loss?
+  "True if `e` or one of its causes is a dropped connection, which the
+  watch loop recovers from: logged as a warning, not as a mailed error."
+  [e]
+  (boolean
+   (some #(or (instance? jakarta.mail.FolderClosedException %)
+              (instance? jakarta.mail.StoreClosedException %)
+              (instance? java.io.IOException %))
+         (take-while some? (iterate ex-cause e)))))
+
 (defn start-watch!
   "Start watching for new messages, storing+processing each as it arrives."
   [{:keys [db-conn mailbox-name] :as ctx} src folder]
@@ -566,7 +547,19 @@
                                           "-- error processing message id:" (:id msg)
                                           (blog/exception-msg e))))))))
                    {:parse-opts   {:attachments? true}
-                    :heartbeat-ms (* 20 60 1000)})))
+                    :heartbeat-ms (* 20 60 1000)
+                    ;; Called instead of the callback when a message
+                    ;; fails to parse: freeze the watermark so the next
+                    ;; reconnect's catch-up re-fetches it.
+                    :on-error     (fn [e]
+                                    (reset! watermark-frozen? true)
+                                    (if (connection-loss? e)
+                                      (log/warn "Mailbox" (pr-str mailbox-name)
+                                                "-- connection lost on" folder
+                                                (blog/exception-msg e))
+                                      (log/error e "Mailbox" (pr-str mailbox-name)
+                                                 "-- watch error on" folder
+                                                 (blog/exception-msg e))))})))
 
 ;; ---------------------------------------------------------------------------
 ;; Run context -- shared by batch and watch modes
@@ -720,7 +713,7 @@
 (defn- watch-all!
   "Watch every configured mailbox in parallel (one future each, plus
   the daily expire scheduler), publishing futures into
-  `watch-futures` for the shutdown hook.  The main thread blocks
+  `workers` for the shutdown hook.  The main thread blocks
   until every loop exits; uncaught throwables are logged so a dead
   thread cannot silently disappear."
   [mailboxes db-conn ingest-cfg cli-fetch-map config-path]
@@ -739,7 +732,7 @@
                        (catch Throwable t
                          (log/error t "Expire scheduler terminated:"
                                     (blog/exception-msg t)))))]
-    (reset! watch-futures (conj watch-futs sched-fut))
+    (reset! workers (conj watch-futs sched-fut))
     (run! deref watch-futs)
     ;; Reached when every watch loop has exited.  Under normal
     ;; operation that only happens during shutdown; otherwise every
@@ -779,23 +772,29 @@
 (defn- batch-run!
   "Single-pass mode (default): for each configured mailbox, connect,
   fetch new messages, then expire/flush once globally.  Continues
-  across mailbox failures; exits non-zero only if every mailbox
-  attempted actually failed.  A shutdown signalled mid-loop is
-  honoured silently (no spurious exit 1)."
+  across mailbox failures.  Returns false only if every mailbox
+  attempted actually failed (-main then exits 1), true otherwise.  A
+  shutdown signalled mid-loop is honoured silently (true).  It never
+  calls System/exit itself: -main must first release the shutdown
+  hook, which waits for the batch to be over."
   [mailboxes db-conn ingest-cfg cli-fetch-map config-path]
   (let [{:keys [source-map sources]} (load-context db-conn config-path)
         results (doall
                  (for [mb mailboxes
                        :while (not (shutting-down?))]
                    (batch-fetch-one! mb db-conn ingest-cfg cli-fetch-map source-map sources)))]
-    (when (and (not (shutting-down?))
-               (not-any? true? results))
-      (log/error (count results) "mailbox(es) failed -- aborting before expire/flush.")
-      (System/exit 1))
-    (when-not (shutting-down?)
-      (expire/expire-reports! db-conn source-map)
-      (digest/flush-stale-pending! db-conn source-map sources
-                                   pending-flush-max-age-days))))
+    (cond
+      (shutting-down?) true
+
+      (not-any? true? results)
+      (do (log/error (count results) "mailbox(es) failed -- aborting before expire/flush.")
+          false)
+
+      :else
+      (do (expire/expire-reports! db-conn source-map)
+          (digest/flush-stale-pending! db-conn source-map sources
+                                       pending-flush-max-age-days)
+          true))))
 
 (defn- parse-main-args
   "Parse CLI args into an options map.  Throws ex-info when a valued
@@ -927,7 +926,7 @@
       ;; before we close the DB underneath it.  The grace period is
       ;; shared across all futures (deadline-based) so a multi-
       ;; mailbox shutdown doesn't compound to N x grace.
-      (when-let [futs @watch-futures]
+      (when-let [futs @workers]
         (let [deadline (+ (System/currentTimeMillis) shutdown-grace-ms)]
           (doseq [f futs]
             (let [remaining (max 0 (- deadline (System/currentTimeMillis)))]
@@ -938,7 +937,7 @@
       (shutdown-agents)
       (log/info "Goodbye.")))))
 
-(defn -main [& args]
+(defn- run-main! [args]
   (let [{:keys [watch? fresh? cli-fetch config-path]}
         (try (parse-main-args args)
              (catch clojure.lang.ExceptionInfo e
@@ -952,7 +951,7 @@
     (let [mailboxes     (validate-mailboxes! config)
           ingest-cfg    (:ingest config)
           cli-fetch-map (some-> cli-fetch cli-fetch->map)
-          db-path       (common/expand-home (config/db-path config))]
+          db-path       (config/db-path config)]
       ;; Single-instance guard: taken before the --fresh wipe so a
       ;; running daemon cannot have its DB wiped out from under it.
       (if-let [lock (acquire-instance-lock! db-path)]
@@ -966,8 +965,23 @@
         (install-shutdown-hook! db-conn)
         (if watch?
           (watch-all! mailboxes db-conn ingest-cfg cli-fetch-map config-path)
-          (do (batch-run! mailboxes db-conn ingest-cfg cli-fetch-map config-path)
-              ;; Datalevin/LMDB keeps non-daemon threads alive: exit
-              ;; explicitly to avoid a hung JVM after batch mode.  The
-              ;; shutdown hook closes the DB.
-              (System/exit 0)))))))
+          (let [done (promise)]
+            ;; The shutdown hook waits on `done` before closing the DB.
+            (reset! workers [done])
+            ;; Datalevin/LMDB keeps non-daemon threads alive: exit
+            ;; explicitly to avoid a hung JVM after batch mode.  The
+            ;; shutdown hook closes the DB.
+            (System/exit
+             (if (try (batch-run! mailboxes db-conn ingest-cfg cli-fetch-map config-path)
+                      (finally (deliver done true)))
+               0 1))))))))
+
+(defn -main
+  "Run BONE, exiting with status 1 on any escaping throwable: else
+  Datalevin's non-daemon threads keep the JVM, and its lock, alive."
+  [& args]
+  (try
+    (run-main! args)
+    (catch Throwable t
+      (log/error t "Fatal error:" (blog/exception-msg t))
+      (System/exit 1))))
