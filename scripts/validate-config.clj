@@ -448,6 +448,16 @@
   (when (contains? config :mailbox)
     [common/singleton-mailbox-error]))
 
+(defn- partial-match-warnings
+  "Warnings for a :list without a dot or an :alias/:to without an @:
+  headers are matched exactly, so such a key would match nothing."
+  [sources]
+  (for [{:keys [name list alias to]} sources
+        [k v want] [[:list list "."] [:alias alias "@"] [:to to "@"]]
+        :when (and (string? v) (not (str/includes? v want)))]
+    (format "Source %s: %s %s has no %s (headers are matched exactly)."
+            (pr-str name) k (pr-str v) (pr-str want))))
+
 (defn validate-config [config]
   ;; concat, not or: show every pre-check category at once instead of
   ;; making the user fix one family of errors per run.
@@ -458,10 +468,12 @@
     {:valid? false
      :explanation (str/join "\n" errs)}
     (if (s/valid? ::config config)
-      (cond-> {:valid? true}
-        (and (get-in config [:logging :email])
-             (not (get-in config [:notifications :smtp])))
-        (assoc :warnings ["Logging :email is configured but :notifications :smtp is absent."]))
+      (let [warnings (cond-> (vec (partial-match-warnings (:sources config)))
+                       (and (get-in config [:logging :email])
+                            (not (get-in config [:notifications :smtp])))
+                       (conj "Logging :email is configured but :notifications :smtp is absent."))]
+        (cond-> {:valid? true}
+          (seq warnings) (assoc :warnings warnings)))
       {:valid? false
        :explanation (s/explain-str ::config config)})))
 

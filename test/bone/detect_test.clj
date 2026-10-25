@@ -176,7 +176,11 @@
       (is (nil? (topic "[BUG] see https://example.org: broken"))))
     (testing "paths and dots are single topics"
       (is (= "net/mlx5e" (topic "[BUG] net/mlx5e: crash")))
-      (is (= "org-demo.html" (topic "[BUG] org-demo.html: bad aside"))))))
+      (is (= "org-demo.html" (topic "[BUG] org-demo.html: bad aside"))))
+    (testing "a bracket later in the title does not hide the topic"
+      (is (= "ox-html" (topic "[BUG] ox-html: export of [[link]] broken")))
+      (is (= "org-agenda" (topic "[BUG] org-agenda: foo [bar] baz: qux")))
+      (is (= "lisp/ox.el" (topic "[PATCH] lisp/ox.el: fix x[0]"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Inline patch extraction

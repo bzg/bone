@@ -41,6 +41,33 @@
   (let [sc (src-cmds strict?)]
     (commands/detect-lines :bug body nil nil (:line-patterns sc))))
 
+(deftest line-values-exclude-trailing-punctuation
+  (testing "a final period is sentence punctuation, not part of the address"
+    (is (= "bob@x.org"
+           (:email-address (first (detect-with false "Acked-by: bob@x.org.\n"))))))
+  (testing "a final period is not part of a bare message-id"
+    (is (= "<a@b.c>"
+           (:target-message-id (first (detect-with false "Superseded-by: a@b.c.\n"))))))
+  (testing "a bracketed message-id keeps working with a final period"
+    (is (= "<a@b.c>"
+           (:target-message-id (first (detect-with false "Superseded-by: <a@b.c>.\n"))))))
+  (testing "a line naming several message-ids does not match"
+    (is (empty? (detect-with false "Related-to: <a@b> <c@d>\n")))
+    (is (empty? (detect-with false "Related-to: <a@b>, <c@d>\n"))))
+  (testing "a line naming several addresses does not match"
+    (is (empty? (detect-with false "Acked-by: A <a@x.org>, B <b@y.org>\n"))))
+  (testing "parentheses and quotes around a bare address are not part of it"
+    (is (= "bob@x.org"
+           (:email-address (first (detect-with false "Acked-by: (bob@x.org)\n")))))
+    (is (= "bob@x.org"
+           (:email-address (first (detect-with false "Acked-by: bob@x.org)\n")))))
+    (is (= "bob@x.org"
+           (:email-address (first (detect-with false "Acked-by: \"bob@x.org\"\n")))))
+    (is (= "bob@x.org"
+           (:email-address (first (detect-with false "Acked-by: \"bob@x.org\" <bob@x.org>\n")))))
+    (is (= "o'brien@x.org"
+           (:email-address (first (detect-with false "Acked-by: o'brien@x.org\n")))))))
+
 (deftest line-loose-accepts-both-forms
   (testing "-by line"
     (is (seq (detect-with false "Acked-by: a@b.com\n")))

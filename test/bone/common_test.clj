@@ -129,6 +129,19 @@
                    (make-headers "X-Original-To" ["alias@example.org" "x@y.org"]
                                  "To" ["someone@else.org"])))))
 
+  (testing "recipients are compared exactly, not as substrings"
+    (is (= :alias (common/classify-delivery
+                   (make-headers "X-Original-To" "sec@example.com"
+                                 "To" "debsec@example.com"))))
+    (is (= :direct (common/classify-delivery
+                    (make-headers "X-Original-To" "SEC@example.com"
+                                  "To" "Security Team <sec@example.com>, other@example.com")))))
+
+  (testing "every original recipient is checked"
+    (is (= :alias (common/classify-delivery
+                   (make-headers "X-Original-To" ["me@example.org" "hidden@example.org"]
+                                 "To" "me@example.org")))))
+
   (testing "no special headers => :direct"
     (is (= :direct (common/classify-delivery
                     (make-headers "To" "inbox@example.org")))))
@@ -168,7 +181,41 @@
   (testing "no match => nil"
     (is (nil? (common/classify-source
                (make-headers "To" "unknown@example.com")
-               test-sources)))))
+               test-sources))))
+
+  (testing "matching is exact and case-insensitive, not by substring"
+    (is (= "my-list"
+           (common/classify-source
+            (make-headers "List-Id" "Bugs list <Bugs.Example.ORG>")
+            test-sources)))
+    (is (nil? (common/classify-source
+               (make-headers "List-Id" "<help-bugs.example.org>")
+               test-sources))
+        "a List-Id that merely contains :list does not match")
+    (is (nil? (common/classify-source
+               (make-headers "X-Original-To" "debsec@example.com"
+                             "To" "other@example.com")
+               test-sources))
+        "an address that merely contains :alias does not match"))
+
+  (testing "repeated or comma-separated recipient headers"
+    (is (= "my-alias"
+           (common/classify-source
+            {"X-Original-To" ["other@example.com" "sec@example.com"]
+             "To" "x@example.org"}
+            test-sources))
+        "a repeated X-Original-To still matches on any of its values")
+    (is (= "my-alias"
+           (common/classify-source
+            (make-headers "Envelope-To" "other@example.com, sec@example.com"
+                          "To" "x@example.org")
+            test-sources))
+        "a comma-separated Envelope-To matches on any of its addresses")
+    (is (= "my-list"
+           (common/classify-source
+            {"List-Id" ["<other.example.org>" "<bugs.example.org>"]}
+            test-sources))
+        "a repeated List-Id matches on any of its values")))
 
 ;; ---------------------------------------------------------------------------
 ;; source-type
@@ -200,12 +247,6 @@
     (is (= "<test.example.org>" (common/get-header hdrs "list-id")))
     (is (= "value" (common/get-header hdrs "x-custom")))
     (is (nil? (common/get-header hdrs "absent")))))
-
-(deftest extract-list-id-test
-  (is (= "bugs.example.org"
-         (common/extract-list-id "Some list <bugs.example.org>")))
-  (is (= "raw-value" (common/extract-list-id "raw-value")))
-  (is (nil? (common/extract-list-id nil))))
 
 (deftest extract-in-reply-to-test
   (let [hdrs (make-headers "In-Reply-To" " <msg@test> ")]

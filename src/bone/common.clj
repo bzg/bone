@@ -350,14 +350,13 @@
       (vector? v) v
       :else       [v])))
 
-(defn extract-list-id
-  "Extract the identifier from a List-Id header value.
-  RFC 2919: \"Description <list-id>\" -> \"list-id\"."
-  [raw]
-  (when raw
-    (if-let [[_ id] (re-find #"<([^>]+)>" (str raw))]
-      id
-      (str raw))))
+;; Regex source for an email address in a command line.  It holds no
+;; separator (, ;), parenthesis or double quote, does not start or end
+;; with ', nor end with sentence punctuation: "Alice (a@x.org), b@y.org."
+;; yields a@x.org and b@y.org.  A dot is required in the domain.
+(def address-re
+  (str "[^@\\s<>,;()\"'][^@\\s<>,;()\"]*"
+       "@[^@\\s<>,;()\"]+\\.[^@\\s<>,;()\"]*[^@\\s<>,;()\".:?!']"))
 
 ;; RFC 5322 §3.6.4 token shape -- msg-id = "<" id-left "@" id-right ">".
 ;; Reject whitespace and angle brackets inside; tolerate the obs-* set
@@ -443,13 +442,31 @@
     :mailbox      true
     false))
 
-(defn original-recipient
-  "Extract the original recipient address from MTA headers.
-  Checks X-Original-To, Envelope-To, X-Envelope-To in order."
-  [headers-edn]
-  (or (get-header headers-edn "X-Original-To")
-      (get-header headers-edn "Envelope-To")
-      (get-header headers-edn "X-Envelope-To")))
+(defn- header-token
+  "Bare, lower-cased identifier of a header value or config key:
+  `Name <a@b>` and `<a@b>` give \"a@b\"."
+  [v]
+  (let [s (str v)]
+    (str/lower-case (str/trim (or (second (re-find #"<([^>]+)>" s)) s)))))
+
+(defn- any-matches?
+  "True if a header value in `coll` equals the source key `expected`,
+  case aside.  Exact, not substring: :list \"gnu-emacs\" must not
+  capture help-gnu-emacs.gnu.org, nor :alias bugs@x.org debbugs@x.org."
+  [coll expected]
+  (let [e (header-token expected)]
+    (boolean (some #(= e (header-token %)) coll))))
+
+(defn- header-addresses
+  "Every value of `header-name`, repeated headers included, with
+  comma-separated lists split (Exim's `Envelope-to: a@x, b@x`)."
+  [headers-edn header-name]
+  (->> (get-header-values headers-edn header-name)
+       (mapcat #(str/split (str %) #","))
+       (remove str/blank?)))
+
+(def ^:private original-recipient-headers
+  ["X-Original-To" "Envelope-To" "X-Envelope-To"])
 
 (defn- multiple-delivered-to?
   "True when Delivered-To contains 2+ distinct addresses (alias signal)."
@@ -460,21 +477,14 @@
     (> (count vals) 1)))
 
 (defn- original-recipient-not-in-to-cc?
-  "True when the original recipient address appears in neither To nor Cc.
-  Repeated headers come back from get-header as vectors: take the first
-  original recipient, and match against all To/Cc values joined."
+  "True when an original recipient (any value of X-Original-To,
+  Envelope-To, X-Envelope-To) appears in neither To nor Cc."
   [hdrs]
-  (let [joined (fn [header-name]
-                 (when-let [vals (seq (get-header-values hdrs header-name))]
-                   (str/lower-case (str/join " " vals))))
-        orig (some-> (original-recipient hdrs)
-                     (as-> v (if (vector? v) (first v) v))
-                     str/lower-case)
-        to   (joined "To")
-        cc   (joined "Cc")]
-    (boolean (and orig
-                  (not (some-> to (str/includes? orig)))
-                  (not (some-> cc (str/includes? orig)))))))
+  (let [to-cc (into #{} (comp (mapcat #(header-addresses hdrs %))
+                              (map header-token))
+                    ["To" "Cc"])]
+    (boolean (some #(not (contains? to-cc (header-token %)))
+                   (mapcat #(header-addresses hdrs %) original-recipient-headers)))))
 
 (defn classify-delivery
   "Heuristic: returns :list, :alias, or :direct based on email headers."
@@ -497,35 +507,24 @@
       ;; 3. Otherwise => direct
       :else :direct)))
 
-(defn- matches?
-  "Case-insensitive substring match."
-  [haystack needle]
-  (and haystack needle
-       (str/includes? (str/lower-case (str haystack))
-                      (str/lower-case needle))))
-
-(defn- any-matches?
-  "True if any value in coll matches needle (case-insensitive substring)."
-  [coll needle]
-  (boolean (some #(matches? % needle) coll)))
-
 (defn- match-source?
   "Check if headers match a source based on its inferred type."
   [headers-edn source]
   (case (source-type source)
-    :mailing-list (matches? (extract-list-id (get-header headers-edn "List-Id"))
-                            (:list source))
-    :alias        (or (matches? (original-recipient headers-edn)
+    :mailing-list (any-matches? (get-header-values headers-edn "List-Id")
+                                (:list source))
+    :alias        (any-matches? (mapcat #(header-addresses headers-edn %)
+                                        (conj original-recipient-headers
+                                              "Delivered-To"))
                                 (:alias source))
-                      (any-matches? (get-header-values headers-edn "Delivered-To")
-                                    (:alias source)))
-    :mailbox      (any-matches? (get-header-values headers-edn "Delivered-To")
+    :mailbox      (any-matches? (header-addresses headers-edn "Delivered-To")
                                 (:to source))
     false))
 
 (defn classify-source
   "Return the :name of the first matching source, or nil.
-  Uses header-based matching only (List-Id, X-Original-To, Delivered-To)."
+  Uses header-based matching only (List-Id; X-Original-To, Envelope-To,
+  X-Envelope-To, Delivered-To)."
   [headers-edn sources]
   (some (fn [source]
           (when (match-source? headers-edn source) (:name source)))

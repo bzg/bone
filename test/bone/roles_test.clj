@@ -123,7 +123,33 @@
       (let [ts (roles/get-tenures (d/db conn) "s")]
         (is (common/maintainer? ts "alice@x.org"))
         (is (common/maintainer? ts "bob@x.org"))
-        (is (common/maintainer? ts "carol@x.org"))))))
+        (is (common/maintainer? ts "carol@x.org")))))
+
+  (testing "comma-separated addresses, final period"
+    (let [conn (fresh-conn)
+          _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
+          t0   (roles/get-tenures (d/db conn) "s")]
+      (roles/apply-role-controls!
+       conn t0 "s" "co@x.org"
+       "Add maintainer: alice@x.org, bob@y.org." t1 false)
+      (let [ts (roles/get-tenures (d/db conn) "s")]
+        (is (common/maintainer? ts "alice@x.org"))
+        (is (common/maintainer? ts "bob@y.org"))
+        (is (not-any? #(re-find #"[,.]$" (:email %)) ts)
+            "no address keeps a trailing separator"))))
+
+  (testing "parenthesized and quoted addresses"
+    (let [conn (fresh-conn)
+          _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
+          t0   (roles/get-tenures (d/db conn) "s")]
+      (roles/apply-role-controls!
+       conn t0 "s" "co@x.org"
+       "Add maintainer: Alice (alice@x.org), 'bob@y.org'" t1 false)
+      (let [ts (roles/get-tenures (d/db conn) "s")]
+        (is (common/maintainer? ts "alice@x.org"))
+        (is (common/maintainer? ts "bob@y.org"))
+        (is (not-any? #(re-find #"[()']" (:email %)) ts)
+            "no address keeps a parenthesis or a quote")))))
 
 ;; ---------------------------------------------------------------------------
 ;; sync-source-tenures! -- per-period reconciliation

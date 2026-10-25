@@ -1049,6 +1049,12 @@ incoming emails:
 - =:to= -- matches =Delivered-To=. For a dedicated mailbox where all
   emails are delivered directly.
 
+Matching is exact (case aside), not by substring: =:list "my-list"=
+does not match the List-Id =my-list.example.org=, nor =:alias
+"bugs@example.org"= the address =debbugs@example.org=. Repeated
+headers and comma-separated recipient lists are checked value by
+value.
+
 Emails that match no source are discarded at ingestion.
 
 ** Source options
@@ -1087,7 +1093,7 @@ level (the current state).
 
 #+begin_src edn
 {:name "orgmode"
- :list "emacs-orgmode@gnu.org"
+ :list "emacs-orgmode.gnu.org"
  :maintainers ["current-lead@example.org"]    ;; default + current era
  :periods
  [{:end "2020-01-01"

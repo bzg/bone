@@ -134,8 +134,7 @@
                    "(Add maintainer|Remove maintainer):\\s+(.+)$")))
 
 (def ^:private address-pattern
-  (let [addr "[^@\\s<>]+@[^@\\s<>]+\\.[^@\\s<>]+"]
-    (re-pattern (str "<(" addr ")>|(" addr ")"))))
+  (re-pattern (str "<(" common/address-re ")>|(" common/address-re ")")))
 
 (defn- parse-addresses
   "Extract email addresses from a maintainer-directive argument.

@@ -102,15 +102,18 @@
                         ")")
                    (java.util.regex.Pattern/quote syntax))
         prefix   (common/bang-prefix strict-syntax?)
-        addr     "[^@<>\\s]+@[^@<>\\s]+\\.[^@<>\\s]+"   ; email address (dot required)
+        addr     common/address-re                     ; email address (dot required)
         mid      "[^<>\\s]+@[^<>\\s]+"                  ; bracketed message-id
-        mid-path "[^/<>\\s]+@[^/<>\\s]+"]               ; mid in path or bare
+        ;; A bare mid never ends with sentence punctuation either.
+        mid-path "[^/<>\\s]+@[^/<>\\s]*[^/<>\\s.,;:?!]"] ; mid in path or bare
     (re-pattern
      (case param
-       :email-address    (str "^" prefix qs ":\\s+(?:.*<(" addr ")>|(" addr "))" trailing-punct "?\\s*$")
+       ;; [^<]* (not .*) before a bracketed value: a line naming several
+       ;; <...> values does not match, instead of keeping the last one.
+       :email-address    (str "^" prefix qs ":\\s+(?:[^<]*<(" addr ")>|[(\"']?(" addr ")[)\"']?)" trailing-punct "?\\s*$")
        :date-or-duration (str "^" prefix qs ":\\s+(\\d{4}-\\d{2}-\\d{2}|\\d+[dwmy](?:\\s+\\d+[dwmy])*)" trailing-punct "?\\s*$")
        :topics           (str "^" prefix qs ":\\s+(" topic-ops-re ")" trailing-punct "?\\s*$")
-       :message-id       (str "^" prefix qs ":\\s+(?:.*<(" mid ")>|.*/(" mid-path ")/?|(" mid-path "))" trailing-punct "?\\s*$")
+       :message-id       (str "^" prefix qs ":\\s+(?:[^<]*<(" mid ")>|.*/(" mid-path ")/?|(" mid-path "))" trailing-punct "?\\s*$")
        (str "^" prefix qs trailing-punct "?\\s*$")))))
 
 (def ^:private compile-word-patterns

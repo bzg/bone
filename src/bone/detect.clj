@@ -34,7 +34,9 @@
 ;; Colon-based topic extraction
 ;; ---------------------------------------------------------------------------
 
-(def ^:private post-bracket-re #".*\]\s*(.*)")
+;; The text after the leading [TAG] groups, not after the last "]":
+;; "[BUG] ox: export of [[link]] broken" has topic "ox".
+(def ^:private post-bracket-re #"^(?:\[[^\]]*\]\s*)+(.*)")
 (def ^:private topic-token-re #"^([^\s:]+):(?:\s+|$)")
 
 (defn- extract-colon-topic
