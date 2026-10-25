@@ -41,6 +41,13 @@
   (log/error "Missing value for" opt (str "(expected " expected ")"))
   (System/exit 1))
 
+(defn- unknown-arg!
+  "Abort: `--sources foo --delete` must not purge every source."
+  [a]
+  (log/error "Unknown argument:" a
+             "(expected --delete, --verbose, --failures, -n/--source NAME, --retention DURATION)")
+  (System/exit 1))
+
 (defn- parse-args [args]
   (loop [opts {:delete? false :verbose? false :failures? false}
          [a & [v & r :as more]] args]
@@ -55,7 +62,7 @@
       (= a "--retention")    (if v
                                (recur (assoc opts :retention v) r)
                                (missing-value! a "a duration like \"90d\" or an ISO date"))
-      :else                  (recur opts more))))
+      :else                  (unknown-arg! a))))
 
 ;; ---------------------------------------------------------------------------
 ;; Protected email collection

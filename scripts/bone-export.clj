@@ -100,6 +100,12 @@
                        (.getMessage e))
              nil)))))
 
+(defn- clear-last-export!
+  "Delete data/.last-export so the next run is a full re-export."
+  []
+  (let [f (io/file last-export-file)]
+    (when (.exists f) (.delete f))))
+
 (defn- save-last-export!
   "Write the export timestamp to data/.last-export."
   [^java.util.Date ts]
@@ -349,6 +355,34 @@
       (str "attachment-" (mid-hash (str filename)) ".txt")
       base)))
 
+(defn- text-attachment-basename
+  "Basename suffixed with .txt unless it ends in .txt or .log: a
+  text/plain part named x.html must not be served as a page."
+  [att]
+  (let [base (attachment-basename att)]
+    (if (re-find #"(?i)\.(?:txt|log)$" base)
+      base
+      (str base ".txt"))))
+
+(defn- published-text-attachments
+  "[att name] pairs for the publishable text attachments among `atts`,
+  names made distinct (x and x.txt both give x.txt: the second becomes
+  x-2.txt).  Shared by the JSON listing and dump-text!, so they agree."
+  [atts]
+  (first
+   (reduce (fn [[pairs seen] att]
+             (let [base (text-attachment-basename att)
+                   pick (fn [n]
+                          (if (= n 1)
+                            base
+                            (str/replace base #"(?i)(\.(?:txt|log))$" (str "-" n "$1"))))
+                   name (some #(let [c (pick %)]
+                                 (when-not (seen (str/lower-case c)) c))
+                              (iterate inc 1))]
+               [(conj pairs [att name]) (conj seen (str/lower-case name))]))
+           [[] #{}]
+           (filter #(and (text-attachment? %) (:attachment/data %)) atts))))
+
 (defn- close-flag [report]
   (if (:report/closed report)
     (case (:report/close-reason report)
@@ -578,9 +612,8 @@
   [report att-email]
   (let [h     (mid-hash (:report/message-id report))
         texts (when (:report/has-text-attachments report)
-                (mapv (fn [att] {:file (str h "/" (attachment-basename att))})
-                      (filter #(and (text-attachment? %) (:attachment/data %))
-                              (:email/attachments @att-email))))]
+                (mapv (fn [[_ nm]] {:file (str h "/" nm)})
+                      (published-text-attachments (:email/attachments @att-email))))]
     (cond-> {}
       (and (= :announcement (:report/type report))
            (:report/has-ics report))
@@ -973,11 +1006,17 @@
          "      <description>" desc "</description>\n"
          "    </item>")))
 
+(defn- cover-seq?
+  "True for a cover letter's patch-seq: \"0/5\", or \"00/12\" as git
+  format-patch pads it from ten patches on."
+  [patch-seq]
+  (boolean (some->> patch-seq (re-find #"^0+/"))))
+
 (defn- series-status-summary
   "Build a short status summary for a folded series, e.g. \"3/5 acked, 1 open\".
-  Excludes cover letters (patch-seq starting with \"0/\") from the tally."
+  Excludes cover letters (see cover-seq?) from the tally."
   [members]
-  (let [patches (remove #(str/starts-with? (or (:patch-seq %) "") "0/") members)
+  (let [patches (remove #(cover-seq? (:patch-seq %)) members)
         counts  (reduce (fn [acc m]
                           (let [flags (:flags m)]
                             (cond
@@ -1011,7 +1050,7 @@
                                                         parse-long)
                                                 0)
                                            members)
-                          cover   (first (filter #(str/starts-with? (or (:patch-seq %) "") "0/") sorted))
+                          cover   (first (filter #(cover-seq? (:patch-seq %)) sorted))
                           rep     (or cover (first sorted))
                           summary (series-status-summary members)]
                       (conj acc (assoc rep :series-summary summary)))))))
@@ -1254,16 +1293,14 @@
                       since (filter #(updated-since? % since)))
         att-cache   (batch-fetch-attachments txt-reports)
         total       (reduce (fn [n report]
-                              (let [txt-atts (filter #(and (text-attachment? %)
-                                                           (:attachment/data %))
-                                                     (:email/attachments (get att-cache (:report/message-id report))))]
+                              (let [txt-atts (published-text-attachments
+                                              (:email/attachments (get att-cache (:report/message-id report))))]
                           (if (seq txt-atts)
                             (let [h   (mid-hash (:report/message-id report))
                                   dir (io/file text-dir h)]
                               (.mkdirs dir)
-                              (doseq [att txt-atts]
-                                (spit (io/file dir (attachment-basename att))
-                                      (:attachment/data att)))
+                              (doseq [[att nm] txt-atts]
+                                (spit (io/file dir nm) (:attachment/data att)))
                               (+ n (count txt-atts)))
                             n)))
                       0
@@ -1721,7 +1758,12 @@
                                     (some :awaiting-delay (:sources config)))
                                 (not= (format-date-iso last-export)
                                       (format-date-iso run-started))))
+          ;; -p/-s/--topics-filter publish a partial dashboard: never
+          ;; incremental, and the next run must be a full one.
+          filtered?       (boolean (and (not= format "root")
+                                        (or min-priority min-status topics-filter)))
           incremental?    (and (not force-all?)
+                               (not filtered?)
                                (not config-changed?)
                                (not shell-changed?)
                                (not day-crossed?)
@@ -1732,6 +1774,10 @@
                                    (.getTime ^java.util.Date last-export)))]
       (when config-changed?
         (log/info "Config changed since last export, forcing full re-export."))
+      ;; Dropped before publishing, so that a failed run is covered too.
+      (when filtered?
+        (clear-last-export!)
+        (log/info "Filtered export: the next run will be a full re-export."))
       (when (and shell-changed? (not config-changed?))
         (log/info "Shell assets changed since last export, forcing full re-export."))
       (when (and day-crossed? (not config-changed?) (not shell-changed?) (not force-all?))

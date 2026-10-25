@@ -25,7 +25,7 @@
          '[clojure.java.io :as io]
          '[taoensso.timbre :as log]
          '[bone.common :refer [get-header-values format-date format-date-iso
-                               report-priority report-status report-descendant-count
+                               report-priority report-descendant-count
                                bone-schema mid-hash
                                failures-file-path read-failures-file
                                reason-labels]]
@@ -201,8 +201,8 @@
   "Group relevant reports into the three body sections.  Sections 1
   and 2 (owned by you, with or without deadline) always show what you
   own.  Section 3 (unacked & unowned) is the noisy one and is the
-  only one filtered by min-priority and min-status."
-  [relevant email {:keys [min-priority min-status]}]
+  only one filtered, by min-priority."
+  [relevant email {:keys [min-priority]}]
   (let [owned (filter #(owned-by? % email) relevant)]
     {:dl      (->> owned
                    (filter :report/deadline-value)
@@ -213,8 +213,7 @@
      :unacked (->> relevant
                    (filter unacked?)
                    (filter unowned?)
-                   (filter #(>= (report-priority %) min-priority))
-                   (filter #(>= (report-status %) min-status)))}))
+                   (filter #(>= (report-priority %) min-priority)))}))
 
 (defn- failure-subjects-map
   "Build {message-id -> subject} for the message-ids referenced by `failures`."
@@ -250,7 +249,7 @@
   `failures` is a seq of failure maps (from the failures file) to include."
   [db reports email subscription failures]
   (let [source   (:source subscription)
-        prefs    (merge {:min-priority 1 :min-status 0} subscription)
+        prefs    (merge {:min-priority 1} subscription)
         relevant (->> (filter-relevant-reports reports prefs)
                       (sort-by (juxt report-priority report-descendant-count)
                                #(compare %2 %1)))
@@ -338,6 +337,12 @@
         admin-bcc   (:admin-bcc notif)
         subscribers (:subscribers notif)]
     (cond
+      ;; Fail the cron job, not pass for "notifications disabled".
+      (nil? config)
+      (do (log/error "Config file not found or empty:"
+                     (or (System/getenv "BONE_CONFIG") "config.edn"))
+          (System/exit 1))
+
       (not (:enabled notif))
       (do (log/info "Notifications disabled in config.")
           (System/exit 0))
@@ -354,7 +359,8 @@
       (let [conn          (d/get-conn dbp bone-schema {:wal? false})
             last-shown    (load-last-failures-shown)
             updated-shown (atom last-shown)
-            sent          (atom 0)]
+            sent          (atom 0)
+            failed        (atom 0)]
         (try
           (let [db           (d/db conn)
                 src-map      (build-source-map config)
@@ -395,6 +401,7 @@
                             (catch Exception e
                               ;; Don't advance the timestamp on failure so the
                               ;; same failures are retried next run.
+                              (swap! failed inc)
                               (log/error "Failed to send to" email
                                          (str "(source: " source "):")
                                          (.getMessage e)))))
@@ -411,4 +418,8 @@
                    (catch Exception e
                      (log/error "Failed to persist last-notify-failures:"
                                 (.getMessage e)))))
-            (try (d/close conn) (catch Exception _ nil))))))))
+            (try (d/close conn) (catch Exception _ nil))))
+        ;; After the finally above has saved the state.
+        (when (pos? @failed)
+          (log/error @failed "notification(s) could not be sent.")
+          (System/exit 1))))))

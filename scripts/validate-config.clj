@@ -177,12 +177,11 @@
 ;; Subscriber filters (all optional except :source)
 (s/def :sub/source ::non-blank-string)
 (s/def :sub/min-priority (s/and int? #(<= 0 % 3)))
-(s/def :sub/min-status   (s/and int? #(<= 0 % 7)))
 (s/def :sub/subject-match ::non-blank-string)
 (s/def :sub/topic ::non-blank-string)
 (s/def :notif/subscription
   (s/keys :req-un [:sub/source]
-          :opt-un [:sub/min-priority :sub/min-status :sub/subject-match :sub/topic]))
+          :opt-un [:sub/min-priority :sub/subject-match :sub/topic]))
 (s/def :notif/subscribers
   (s/map-of ::email
             (s/coll-of :notif/subscription :kind vector? :min-count 1)))

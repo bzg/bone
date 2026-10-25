@@ -271,7 +271,6 @@
  ;;                 ;;   :source        source :name to watch  [required]
  ;;                 ;;   :min-priority  0..3 -- only filters the "unacked
  ;;                 ;;                  & unowned" section (default 1)
- ;;                 ;;   :min-status    0..7 -- same section (default 0)
  ;;                 ;;   :subject-match case-insensitive substring on the
  ;;                 ;;                  report subject      [optional]
  ;;                 ;;   :topic         case-insensitive substring on the

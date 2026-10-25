@@ -95,7 +95,9 @@ function escAttr(s) {
 
 var _typeLabels = boneConfig.typeLabels || {};
 
-function prepareReport(r) {
+// The source:/S: search key reads the envelope's source on each report.
+function prepareReport(r, source) {
+  r.source = source;
   var from = r.from || '';
   var fromName = r['from-name'] || '';
   var flags = r.flags || '---';
@@ -227,11 +229,12 @@ function flagsCat(flags) {
   return 'O';
 }
 
+function isCoverSeq(seq) { return /^0+\//.test(seq || ''); } // 0/N or 00/N
+
 function isSeriesHomogeneous(members) {
   var refCat = null;
   for (var i = 0; i < members.length; i++) {
-    var seq = members[i].raw['patch-seq'] || '';
-    if (seq.indexOf('0/') === 0) continue; // skip cover letter
+    if (isCoverSeq(members[i].raw['patch-seq'])) continue; // skip cover letter
     var cat = flagsCat(members[i].raw.flags);
     if (refCat === null) { refCat = cat; continue; }
     if (cat !== refCat) return false;
@@ -441,8 +444,7 @@ function buildDisplayList() {
       else folded = isSeriesHomogeneous(members);
       var rep = members[0];
       for (var k = 0; k < members.length; k++) {
-        var seq = members[k].raw['patch-seq'] || '';
-        if (seq.indexOf('0/') === 0) { rep = members[k]; break; }
+        if (isCoverSeq(members[k].raw['patch-seq'])) { rep = members[k]; break; }
       }
       var repEntry = Object.create(rep);
       repEntry._isSeries = true;
@@ -830,7 +832,7 @@ function loadClosedReports(callback) {
       if (closedLoaded) return;
       var reports = data.reports || [];
       for (var i = 0; i < reports.length; i++) {
-        var rpt = prepareReport(reports[i]);
+        var rpt = prepareReport(reports[i], data.source);
         _allReports.push(rpt);
         if (rpt.type && allTypes.indexOf(rpt.type) === -1) {
           allTypes.push(rpt.type);
@@ -1218,7 +1220,7 @@ function initOpenReports(data) {
   var reports = data.reports || [];
   console.time('bone:prepare');
   for (var i = 0; i < reports.length; i++) {
-    _allReports.push(prepareReport(reports[i]));
+    _allReports.push(prepareReport(reports[i], data.source));
   }
   collectTypes();
   computeClusters();
