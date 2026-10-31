@@ -1710,272 +1710,277 @@
 
 (def formats #{"json" "rss" "org" "html" "all" "stats" "patches" "text" "events" "root"})
 
-(let [{:keys [format source-name min-priority min-status force-all? theme page-size closed-retention
-              topics-filter html-columns html-columns-sort]
-       :or   {format "all"}}
-      (parse-cli-args *command-line-args*)
-      config (load-config)
-      dbp    (db-path config)
-      conn   (d/get-conn dbp bone-schema {:wal? false})]
-  (try
-    (when-not (formats format)
-      (log/error "Unknown format:" format)
-      (log/error "Formats: json rss org html stats patches text events root all")
-      (System/exit 1))
-    (when (and min-priority (not (#{1 2 3} min-priority)))
-      (log/error "Invalid --min-priority:" min-priority "(must be 1, 2, or 3)")
-      (System/exit 1))
-    (when (and min-status (not (<= 1 min-status 7)))
-      (log/error "Invalid --min-status:" min-status "(must be 1-7)")
-      (System/exit 1))
-    (let [;; Watermark for save-last-export!: taken *before* the DB snapshot,
-          ;; otherwise daemon transactions racing with this export would fall
-          ;; before the saved watermark and be skipped forever by the next
-          ;; incremental run.
-          run-started     (java.util.Date.)
-          db              (d/db conn)
-          last-modified   (get-last-modified db)
-          last-export     (get-last-export)
-          config-path     (or (System/getenv "BONE_CONFIG") "config.edn")
-          config-mtime    (let [f (io/file config-path)]
-                            (when (.exists f) (.lastModified f)))
-          config-changed? (and last-export config-mtime
-                               (> ^long config-mtime
-                                  (.getTime ^java.util.Date last-export)))
-          ;; A changed shell asset (template/JS) forces a full re-export so
-          ;; the new shells are rebuilt -- even with no report activity, which
-          ;; would otherwise skip the run and leave the old HTML in place.
-          shell-changed?  (shell-assets-changed? last-export)
-          ;; --closed-retention and :awaiting-delay depend on the clock,
-          ;; not on DB transactions: reports cross those thresholds with
-          ;; no tx to re-trigger their export.  When either is configured,
-          ;; force one full run per UTC day so the incremental output
-          ;; can't diverge from --force for long.
-          day-crossed?    (boolean
-                           (and last-export
-                                (or closed-retention
-                                    (:awaiting-delay config)
-                                    (some :awaiting-delay (:sources config)))
-                                (not= (format-date-iso last-export)
-                                      (format-date-iso run-started))))
-          ;; -p/-s/--topics-filter publish a partial dashboard: never
-          ;; incremental, and the next run must be a full one.
-          filtered?       (boolean (and (not= format "root")
-                                        (or min-priority min-status topics-filter)))
-          incremental?    (and (not force-all?)
-                               (not filtered?)
-                               (not config-changed?)
-                               (not shell-changed?)
-                               (not day-crossed?)
-                               (= format "all")
-                               last-export last-modified)
-          skip?           (and incremental?
-                               (<= (.getTime ^java.util.Date last-modified)
-                                   (.getTime ^java.util.Date last-export)))]
-      (when config-changed?
-        (log/info "Config changed since last export, forcing full re-export."))
-      ;; Dropped before publishing, so that a failed run is covered too.
-      (when filtered?
-        (clear-last-export!)
-        (log/info "Filtered export: the next run will be a full re-export."))
-      (when (and shell-changed? (not config-changed?))
-        (log/info "Shell assets changed since last export, forcing full re-export."))
-      (when (and day-crossed? (not config-changed?) (not shell-changed?) (not force-all?))
-        (log/info "Retention/awaiting configured and a day has passed, forcing full re-export."))
-      (if skip?
-        (log/info "Nothing changed since last export, skipping.")
-        ;; Resolve source list *before* the expensive DB pull
-        ;; so we can determine which sources actually need re-export.
-        (let [effective-theme (or theme (:theme config))
-              _               (when effective-theme (set-theme! effective-theme))
-              source-map      (build-source-map config)
-              source-names    (if source-name
-                                (if (contains? source-map source-name)
-                                  [source-name]
-                                  (do (log/error "No source named" (str "'" source-name "'"))
-                                      (log/error "Available:"
-                                                 (str/join ", " (keys source-map)))
-                                      (System/exit 1)))
-                                (mapv :name (:sources config)))
-              ;; Per-source, per-type change detection: {source -> {type count}}.
-              ;; Enables both source-level skip and intra-source per-type skip.
-              changed-st      (when incremental?
-                                (changed-source-types-since db last-export))
-              ;; Split the cron notification's counts: genuine additions
-              ;; (new reports, by origin-email date) vs effective report
-              ;; modifications (status/flags/relations/expiry), excluding
-              ;; mere thread growth.  changed-st still drives re-export.
-              new-st          (when incremental?
-                                (new-source-types-since db last-export))
-              state-st        (when incremental?
-                                (state-changed-source-types-since db last-export))
-              export-names    (if (and incremental? (seq changed-st))
-                                ;; Maintainers-only changes don't bump any
-                                ;; report, so they never reach changed-st --
-                                ;; without this check the source is skipped
-                                ;; and its docs.html stays stale.
-                                (filterv (fn [s]
-                                           (or (contains? changed-st s)
-                                               (maintainers-changed-since? db s last-export)))
-                                         source-names)
-                                source-names)]
-          (when (and incremental? (seq changed-st))
-            (log/info "Incremental: changed sources:"
-                      (str/join ", " (map (fn [[s ts]] (str s " (" (fmt-type-counts ts) ")"))
-                                          changed-st))))
-          (when (and incremental? (seq changed-st) (< (count export-names) (count source-names)))
-            (let [skipped (remove (set export-names) source-names)]
-              (doseq [s skipped]
-                (log/info (str "[" s "]") "no changes, skipping."))))
-          ;; Only load all reports and votes when there is actual work to do.
-          ;; Collect the source names actually exported so we can skip the
-          ;; root index when nothing changed and notify on the cron mail.
-          (let [exported-srcs
-                (if (and (not= format "root") (seq export-names))
-                  (let [maintainers-map (build-maintainers db source-map)
-                        all-reps        (all-reports-by-date db)
-                        votes           (votes-by-report
-                                         (d/q '[:find ?r ?val ?voter ?emid ?hdrs
-                                                :where
-                                                [?v :vote/report ?r]
-                                                [?v :vote/value  ?val]
-                                                [?v :vote/voter  ?voter]
-                                                [?v :vote/email  ?e]
-                                                [?e :email/message-id ?emid]
-                                                [(get-else $ ?e :email/headers-edn "") ?hdrs]]
-                                              db))
-                        cli-tf          (resolve-topics-filter topics-filter)
-                        drop-cutoff     (resolve-closed-retention closed-retention)
-                        _               (when cli-tf
-                                          (log/info "CLI topics filter:" (str/join ", " cli-tf)))
-                        _               (when drop-cutoff
-                                          (log/info "Dropping reports closed before" drop-cutoff))
-                        ;; Flags forwarded to the index/stats/docs
-                        ;; sub-scripts: an explicit whitelist rebuilt from
-                        ;; the parsed flags (raw-token subtraction used to
-                        ;; strip flags whose value collided, e.g. with the
-                        ;; format name).
-                        cli-extra       (cond-> []
-                                          effective-theme   (into ["--html-theme" effective-theme])
-                                          page-size         (into ["--html-page-size" (str page-size)])
-                                          html-columns      (into ["--html-columns" html-columns])
-                                          html-columns-sort (into ["--html-columns-sort" html-columns-sort]))]
-                    (binding [*export-ctx* (build-export-ctx db votes config)]
-                      (reduce (fn [exported src-name]
-                                (let [reports     (filter-reports all-reps {:source       src-name
-                                                                            :min-priority min-priority
-                                                                            :min-status   min-status})
-                                      rt          (get-in source-map [src-name :report-types])
-                                      reports     (if rt (filter #(contains? rt (:report/type %)) reports) reports)
-                                      reports     (if drop-cutoff (drop-old-closed reports drop-cutoff) reports)
-                                      reports     (filter-by-topics reports cli-tf)
-                                      slug        (slugify src-name)
-                                      staging     (str "public/.staging-" slug)
-                                      final-dir   (str "public/" slug)
-                                      exported-before? (.exists (io/file final-dir))
-                                      src-changed (get changed-st src-name)
-                                      ;; HTML shells: a full run (incremental? false,
-                                      ;; which also covers config/asset changes) rebuilds
-                                      ;; both.  On an incremental run we rebuild only when
-                                      ;; the file is missing or -- for docs -- maintainers
-                                      ;; changed; otherwise the shells stay byte-stable.
-                                      ;; regen-shell? also governs data.html
-                                      ;; (dump-stats! "html"), so check both.
-                                      regen-shell? (or (not incremental?)
-                                                       (not (.exists (io/file final-dir "index.html")))
-                                                       (not (.exists (io/file final-dir "data.html"))))
-                                      regen-docs?  (or (not incremental?)
-                                                       (maintainers-changed-since? db src-name last-export)
-                                                       (not (.exists (io/file final-dir "docs.html"))))]
-                                  (if (and (empty? reports) (not exported-before?))
-                                    (do
-                                      (log/info "No reports for source" (str "'" src-name "'")
-                                                "and no previous export, skipping.")
-                                      exported)
-                                    (do
-                                      (log/info (str "[" src-name "] " (count reports) " report(s)"
-                                                     " (" (count (open-reports reports)) " open)"
-                                                     (if incremental? " (incremental)" "")))
-                                      (try
-                                        (delete-dir! (io/file staging))
-                                        ;; Single-format runs: FULL copy of final-dir,
-                                        ;; or the swap would wipe the other formats.
-                                        ;; "all": incremental seeds only the subdirs it
-                                        ;; does not rewrite; a full run starts from an
-                                        ;; empty staging so stale files are purged.
-                                        (if (not= format "all")
-                                          (copy-dir! (io/file final-dir)
-                                                     (io/file staging))
-                                          (when incremental?
-                                            (doseq [sub ["reports" "patches" "text" "events"]]
-                                              (copy-dir! (io/file final-dir sub)
-                                                         (io/file staging sub)))))
-                                        ;; Preserve the previous HTML shells when not
-                                        ;; regenerating them: they are top-level files
-                                        ;; not covered by the subdir seed above, and
-                                        ;; would vanish in the atomic swap.
-                                        (preserve-shell! regen-shell? final-dir staging "index.html")
-                                        (preserve-shell! regen-shell? final-dir staging "data.html")
-                                        (preserve-shell! regen-docs?  final-dir staging "docs.html")
-                                        (export-source! format reports staging src-name
-                                                        source-map maintainers-map cli-extra
-                                                        :changed-types src-changed
-                                                        :since (when incremental? last-export)
-                                                        :regen-shell? regen-shell?
-                                                        :regen-docs? regen-docs?)
-                                        (atomic-swap-dir! staging final-dir)
-                                        (catch Exception e
-                                          (log/error e "Export failed for" src-name "-- cleaning up staging dir")
+(defn -main [& args]
+  (let [{:keys [format source-name min-priority min-status force-all? theme page-size closed-retention
+                topics-filter html-columns html-columns-sort]
+         :or   {format "all"}}
+        (parse-cli-args args)
+        config (load-config)
+        dbp    (db-path config)
+        conn   (d/get-conn dbp bone-schema {:wal? false})]
+    (try
+      (when-not (formats format)
+        (log/error "Unknown format:" format)
+        (log/error "Formats: json rss org html stats patches text events root all")
+        (System/exit 1))
+      (when (and min-priority (not (#{1 2 3} min-priority)))
+        (log/error "Invalid --min-priority:" min-priority "(must be 1, 2, or 3)")
+        (System/exit 1))
+      (when (and min-status (not (<= 1 min-status 7)))
+        (log/error "Invalid --min-status:" min-status "(must be 1-7)")
+        (System/exit 1))
+      (let [;; Watermark for save-last-export!: taken *before* the DB snapshot,
+            ;; otherwise daemon transactions racing with this export would fall
+            ;; before the saved watermark and be skipped forever by the next
+            ;; incremental run.
+            run-started     (java.util.Date.)
+            db              (d/db conn)
+            last-modified   (get-last-modified db)
+            last-export     (get-last-export)
+            config-path     (or (System/getenv "BONE_CONFIG") "config.edn")
+            config-mtime    (let [f (io/file config-path)]
+                              (when (.exists f) (.lastModified f)))
+            config-changed? (and last-export config-mtime
+                                 (> ^long config-mtime
+                                    (.getTime ^java.util.Date last-export)))
+            ;; A changed shell asset (template/JS) forces a full re-export so
+            ;; the new shells are rebuilt -- even with no report activity, which
+            ;; would otherwise skip the run and leave the old HTML in place.
+            shell-changed?  (shell-assets-changed? last-export)
+            ;; --closed-retention and :awaiting-delay depend on the clock,
+            ;; not on DB transactions: reports cross those thresholds with
+            ;; no tx to re-trigger their export.  When either is configured,
+            ;; force one full run per UTC day so the incremental output
+            ;; can't diverge from --force for long.
+            day-crossed?    (boolean
+                             (and last-export
+                                  (or closed-retention
+                                      (:awaiting-delay config)
+                                      (some :awaiting-delay (:sources config)))
+                                  (not= (format-date-iso last-export)
+                                        (format-date-iso run-started))))
+            ;; -p/-s/--topics-filter publish a partial dashboard: never
+            ;; incremental, and the next run must be a full one.
+            filtered?       (boolean (and (not= format "root")
+                                          (or min-priority min-status topics-filter)))
+            incremental?    (and (not force-all?)
+                                 (not filtered?)
+                                 (not config-changed?)
+                                 (not shell-changed?)
+                                 (not day-crossed?)
+                                 (= format "all")
+                                 last-export last-modified)
+            skip?           (and incremental?
+                                 (<= (.getTime ^java.util.Date last-modified)
+                                     (.getTime ^java.util.Date last-export)))]
+        (when config-changed?
+          (log/info "Config changed since last export, forcing full re-export."))
+        ;; Dropped before publishing, so that a failed run is covered too.
+        (when filtered?
+          (clear-last-export!)
+          (log/info "Filtered export: the next run will be a full re-export."))
+        (when (and shell-changed? (not config-changed?))
+          (log/info "Shell assets changed since last export, forcing full re-export."))
+        (when (and day-crossed? (not config-changed?) (not shell-changed?) (not force-all?))
+          (log/info "Retention/awaiting configured and a day has passed, forcing full re-export."))
+        (if skip?
+          (log/info "Nothing changed since last export, skipping.")
+          ;; Resolve source list *before* the expensive DB pull
+          ;; so we can determine which sources actually need re-export.
+          (let [effective-theme (or theme (:theme config))
+                _               (when effective-theme (set-theme! effective-theme))
+                source-map      (build-source-map config)
+                source-names    (if source-name
+                                  (if (contains? source-map source-name)
+                                    [source-name]
+                                    (do (log/error "No source named" (str "'" source-name "'"))
+                                        (log/error "Available:"
+                                                   (str/join ", " (keys source-map)))
+                                        (System/exit 1)))
+                                  (mapv :name (:sources config)))
+                ;; Per-source, per-type change detection: {source -> {type count}}.
+                ;; Enables both source-level skip and intra-source per-type skip.
+                changed-st      (when incremental?
+                                  (changed-source-types-since db last-export))
+                ;; Split the cron notification's counts: genuine additions
+                ;; (new reports, by origin-email date) vs effective report
+                ;; modifications (status/flags/relations/expiry), excluding
+                ;; mere thread growth.  changed-st still drives re-export.
+                new-st          (when incremental?
+                                  (new-source-types-since db last-export))
+                state-st        (when incremental?
+                                  (state-changed-source-types-since db last-export))
+                export-names    (if (and incremental? (seq changed-st))
+                                  ;; Maintainers-only changes don't bump any
+                                  ;; report, so they never reach changed-st --
+                                  ;; without this check the source is skipped
+                                  ;; and its docs.html stays stale.
+                                  (filterv (fn [s]
+                                             (or (contains? changed-st s)
+                                                 (maintainers-changed-since? db s last-export)))
+                                           source-names)
+                                  source-names)]
+            (when (and incremental? (seq changed-st))
+              (log/info "Incremental: changed sources:"
+                        (str/join ", " (map (fn [[s ts]] (str s " (" (fmt-type-counts ts) ")"))
+                                            changed-st))))
+            (when (and incremental? (seq changed-st) (< (count export-names) (count source-names)))
+              (let [skipped (remove (set export-names) source-names)]
+                (doseq [s skipped]
+                  (log/info (str "[" s "]") "no changes, skipping."))))
+            ;; Only load all reports and votes when there is actual work to do.
+            ;; Collect the source names actually exported so we can skip the
+            ;; root index when nothing changed and notify on the cron mail.
+            (let [exported-srcs
+                  (if (and (not= format "root") (seq export-names))
+                    (let [maintainers-map (build-maintainers db source-map)
+                          all-reps        (all-reports-by-date db)
+                          votes           (votes-by-report
+                                           (d/q '[:find ?r ?val ?voter ?emid ?hdrs
+                                                  :where
+                                                  [?v :vote/report ?r]
+                                                  [?v :vote/value  ?val]
+                                                  [?v :vote/voter  ?voter]
+                                                  [?v :vote/email  ?e]
+                                                  [?e :email/message-id ?emid]
+                                                  [(get-else $ ?e :email/headers-edn "") ?hdrs]]
+                                                db))
+                          cli-tf          (resolve-topics-filter topics-filter)
+                          drop-cutoff     (resolve-closed-retention closed-retention)
+                          _               (when cli-tf
+                                            (log/info "CLI topics filter:" (str/join ", " cli-tf)))
+                          _               (when drop-cutoff
+                                            (log/info "Dropping reports closed before" drop-cutoff))
+                          ;; Flags forwarded to the index/stats/docs
+                          ;; sub-scripts: an explicit whitelist rebuilt from
+                          ;; the parsed flags (raw-token subtraction used to
+                          ;; strip flags whose value collided, e.g. with the
+                          ;; format name).
+                          cli-extra       (cond-> []
+                                            effective-theme   (into ["--html-theme" effective-theme])
+                                            page-size         (into ["--html-page-size" (str page-size)])
+                                            html-columns      (into ["--html-columns" html-columns])
+                                            html-columns-sort (into ["--html-columns-sort" html-columns-sort]))]
+                      (binding [*export-ctx* (build-export-ctx db votes config)]
+                        (reduce (fn [exported src-name]
+                                  (let [reports     (filter-reports all-reps {:source       src-name
+                                                                              :min-priority min-priority
+                                                                              :min-status   min-status})
+                                        rt          (get-in source-map [src-name :report-types])
+                                        reports     (if rt (filter #(contains? rt (:report/type %)) reports) reports)
+                                        reports     (if drop-cutoff (drop-old-closed reports drop-cutoff) reports)
+                                        reports     (filter-by-topics reports cli-tf)
+                                        slug        (slugify src-name)
+                                        staging     (str "public/.staging-" slug)
+                                        final-dir   (str "public/" slug)
+                                        exported-before? (.exists (io/file final-dir))
+                                        src-changed (get changed-st src-name)
+                                        ;; HTML shells: a full run (incremental? false,
+                                        ;; which also covers config/asset changes) rebuilds
+                                        ;; both.  On an incremental run we rebuild only when
+                                        ;; the file is missing or -- for docs -- maintainers
+                                        ;; changed; otherwise the shells stay byte-stable.
+                                        ;; regen-shell? also governs data.html
+                                        ;; (dump-stats! "html"), so check both.
+                                        regen-shell? (or (not incremental?)
+                                                         (not (.exists (io/file final-dir "index.html")))
+                                                         (not (.exists (io/file final-dir "data.html"))))
+                                        regen-docs?  (or (not incremental?)
+                                                         (maintainers-changed-since? db src-name last-export)
+                                                         (not (.exists (io/file final-dir "docs.html"))))]
+                                    (if (and (empty? reports) (not exported-before?))
+                                      (do
+                                        (log/info "No reports for source" (str "'" src-name "'")
+                                                  "and no previous export, skipping.")
+                                        exported)
+                                      (do
+                                        (log/info (str "[" src-name "] " (count reports) " report(s)"
+                                                       " (" (count (open-reports reports)) " open)"
+                                                       (if incremental? " (incremental)" "")))
+                                        (try
                                           (delete-dir! (io/file staging))
-                                          (throw e)))
-                                      (conj exported src-name)))))
-                              [] export-names)))
-                  [])]
-            ;; Only regenerate root index when at least one source was exported,
-            ;; or when explicitly requested via "bb export root".
-            ;; Always list every configured source: source-names is narrowed
-            ;; to one entry by -n, and the root index must not shrink to it
-            ;; (the :when meta filter drops never-exported sources anyway).
-            (when (and (#{"all" "root"} format)
-                       (or (= format "root") (seq exported-srcs)))
-              (dump-root-index! (mapv :name (:sources config)) source-map))
-            ;; Cron notification: one stderr line iff real work was
-            ;; published ("Wrote ..." progress goes to stdout).  Names
-            ;; the changed report types per source (pre-filter counts);
-            ;; full re-exports are flagged; runs triggered solely by
-            ;; thread replies stay silent.
-            (let [summaries (into {}
-                                  (keep (fn [s]
-                                          (when-let [sm (fmt-change-summary
-                                                         (get new-st s) (get state-st s))]
-                                            [s sm])))
-                                  exported-srcs)]
-              (when (and (seq exported-srcs)
-                         (or (not incremental?) (seq summaries)))
-                (binding [*out* *err*]
-                  (println
-                   (str "bone: exported "
-                        (str/join ", "
-                                  (map (fn [s]
-                                         (if-let [summary (get summaries s)]
-                                           (str s " (" summary ")")
-                                           s))
-                                       exported-srcs))
-                        (when-not incremental? " [full re-export]")))))))
-          ;; Advance the incremental watermark only after a full,
-          ;; unfiltered run: a partial run (single format, -n, or a
-          ;; priority/status/topics filter) does not publish everything,
-          ;; so moving the watermark would hide those changes from the
-          ;; next incremental export.  --closed-retention is fine: it
-          ;; only drops old closed reports, and day-crossed? forces a
-          ;; daily full run to keep retention output converged.
-          (when (and (= format "all")
-                     (nil? source-name)
-                     (nil? min-priority)
-                     (nil? min-status)
-                     (nil? topics-filter))
-            (save-last-export! run-started)))))
-    (finally
-      ;; A dead pod makes d/close throw "Stream closed", which would
-      ;; replace the exception that actually aborted the export.
-      (try (d/close conn) (catch Exception _ nil)))))
+                                          ;; Single-format runs: FULL copy of final-dir,
+                                          ;; or the swap would wipe the other formats.
+                                          ;; "all": incremental seeds only the subdirs it
+                                          ;; does not rewrite; a full run starts from an
+                                          ;; empty staging so stale files are purged.
+                                          (if (not= format "all")
+                                            (copy-dir! (io/file final-dir)
+                                                       (io/file staging))
+                                            (when incremental?
+                                              (doseq [sub ["reports" "patches" "text" "events"]]
+                                                (copy-dir! (io/file final-dir sub)
+                                                           (io/file staging sub)))))
+                                          ;; Preserve the previous HTML shells when not
+                                          ;; regenerating them: they are top-level files
+                                          ;; not covered by the subdir seed above, and
+                                          ;; would vanish in the atomic swap.
+                                          (preserve-shell! regen-shell? final-dir staging "index.html")
+                                          (preserve-shell! regen-shell? final-dir staging "data.html")
+                                          (preserve-shell! regen-docs?  final-dir staging "docs.html")
+                                          (export-source! format reports staging src-name
+                                                          source-map maintainers-map cli-extra
+                                                          :changed-types src-changed
+                                                          :since (when incremental? last-export)
+                                                          :regen-shell? regen-shell?
+                                                          :regen-docs? regen-docs?)
+                                          (atomic-swap-dir! staging final-dir)
+                                          (catch Exception e
+                                            (log/error e "Export failed for" src-name "-- cleaning up staging dir")
+                                            (delete-dir! (io/file staging))
+                                            (throw e)))
+                                        (conj exported src-name)))))
+                                [] export-names)))
+                    [])]
+              ;; Only regenerate root index when at least one source was exported,
+              ;; or when explicitly requested via "bb export root".
+              ;; Always list every configured source: source-names is narrowed
+              ;; to one entry by -n, and the root index must not shrink to it
+              ;; (the :when meta filter drops never-exported sources anyway).
+              (when (and (#{"all" "root"} format)
+                         (or (= format "root") (seq exported-srcs)))
+                (dump-root-index! (mapv :name (:sources config)) source-map))
+              ;; Cron notification: one stderr line iff real work was
+              ;; published ("Wrote ..." progress goes to stdout).  Names
+              ;; the changed report types per source (pre-filter counts);
+              ;; full re-exports are flagged; runs triggered solely by
+              ;; thread replies stay silent.
+              (let [summaries (into {}
+                                    (keep (fn [s]
+                                            (when-let [sm (fmt-change-summary
+                                                           (get new-st s) (get state-st s))]
+                                              [s sm])))
+                                    exported-srcs)]
+                (when (and (seq exported-srcs)
+                           (or (not incremental?) (seq summaries)))
+                  (binding [*out* *err*]
+                    (println
+                     (str "bone: exported "
+                          (str/join ", "
+                                    (map (fn [s]
+                                           (if-let [summary (get summaries s)]
+                                             (str s " (" summary ")")
+                                             s))
+                                         exported-srcs))
+                          (when-not incremental? " [full re-export]")))))))
+            ;; Advance the incremental watermark only after a full,
+            ;; unfiltered run: a partial run (single format, -n, or a
+            ;; priority/status/topics filter) does not publish everything,
+            ;; so moving the watermark would hide those changes from the
+            ;; next incremental export.  --closed-retention is fine: it
+            ;; only drops old closed reports, and day-crossed? forces a
+            ;; daily full run to keep retention output converged.
+            (when (and (= format "all")
+                       (nil? source-name)
+                       (nil? min-priority)
+                       (nil? min-status)
+                       (nil? topics-filter))
+              (save-last-export! run-started)))))
+      (finally
+        ;; A dead pod makes d/close throw "Stream closed", which would
+        ;; replace the exception that actually aborted the export.
+        (try (d/close conn) (catch Exception _ nil))))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))
