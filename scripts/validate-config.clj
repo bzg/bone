@@ -480,84 +480,89 @@
 ;; Main
 ;; ---------------------------------------------------------------------------
 
-(let [path (or (first *command-line-args*)
-               (System/getenv "BONE_CONFIG")
-               "config.edn")
-      file (io/file path)]
-  (if-not (.exists file)
-    (do (log/error "Config file not found:" path)
-        (System/exit 1))
-    (let [config (try
-                   (config/load-config path)
-                   (catch Exception e
-                     (log/error "Invalid EDN:" (.getMessage e))
-                     (System/exit 1)))
-          result (validate-config config)
-          inline-pwds (config/inline-password-locations path)]
-      (doseq [loc inline-pwds]
-        (log/warn "Inline :password in" loc
-                  "-- consider :password-file or #bone/env to keep"
-                  "credentials out of config.edn (see manual)."))
-      (if (:valid? result)
-        (do (log/info "✓" path "is valid.")
-            (log/info "  Mailboxes:" (count (:mailboxes config)))
-            (doseq [mb (:mailboxes config)]
-              (log/info "    -" (:name mb) (pr-str (:type mb))
-                        (case (:type mb)
-                          :imap    (str (:user mb) "@" (:host mb) "/" (or (:folder mb) "INBOX"))
-                          ;; No default subfolder for a maildir: the path
-                          ;; itself is the box (:folder only if declared).
-                          :maildir (cond-> (str/replace (common/expand-home (:path mb)) #"/+$" "")
-                                     (:folder mb) (str "/" (:folder mb)))
-                          ""))
-              (when-let [ing (:ingest mb)]
-                (log/info "        :ingest" (pr-str ing))))
-            (log/info "  Sources:" (count (:sources config)))
-            (doseq [src (:sources config)]
-              (let [parts (cond-> []
-                            (:list src)          (conj (str "(list: " (:list src) ")"))
-                            (:alias src)         (conj (str "(alias: " (:alias src) ")"))
-                            (:to src)            (conj (str "(mailbox: " (:to src) ")"))
-                            (:list-archive src)  (conj (str "archive: " (:list-archive src)))
-                            (:report-types src)  (conj (str "report-types: " (pr-str (:report-types src))))
-                            (:command-syntax src) (conj (str "command-syntax: "
-                                                              (name (:command-syntax src))))
-                            (false? (:patch-triggers? src))
-                            (conj "patch-triggers: off")
-                            (seq (:maintainers src))
-                            (conj (str "maintainers: "
-                                       (str/join ", " (:maintainers src))))
-                            (seq (:periods src))
-                            (conj (str "periods: " (count (:periods src))))
-                            (some? (get-in src [:notifications :enabled]))
-                            (conj (str "notify: " (get-in src [:notifications :enabled]))))]
-                (log/info "    -" (:name src) (str/join " " parts))))
-            (log/info "  DB path:" (or (common/expand-home (get-in config [:db :path]))
-                                        "data/bone-db (default)"))
-            (when-let [ingest (:ingest config)]
-              (when-let [v (:fetch ingest)]
-                (log/info "  Fetch:" (pr-str v))))
-            (when-let [notif (:notifications config)]
-              (log/info "  Notifications:" (if (:enabled notif) "enabled" "disabled"))
-              (when-let [smtp (:smtp notif)]
-                (log/info "  SMTP:" (str (:user smtp) "@" (:host smtp))))
-              (when-let [subs (:subscribers notif)]
-                (let [total (reduce + (map count (vals subs)))]
-                  (log/info "  Subscribers:" (count subs) "email(s),"
-                            total "subscription(s)"))))
-            (when-let [rt (:report-types config)]
-              (log/info "  Report types:" (pr-str rt)))
-            (when-let [cs (:command-syntax config)]
-              (log/info "  Command syntax (global):" (name cs)))
-            (when-let [logging (:logging config)]
-              (when (:file logging)
-                (log/info "  Log file:" (:file logging)
-                          "level:" (or (:level logging) :warn)))
-              (when-let [em (:email logging)]
-                (log/info "  Log email:" (:to em)
-                          "level:" (or (:level em) :error))))
-            (doseq [w (:warnings result)]
-              (log/warn "⚠" w)))
-        (do (log/error "✗" path "is invalid:")
-            (log/error (:explanation result))
-            (System/exit 1))))))
+(defn -main [& args]
+  (let [path (or (first args)
+                 (System/getenv "BONE_CONFIG")
+                 "config.edn")
+        file (io/file path)]
+    (if-not (.exists file)
+      (do (log/error "Config file not found:" path)
+          (System/exit 1))
+      (let [config (try
+                     (config/load-config path)
+                     (catch Exception e
+                       (log/error "Invalid EDN:" (.getMessage e))
+                       (System/exit 1)))
+            result (validate-config config)
+            inline-pwds (config/inline-password-locations path)]
+        (doseq [loc inline-pwds]
+          (log/warn "Inline :password in" loc
+                    "-- consider :password-file or #bone/env to keep"
+                    "credentials out of config.edn (see manual)."))
+        (if (:valid? result)
+          (do (log/info "✓" path "is valid.")
+              (log/info "  Mailboxes:" (count (:mailboxes config)))
+              (doseq [mb (:mailboxes config)]
+                (log/info "    -" (:name mb) (pr-str (:type mb))
+                          (case (:type mb)
+                            :imap    (str (:user mb) "@" (:host mb) "/" (or (:folder mb) "INBOX"))
+                            ;; No default subfolder for a maildir: the path
+                            ;; itself is the box (:folder only if declared).
+                            :maildir (cond-> (str/replace (common/expand-home (:path mb)) #"/+$" "")
+                                       (:folder mb) (str "/" (:folder mb)))
+                            ""))
+                (when-let [ing (:ingest mb)]
+                  (log/info "        :ingest" (pr-str ing))))
+              (log/info "  Sources:" (count (:sources config)))
+              (doseq [src (:sources config)]
+                (let [parts (cond-> []
+                              (:list src)          (conj (str "(list: " (:list src) ")"))
+                              (:alias src)         (conj (str "(alias: " (:alias src) ")"))
+                              (:to src)            (conj (str "(mailbox: " (:to src) ")"))
+                              (:list-archive src)  (conj (str "archive: " (:list-archive src)))
+                              (:report-types src)  (conj (str "report-types: " (pr-str (:report-types src))))
+                              (:command-syntax src) (conj (str "command-syntax: "
+                                                                (name (:command-syntax src))))
+                              (false? (:patch-triggers? src))
+                              (conj "patch-triggers: off")
+                              (seq (:maintainers src))
+                              (conj (str "maintainers: "
+                                         (str/join ", " (:maintainers src))))
+                              (seq (:periods src))
+                              (conj (str "periods: " (count (:periods src))))
+                              (some? (get-in src [:notifications :enabled]))
+                              (conj (str "notify: " (get-in src [:notifications :enabled]))))]
+                  (log/info "    -" (:name src) (str/join " " parts))))
+              (log/info "  DB path:" (or (common/expand-home (get-in config [:db :path]))
+                                          "data/bone-db (default)"))
+              (when-let [ingest (:ingest config)]
+                (when-let [v (:fetch ingest)]
+                  (log/info "  Fetch:" (pr-str v))))
+              (when-let [notif (:notifications config)]
+                (log/info "  Notifications:" (if (:enabled notif) "enabled" "disabled"))
+                (when-let [smtp (:smtp notif)]
+                  (log/info "  SMTP:" (str (:user smtp) "@" (:host smtp))))
+                (when-let [subs (:subscribers notif)]
+                  (let [total (reduce + (map count (vals subs)))]
+                    (log/info "  Subscribers:" (count subs) "email(s),"
+                              total "subscription(s)"))))
+              (when-let [rt (:report-types config)]
+                (log/info "  Report types:" (pr-str rt)))
+              (when-let [cs (:command-syntax config)]
+                (log/info "  Command syntax (global):" (name cs)))
+              (when-let [logging (:logging config)]
+                (when (:file logging)
+                  (log/info "  Log file:" (:file logging)
+                            "level:" (or (:level logging) :warn)))
+                (when-let [em (:email logging)]
+                  (log/info "  Log email:" (:to em)
+                            "level:" (or (:level em) :error))))
+              (doseq [w (:warnings result)]
+                (log/warn "⚠" w)))
+          (do (log/error "✗" path "is invalid:")
+              (log/error (:explanation result))
+              (System/exit 1)))))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))

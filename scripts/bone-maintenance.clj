@@ -20,14 +20,15 @@
 ;; Environment:
 ;;   BONE_DB -- path to db (default: ./data/bone-db)
 
-(require '[clojure.string :as str]
-         '[taoensso.timbre :as log]
-         '[bone.common :refer [parse-cutoff-date
-                               bone-schema format-date
-                               failures-file-path read-failures-file
-                               reason-labels]]
-         '[bone.config :refer [load-config db-path build-source-map]]
-         '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]])
+(ns bone-maintenance
+  (:require [clojure.string :as str]
+            [taoensso.timbre :as log]
+            [bone.common :refer [parse-cutoff-date
+                                    bone-schema format-date
+                                    failures-file-path read-failures-file
+                                    reason-labels]]
+            [bone.config :refer [load-config db-path build-source-map]]
+            [bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]))
 
 ;; ---------------------------------------------------------------------------
 ;; CLI parsing
@@ -187,51 +188,56 @@
 
 (load-datalevin-pod!)
 
-(let [{:keys [delete? verbose? failures? source-name retention]}
-      (parse-args *command-line-args*)
-      config  (load-config)
-      _       (when-not config
-                (log/error "No config.edn found")
-                (System/exit 1))
-      dbp     (db-path config)
-      source-map (build-source-map config)
-      _       (when (and source-name (not (contains? source-map source-name)))
-                (log/error "Unknown source:" source-name)
-                (log/error "Available:" (str/join ", " (keys source-map)))
-                (System/exit 1))]
-  (if failures?
-    ;; --failures only reads the failures EDN file -- no DB connection
-    ;; (nor retention cutoff) needed, so the daemon can keep running.
-    (do (when retention
-          (log/warn "--retention is ignored with --failures"))
-        (show-failures source-name))
-    (let [;; Validated before the connection opens: System/exit here must
-          ;; not skip the (finally (d/close conn)) below.
-          cutoff (resolve-retention-cutoff retention)
-          ;; Open with WAL for potential writes
-          conn   (d/get-conn dbp bone-schema {})]
-      (try
-        (let [db      (d/db conn)
-              orphans (find-orphans db source-map source-name cutoff)]
-          (if (empty? orphans)
-            (log/info "No orphan emails found.")
-            (let [by-source (group-by :source orphans)]
-              (log/info "Found" (count orphans) "orphan email(s)")
-              (doseq [[src os] (sort-by key by-source)]
-                (log/info (str "  [" src "] " (count os) " orphan(s)")))
-              (when verbose?
-                (doseq [{:keys [source mid from date]} (sort-by :date orphans)]
-                  (println (str "  " source " | " mid " | " from " | " date))))
-              (if delete?
-                (do
-                  (log/info "Deleting" (count orphans) "orphan email(s)...")
-                  (let [tx-data (mapv (fn [{:keys [eid]}]
-                                        [:db/retractEntity eid])
-                                      orphans)]
-                    (d/transact! conn tx-data)
-                    (log/info "Done. Deleted" (count orphans) "email(s).")))
-                (do
-                  (log/info "Dry run -- no changes made. Pass --delete to remove.")
-                  (log/info "Tip: use --verbose to list individual orphan message-ids."))))))
-        (finally
-          (try (d/close conn) (catch Exception _ nil)))))))
+(defn -main [& args]
+  (let [{:keys [delete? verbose? failures? source-name retention]}
+        (parse-args args)
+        config  (load-config)
+        _       (when-not config
+                  (log/error "No config.edn found")
+                  (System/exit 1))
+        dbp     (db-path config)
+        source-map (build-source-map config)
+        _       (when (and source-name (not (contains? source-map source-name)))
+                  (log/error "Unknown source:" source-name)
+                  (log/error "Available:" (str/join ", " (keys source-map)))
+                  (System/exit 1))]
+    (if failures?
+      ;; --failures only reads the failures EDN file -- no DB connection
+      ;; (nor retention cutoff) needed, so the daemon can keep running.
+      (do (when retention
+            (log/warn "--retention is ignored with --failures"))
+          (show-failures source-name))
+      (let [;; Validated before the connection opens: System/exit here must
+            ;; not skip the (finally (d/close conn)) below.
+            cutoff (resolve-retention-cutoff retention)
+            ;; Open with WAL for potential writes
+            conn   (d/get-conn dbp bone-schema {})]
+        (try
+          (let [db      (d/db conn)
+                orphans (find-orphans db source-map source-name cutoff)]
+            (if (empty? orphans)
+              (log/info "No orphan emails found.")
+              (let [by-source (group-by :source orphans)]
+                (log/info "Found" (count orphans) "orphan email(s)")
+                (doseq [[src os] (sort-by key by-source)]
+                  (log/info (str "  [" src "] " (count os) " orphan(s)")))
+                (when verbose?
+                  (doseq [{:keys [source mid from date]} (sort-by :date orphans)]
+                    (println (str "  " source " | " mid " | " from " | " date))))
+                (if delete?
+                  (do
+                    (log/info "Deleting" (count orphans) "orphan email(s)...")
+                    (let [tx-data (mapv (fn [{:keys [eid]}]
+                                          [:db/retractEntity eid])
+                                        orphans)]
+                      (d/transact! conn tx-data)
+                      (log/info "Done. Deleted" (count orphans) "email(s).")))
+                  (do
+                    (log/info "Dry run -- no changes made. Pass --delete to remove.")
+                    (log/info "Tip: use --verbose to list individual orphan message-ids."))))))
+          (finally
+            (try (d/close conn) (catch Exception _ nil))))))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))

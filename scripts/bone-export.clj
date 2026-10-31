@@ -1851,6 +1851,31 @@
             (throw e)))
         true))))
 
+(defn- notify-exported!
+  "Cron notification: one stderr line iff real work was published
+  (\"Wrote ...\" progress goes to stdout).  Names the changed report
+  types per source (pre-filter counts); full re-exports are flagged;
+  runs triggered solely by thread replies stay silent."
+  [exported-srcs incremental? new-st state-st]
+  (let [summaries (into {}
+                        (keep (fn [s]
+                                (when-let [sm (fmt-change-summary
+                                               (get new-st s) (get state-st s))]
+                                  [s sm])))
+                        exported-srcs)]
+    (when (and (seq exported-srcs)
+               (or (not incremental?) (seq summaries)))
+      (binding [*out* *err*]
+        (println
+         (str "bone: exported "
+              (str/join ", "
+                        (map (fn [s]
+                               (if-let [summary (get summaries s)]
+                                 (str s " (" summary ")")
+                                 s))
+                             exported-srcs))
+              (when-not incremental? " [full re-export]")))))))
+
 (defn -main [& args]
   (let [{:keys [format source-name min-priority min-status theme page-size closed-retention
                 topics-filter html-columns html-columns-sort]
@@ -1977,29 +2002,7 @@
               (when (and (#{"all" "root"} format)
                          (or (= format "root") (seq exported-srcs)))
                 (dump-root-index! (mapv :name (:sources config)) source-map))
-              ;; Cron notification: one stderr line iff real work was
-              ;; published ("Wrote ..." progress goes to stdout).  Names
-              ;; the changed report types per source (pre-filter counts);
-              ;; full re-exports are flagged; runs triggered solely by
-              ;; thread replies stay silent.
-              (let [summaries (into {}
-                                    (keep (fn [s]
-                                            (when-let [sm (fmt-change-summary
-                                                           (get new-st s) (get state-st s))]
-                                              [s sm])))
-                                    exported-srcs)]
-                (when (and (seq exported-srcs)
-                           (or (not incremental?) (seq summaries)))
-                  (binding [*out* *err*]
-                    (println
-                     (str "bone: exported "
-                          (str/join ", "
-                                    (map (fn [s]
-                                           (if-let [summary (get summaries s)]
-                                             (str s " (" summary ")")
-                                             s))
-                                         exported-srcs))
-                          (when-not incremental? " [full re-export]")))))))
+              (notify-exported! exported-srcs incremental? new-st state-st))
             ;; Advance the incremental watermark only after a full,
             ;; unfiltered run: a partial run (single format, -n, or a
             ;; priority/status/topics filter) does not publish everything,

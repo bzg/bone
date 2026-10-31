@@ -301,6 +301,105 @@
                 [?self :report/series ?s])]
          db root-email patch-eid)))
 
+(declare propagate-patch-closure!)
+
+(defn- close-resolved-targets!
+  "Close the still-open `bugs` as :resolved by `email-eid`.  Returns
+  the eids actually closed.  One snapshot is safe: bug-eids are
+  distinct, so closing bug-A doesn't change bug-B's :report/closed."
+  [conn db bugs email-eid]
+  (let [closed-bugs (when (seq bugs)
+                      (set (d/q '[:find [?b ...]
+                                  :in $ [?b ...]
+                                  :where [?b :report/closed _]]
+                                db bugs)))
+        to-close    (remove #(contains? closed-bugs %) bugs)]
+    (doseq [bug-eid to-close]
+      (d/transact! conn [{:db/id bug-eid
+                          :report/closed email-eid
+                          :report/close-reason :resolved}]))
+    to-close))
+
+(defn- supersede-upthread-revisions!
+  "Applying `patch-eid` retires its stale upthread revisions: close
+  them as :superseded, pose the audit relations, and transfer their
+  auto-credits, exactly like an arrival-time auto-supersession would
+  have.  Returns the eids superseded."
+  [conn db patch-eid email-eid]
+  (let [ancestors (open-patch-thread-ancestors db patch-eid)
+        closer    (when (seq ancestors)
+                    (d/pull db [:db/id :email/author-address :email/date-sent]
+                            email-eid))]
+    (doseq [anc ancestors]
+      (d/transact! conn [{:db/id anc
+                          :report/closed email-eid
+                          :report/close-reason :superseded}])
+      (pose-from-email! conn closer {:from-eid anc :to-eid patch-eid
+                                     :kind :supersedes})
+      (pose-from-email! conn closer {:from-eid anc :to-eid patch-eid
+                                     :kind :related-to})
+      (propagate-patch-closure! conn anc email-eid :superseded patch-eid)
+      (log/info "Auto-closed patch"
+                (pr-str (:report/message-id
+                         (d/pull (d/db conn) [:report/message-id] anc)))
+                "(superseded by applied downthread revision)"))
+    ancestors))
+
+(defn- retract-canceled-credits!
+  "Retract the :acked/:owned auto-credits a canceled patch had earned
+  on `bugs`.  Returns the bug eids touched."
+  [conn bugs]
+  (reduce
+   (fn [acc bug-eid]
+     (let [db' (d/db conn)
+           tx  (cond-> []
+                 (auto-credit? db' bug-eid :report/acked)
+                 (into (retract-auto-credit-tx db' bug-eid
+                                               :report/acked :report/acked-address))
+                 (auto-credit? db' bug-eid :report/owned)
+                 (into (retract-auto-credit-tx db' bug-eid
+                                               :report/owned :report/owned-address)))]
+       (if (seq tx)
+         (do (d/transact! conn tx)
+             (conj acc bug-eid))
+         acc)))
+   [] bugs))
+
+(defn- transfer-superseded-ownership!
+  "Hand a superseded patch's :owned auto-credit on `bugs` to
+  `successor-eid`, which also inherits the :resolves link.  :acked is
+  a historical act -- whoever first confirmed the bug remains its
+  acker, even when the resolving patch is replaced.  Returns the bug
+  eids touched."
+  [conn db bugs successor-eid]
+  (let [succ         (d/pull db [{:report/email [:db/id :email/author-address
+                                                 :email/date-sent]}]
+                             successor-eid)
+        succ-eml-eid (some-> succ :report/email :db/id)
+        succ-addr    (some-> succ :report/email :email/author-address)
+        succ-date    (or (some-> succ :report/email :email/date-sent)
+                         (java.util.Date.))]
+    (reduce
+     (fn [acc bug-eid]
+       (let [db' (d/db conn)
+             tx  (when (auto-credit? db' bug-eid :report/owned)
+                   [{:db/id bug-eid
+                     :report/owned succ-eml-eid
+                     :report/owned-address (some-> succ-addr str/lower-case)}])
+             _   (when (seq tx)
+                   (d/transact! conn tx))
+             ;; Successor inherits the :resolves link (truthy iff
+             ;; something changed).
+             posed (pose-if-absent!
+                    conn {:from-eid successor-eid :to-eid bug-eid
+                          :kind :resolves
+                          :setter succ-addr :email-eid succ-eml-eid
+                          :posed-at succ-date})]
+         (if (or (seq tx) posed)
+           (conj acc bug-eid)
+           acc)))
+     [] bugs)))
+
 (defn propagate-patch-closure!
   "Propagate a patch's closure to the bugs/requests it :resolves:
   :resolved closes them; :canceled retracts auto-credits; :superseded
@@ -311,104 +410,15 @@
   every modified target so the incremental export and notifications
   pick them up."
   [conn patch-eid email-eid close-reason successor-eid]
-  (let [db   (d/db conn)
-        bugs (active-targets db patch-eid :resolves)]
-    (case close-reason
-      :resolved
-      ;; One snapshot is safe: bug-eids are distinct, so closing
-      ;; bug-A doesn't change bug-B's :report/closed.
-      (let [closed-bugs (when (seq bugs)
-                          (set (d/q '[:find [?b ...]
-                                      :in $ [?b ...]
-                                      :where [?b :report/closed _]]
-                                    db bugs)))
-            to-close    (remove #(contains? closed-bugs %) bugs)]
-        (doseq [bug-eid to-close]
-          (d/transact! conn [{:db/id bug-eid
-                              :report/closed email-eid
-                              :report/close-reason :resolved}]))
-        (when (seq to-close)
-          (tracking/bump-report-updated! conn to-close))
-        ;; Applying this patch retires its stale upthread revisions:
-        ;; close them as :superseded, pose the audit relations, and
-        ;; transfer their auto-credits, exactly like an arrival-time
-        ;; auto-supersession would have.
-        (let [ancestors (open-patch-thread-ancestors db patch-eid)
-              closer    (when (seq ancestors)
-                          (d/pull db [:db/id :email/author-address
-                                      :email/date-sent]
-                                  email-eid))]
-          (doseq [anc ancestors]
-            (d/transact! conn [{:db/id anc
-                                :report/closed email-eid
-                                :report/close-reason :superseded}])
-            (pose-from-email! conn closer {:from-eid anc :to-eid patch-eid
-                                           :kind :supersedes})
-            (pose-from-email! conn closer {:from-eid anc :to-eid patch-eid
-                                           :kind :related-to})
-            (propagate-patch-closure! conn anc email-eid
-                                    :superseded patch-eid)
-            (log/info "Auto-closed patch"
-                      (pr-str (:report/message-id
-                               (d/pull (d/db conn) [:report/message-id] anc)))
-                      "(superseded by applied downthread revision)"))
-          (when (seq ancestors)
-            (tracking/bump-report-updated! conn ancestors))))
-
-      :canceled
-      (let [touched (reduce
-                     (fn [acc bug-eid]
-                       (let [db' (d/db conn)
-                             tx  (cond-> []
-                                   (auto-credit? db' bug-eid :report/acked)
-                                   (into (retract-auto-credit-tx db' bug-eid
-                                                                 :report/acked :report/acked-address))
-                                   (auto-credit? db' bug-eid :report/owned)
-                                   (into (retract-auto-credit-tx db' bug-eid
-                                                                 :report/owned :report/owned-address)))]
-                         (if (seq tx)
-                           (do (d/transact! conn tx)
-                               (conj acc bug-eid))
-                           acc)))
-                     [] bugs)]
-        (when (seq touched)
-          (tracking/bump-report-updated! conn touched)))
-
-      :superseded
-      ;; Transfer :owned to the successor; :acked is a historical act
-      ;; -- whoever first confirmed the bug remains its acker, even
-      ;; when the resolving patch is replaced.
-      (when successor-eid
-        (let [succ (d/pull db [{:report/email [:db/id :email/author-address
-                                               :email/date-sent]}]
-                           successor-eid)
-              succ-eml-eid (some-> succ :report/email :db/id)
-              succ-addr    (some-> succ :report/email :email/author-address)
-              succ-date    (or (some-> succ :report/email :email/date-sent)
-                               (java.util.Date.))
-              touched (reduce
-                       (fn [acc bug-eid]
-                         (let [db' (d/db conn)
-                               tx  (when (auto-credit? db' bug-eid :report/owned)
-                                     [{:db/id bug-eid
-                                       :report/owned succ-eml-eid
-                                       :report/owned-address
-                                       (some-> succ-addr str/lower-case)}])
-                               _   (when (seq tx)
-                                     (d/transact! conn tx))
-                               ;; Successor inherits the :resolves link
-                               ;; (truthy iff something changed).
-                               posed (pose-if-absent!
-                                      conn {:from-eid successor-eid :to-eid bug-eid
-                                            :kind :resolves
-                                            :setter succ-addr :email-eid succ-eml-eid
-                                            :posed-at succ-date})]
-                           (if (or (seq tx) posed)
-                             (conj acc bug-eid)
-                             acc)))
-                       [] bugs)]
-          (when (seq touched)
-            (tracking/bump-report-updated! conn touched))))
-
-      ;; Other reasons (:expired, etc.) do not propagate.
-      nil)))
+  (let [db      (d/db conn)
+        bugs    (active-targets db patch-eid :resolves)
+        touched (case close-reason
+                  :resolved   (into (vec (close-resolved-targets! conn db bugs email-eid))
+                                    (supersede-upthread-revisions! conn db patch-eid email-eid))
+                  :canceled   (retract-canceled-credits! conn bugs)
+                  :superseded (when successor-eid
+                                (transfer-superseded-ownership! conn db bugs successor-eid))
+                  ;; Other reasons (:expired, etc.) do not propagate.
+                  nil)]
+    (when (seq touched)
+      (tracking/bump-report-updated! conn touched))))

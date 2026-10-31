@@ -12,22 +12,23 @@
 ;; -o is required (the public/<source>/... layout means there is no
 ;; single sensible default).  --dir defaults to the directory of -o.
 
-(require '[clojure.java.io :as io]
-         '[clojure.java.shell]
-         '[clojure.string :as str]
-         '[hiccup2.core :as h]
-         '[taoensso.timbre :as log]
-         '[bone.common :refer [default-labels default-commands close-reasons
-                               resolve-labels-map resolve-commands-map
-                               resolve-command-syntax reproducible-config-str
-                               parse-cli-args format-date-iso bone-schema lead-maintainer]]
-         '[bone.config :refer [load-config load-mailmap db-path build-source-map]]
-         '[bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
-         '[bone.html-bb :refer [set-theme! head-hiccup
-                                footer-css theme-toggle-css bone-footer wrap-js
-                                spit-html theme-toggle-js nav-bar
-                                org-inline parse-org-table
-                                source-feeds]])
+(ns bone-docs
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell]
+            [clojure.string :as str]
+            [hiccup2.core :as h]
+            [taoensso.timbre :as log]
+            [bone.common :refer [default-labels default-commands close-reasons
+                                    resolve-labels-map resolve-commands-map
+                                    resolve-command-syntax reproducible-config-str
+                                    parse-cli-args format-date-iso bone-schema lead-maintainer]]
+            [bone.config :refer [load-config load-mailmap db-path build-source-map]]
+            [bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
+            [bone.html-bb :refer [set-theme! head-hiccup
+                                     footer-css theme-toggle-css bone-footer wrap-js
+                                     spit-html theme-toggle-js nav-bar
+                                     org-inline parse-org-table
+                                     source-feeds]]))
 
 (load-datalevin-pod!)
 
@@ -397,45 +398,50 @@
 ;; Main
 ;; ---------------------------------------------------------------------------
 
-(let [{:keys [out-file out-dir source-name theme]} (parse-cli-args *command-line-args*)
-      config      (load-config)
-      _           (set-theme! (or theme (:theme config)))
-      source-map  (when config (build-source-map config))
-      source-cfg  (get source-map source-name)
-      labels      (if source-cfg (resolve-labels-map source-cfg) default-labels)
-      cmds        (if source-cfg (resolve-commands-map source-cfg) default-commands)
-      prefix      (if (= :strict (resolve-command-syntax source-cfg)) "!" "")
-      _           (when (str/blank? out-file)
-                    (binding [*out* *err*]
-                      (log/error "bone-docs.clj requires -o <file>"))
-                    (System/exit 2))
-      effective-dir (or out-dir (.getParent (io/file out-file)))
-      ;; Load DB for maintainer names
-      conn        (d/get-conn (db-path config) bone-schema {:wal? false})
-      ;; try/finally so the connection is closed even when the template
-      ;; slurp or rendering throws (same pattern as the other scripts).
-      html        (try
-                    (let [db          (d/db conn)
-                          sections    (list (maintainers-section db source-name)
-                                            (configuration-section config source-name))
-                          org-text    (-> (slurp "resources/docs-tpl.org")
-                                          (substitute-version (bone-version))
-                                          (substitute-source-links source-cfg)
-                                          (substitute-template labels cmds prefix))
-                          body-html   (org->html org-text)
-                          has-ical?   (.exists (io/file effective-dir "events"
-                                                        "announcements.ics"))]
-                      (docs-page body-html sections {:ical has-ical?
-                                            :website (:website source-cfg)
-                                            :source source-name
-                                            :feeds (source-feeds
-                                                    (str (io/file effective-dir "reports"))
-                                                    source-name (:base-url source-cfg))}))
-                    (finally
-                      (try (d/close conn) (catch Exception _ nil))))]
-  (io/make-parents out-file)
-  (spit-html out-file html)
-  ;; Routine progress on stdout (captured in the export log), not stderr:
-  ;; docs.html is now regenerated only on structural changes, and the cron
-  ;; notification is driven by an explicit summary line in bone-export.clj.
-  (log/info "Wrote" out-file))
+(defn -main [& args]
+  (let [{:keys [out-file out-dir source-name theme]} (parse-cli-args args)
+        config      (load-config)
+        _           (set-theme! (or theme (:theme config)))
+        source-map  (when config (build-source-map config))
+        source-cfg  (get source-map source-name)
+        labels      (if source-cfg (resolve-labels-map source-cfg) default-labels)
+        cmds        (if source-cfg (resolve-commands-map source-cfg) default-commands)
+        prefix      (if (= :strict (resolve-command-syntax source-cfg)) "!" "")
+        _           (when (str/blank? out-file)
+                      (binding [*out* *err*]
+                        (log/error "bone-docs.clj requires -o <file>"))
+                      (System/exit 2))
+        effective-dir (or out-dir (.getParent (io/file out-file)))
+        ;; Load DB for maintainer names
+        conn        (d/get-conn (db-path config) bone-schema {:wal? false})
+        ;; try/finally so the connection is closed even when the template
+        ;; slurp or rendering throws (same pattern as the other scripts).
+        html        (try
+                      (let [db          (d/db conn)
+                            sections    (list (maintainers-section db source-name)
+                                              (configuration-section config source-name))
+                            org-text    (-> (slurp "resources/docs-tpl.org")
+                                            (substitute-version (bone-version))
+                                            (substitute-source-links source-cfg)
+                                            (substitute-template labels cmds prefix))
+                            body-html   (org->html org-text)
+                            has-ical?   (.exists (io/file effective-dir "events"
+                                                          "announcements.ics"))]
+                        (docs-page body-html sections {:ical has-ical?
+                                              :website (:website source-cfg)
+                                              :source source-name
+                                              :feeds (source-feeds
+                                                      (str (io/file effective-dir "reports"))
+                                                      source-name (:base-url source-cfg))}))
+                      (finally
+                        (try (d/close conn) (catch Exception _ nil))))]
+    (io/make-parents out-file)
+    (spit-html out-file html)
+    ;; Routine progress on stdout (captured in the export log), not stderr:
+    ;; docs.html is now regenerated only on structural changes, and the cron
+    ;; notification is driven by an explicit summary line in bone-export.clj.
+    (log/info "Wrote" out-file)))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))

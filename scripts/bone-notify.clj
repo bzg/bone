@@ -19,18 +19,19 @@
 ;;   bb notify --dry-run -- show what would be sent without sending
 ;;   bb notify --debug   -- verbose diagnostics
 
-(require '[babashka.pods :as pods]
-         '[clojure.string :as str]
-         '[clojure.edn :as edn]
-         '[clojure.java.io :as io]
-         '[taoensso.timbre :as log]
-         '[bone.common :refer [get-header-values format-date format-date-iso
-                               report-priority report-descendant-count
-                               bone-schema mid-hash
-                               failures-file-path read-failures-file
-                               reason-labels]]
-         '[bone.config :refer [load-config db-path build-source-map]]
-         '[bone.common-bb :refer [load-datalevin-pod! all-reports]])
+(ns bone-notify
+  (:require [babashka.pods :as pods]
+            [clojure.string :as str]
+            [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [taoensso.timbre :as log]
+            [bone.common :refer [get-header-values format-date format-date-iso
+                                    report-priority report-descendant-count
+                                    bone-schema mid-hash
+                                    failures-file-path read-failures-file
+                                    reason-labels]]
+            [bone.config :refer [load-config db-path build-source-map]]
+            [bone.common-bb :refer [load-datalevin-pod! all-reports]]))
 
 (load-datalevin-pod!)
 (pods/load-pod 'tzzh/mail "0.0.3")
@@ -324,9 +325,8 @@
     (log/debug "SKIPPED" email
                "-- notifications disabled for source" (:source s))))
 
-;; Run only when invoked as a script, not when the file is loaded.
-(when (= (System/getProperty "babashka.file") *file*)
-  (let [flags       (set *command-line-args*)
+(defn -main [& args]
+  (let [flags       (set args)
         dry-run?    (flags "--dry-run")
         debug?      (flags "--debug")
         _           (when debug? (log/merge-config! {:min-level :debug}))
@@ -423,3 +423,7 @@
         (when (pos? @failed)
           (log/error @failed "notification(s) could not be sent.")
           (System/exit 1))))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))

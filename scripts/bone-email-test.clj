@@ -10,9 +10,10 @@
 ;;   bb test-smtp --send             -- actually send the test email
 ;;   bb test-smtp --to me@example.com --send -- send to a specific address
 
-(require '[babashka.pods :as pods]
-         '[clojure.string :as str]
-         '[bone.config :refer [load-config]])
+(ns bone-email-test
+  (:require [babashka.pods :as pods]
+            [clojure.string :as str]
+            [bone.config :refer [load-config]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Config validation
@@ -47,8 +48,8 @@
 ;; Main
 ;; ---------------------------------------------------------------------------
 
-(when (= (System/getProperty "babashka.file") *file*)
-  (let [args     (vec *command-line-args*)
+(defn -main [& args]
+  (let [args     (vec args)
         send?    (some #{"--send"} args)
         to-idx   (.indexOf args "--to")
         to-arg   (when (nat-int? to-idx) (get args (inc to-idx)))
@@ -124,3 +125,7 @@
                   (catch Exception e
                     (println (str "\n✗ Failed to send: " (or (.getMessage e) (pr-str e))))
                     (System/exit 1)))))))))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))

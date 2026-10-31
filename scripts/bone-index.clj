@@ -15,17 +15,18 @@
 ;; there is no single sensible default).  --dir defaults to the
 ;; directory of --json.
 
-(require '[cheshire.core :as json]
-         '[clojure.java.io :as io]
-         '[clojure.string :as str]
-         '[hiccup2.core :as h]
-         '[taoensso.timbre :as log]
-         '[bone.common :refer [parse-cli-args escape-script-payload]]
-         '[bone.html-bb :refer [set-theme! head-hiccup page-title source-feeds
-                                footer-css theme-toggle-css
-                                bone-footer wrap-js spit-html
-                                noscript-banner wrap-template
-                                theme-toggle-js nav-bar]])
+(ns bone-index
+  (:require [cheshire.core :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [hiccup2.core :as h]
+            [taoensso.timbre :as log]
+            [bone.common :refer [parse-cli-args escape-script-payload]]
+            [bone.html-bb :refer [set-theme! head-hiccup page-title source-feeds
+                                     footer-css theme-toggle-css
+                                     bone-footer wrap-js spit-html
+                                     noscript-banner wrap-template
+                                     theme-toggle-js nav-bar]]))
 
 ;; ---------------------------------------------------------------------------
 ;; Config
@@ -324,23 +325,28 @@
 ;; Main
 ;; ---------------------------------------------------------------------------
 
-(let [{:keys [out-file json-file out-dir theme page-size html-columns html-columns-sort]}
-      (parse-cli-args *command-line-args*)
-      _            (when theme (set-theme! theme))
-      columns      (parse-columns html-columns)
-      columns-sort (resolve-columns-sort html-columns-sort)]
-  (when (or (str/blank? json-file) (str/blank? out-file))
-    (binding [*out* *err*]
-      (log/error "bone-index.clj requires --json <file> and -o <file>"))
-    (System/exit 2))
-  (let [;; getParent is nil for a bare filename: default to ".".
-        reports-dir (or out-dir (.getParent (clojure.java.io/file json-file)) ".")]
-    (io/make-parents out-file)
-    (let [envelope (json/parse-string (slurp json-file))
-          n-open   (count (get envelope "reports"))
-          html     (index-page reports-dir envelope page-size columns columns-sort)]
-      (spit-html out-file html)
-      ;; Log to stdout (not stderr): this is routine progress, captured in
-      ;; the export log, not a cron-mail trigger.  Real errors still go to
-      ;; stderr above.
-      (log/info "Wrote shell" out-file "(" n-open "open reports in JSON)"))))
+(defn -main [& args]
+  (let [{:keys [out-file json-file out-dir theme page-size html-columns html-columns-sort]}
+        (parse-cli-args args)
+        _            (when theme (set-theme! theme))
+        columns      (parse-columns html-columns)
+        columns-sort (resolve-columns-sort html-columns-sort)]
+    (when (or (str/blank? json-file) (str/blank? out-file))
+      (binding [*out* *err*]
+        (log/error "bone-index.clj requires --json <file> and -o <file>"))
+      (System/exit 2))
+    (let [;; getParent is nil for a bare filename: default to ".".
+          reports-dir (or out-dir (.getParent (clojure.java.io/file json-file)) ".")]
+      (io/make-parents out-file)
+      (let [envelope (json/parse-string (slurp json-file))
+            n-open   (count (get envelope "reports"))
+            html     (index-page reports-dir envelope page-size columns columns-sort)]
+        (spit-html out-file html)
+        ;; Log to stdout (not stderr): this is routine progress, captured in
+        ;; the export log, not a cron-mail trigger.  Real errors still go to
+        ;; stderr above.
+        (log/info "Wrote shell" out-file "(" n-open "open reports in JSON)")))))
+
+;; Run only when invoked as a script, not when the file is loaded.
+(when (= (System/getProperty "babashka.file") *file*)
+  (apply -main *command-line-args*))
