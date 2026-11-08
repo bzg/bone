@@ -869,10 +869,10 @@
                           :email/body-text "Related-to: <ann@x>\n"}]
           (commands/apply-commands! conn bug-eid :bug cmd-email
                                     {} {} :direct nil)
-          (let [rels (get-relations (d/db conn) bug-eid)]
-            (is (some #(= :related-to (:kind %)) rels)
-                "bug<->announcement related-to allowed")
-            (is (some? ann-eid))))
+          (is (some #(and (= :related-to (:kind %))
+                          (= #{bug-eid ann-eid} #{(:from %) (:to %)}))
+                    (get-relations (d/db conn) bug-eid))
+              "bug<->announcement related-to posted between the two"))
         (finally (close-and-cleanup! setup))))))
 
 (deftest related-to-directive-multiple-targets

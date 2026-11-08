@@ -1456,8 +1456,8 @@
                        :attachment/data "diff --git a/feature.el b/feature.el\n--- a/feature.el\n+++ b/feature.el\n@@ -1,3 +1,3 @@\n-old\n+newest\n"}]}
 
  ;; =========================================================================
- ;; 120 -- Inline diff in a fresh thread (no label, no In-Reply-To):
- ;; fallback rule detects :patch from content.
+ ;; 120 -- [PATCH] opening a fresh thread, errors-v1.patch attached;
+ ;; 121 re-sends it as errors-v2.patch (see below).
  ;; =========================================================================
  {:email/id        "120"
   :email/source      "public-list"

@@ -191,12 +191,10 @@
                     db)
         sorted (sort-by #(or (:email/ingested-at %) (:email/date-sent %) (java.util.Date. 0))
                         emails)]
+    ;; No catch: a fixture that throws must fail the test, not print.
     (doseq [{eid :db/id} sorted]
-      (let [email (d/pull (d/db conn) digest/email-pull-pattern eid)]
-        (try
-          (digest/process-email! conn source-map sources email)
-          (catch Exception e
-            (println "Error processing" (:email/message-id email) (.getMessage e))))))))
+      (digest/process-email! conn source-map sources
+                             (d/pull (d/db conn) digest/email-pull-pattern eid)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests
@@ -780,8 +778,9 @@
             (is (= :patch (:report/type r119)))
             (is (nil? (:report/closed r119)) "latest patch should remain open")))
 
-        ;; --- Emails 120-121: Inline diff supersession (no [PATCH] tag) ---
-        (testing "Inline diff 120 superseded by same-subject reply 121"
+        ;; --- Emails 120-121: version-suffixed attachment names (-v1, -v2)
+        ;; are the same patch for supersession, not a content veto ---
+        (testing "Patch 120 superseded by same-subject reply 121"
           (let [r120 (get-report db "<120@test.org>")]
             (is (= :patch (:report/type r120)))
             (is (some? (:report/closed r120)) "first diff should be closed")
@@ -789,7 +788,7 @@
             (is (= "<121@test.org>"
                     (some-> (superseded-by-target r120) :report/message-id)))))
 
-        (testing "Inline diff 121 is open (latest)"
+        (testing "Patch 121 is open (latest)"
           (let [r121 (get-report db "<121@test.org>")]
             (is (= :patch (:report/type r121)))
             (is (nil? (:report/closed r121)) "latest diff should remain open")))
