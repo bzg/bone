@@ -1006,6 +1006,70 @@
     (log/info "Cleared pending flag on" (:email/message-id email)))
   (retry-pending-in-shared-thread! conn email source-map sources))
 
+(declare process-email!)
+
+(defn- defer-pending!
+  "Phases 3-4 deferred: flag the email pending, index it under its
+  ancestors, and re-run it at once when an ancestor arrived meanwhile.
+  `opts` are `process-email!`'s."
+  [conn source-map sources email opts]
+  (let [eid        (:db/id email)
+        message-id (:email/message-id email)]
+    (d/transact! conn [{:db/id eid
+                        :email/pending-thread? true
+                        :email/digested-at (Date.)}])
+    (pending-index-add! conn eid (:email/ancestor-mid-hashes email))
+    (log/info "Pending:" message-id "-- no digested ancestor in DB"
+              "(in-reply-to" (:email/in-reply-to email) ")")
+    ;; An ancestor digested after the anchor check may have run its
+    ;; rescue before this email entered the pending index, and missed
+    ;; it: check again now that it is indexed.
+    (when (thread-anchorable? (d/db conn) email)
+      (log/info "Ancestor arrived meanwhile, re-processing" message-id)
+      (process-email! conn source-map sources
+                      (d/pull (d/db conn) email-pull-pattern eid)
+                      opts))))
+
+(defn- process-anchored!
+  "Phases 3-4 of an email whose thread is anchored: threading,
+  commands, post-creation hooks, then the digested stamp and the
+  rescue of pending siblings.  `ctx` is what Phases 1-2 of
+  `process-email!` established: :email, :source-name, :delivery,
+  :via-channel?, :rroles, :report-eid, :report-info, :was-pending?."
+  [conn source-map sources
+   {:keys [email source-name delivery via-channel? rroles report-eid report-info
+           was-pending?]}]
+  (let [db         (d/db conn)
+        eid        (:db/id email)
+        message-id (:email/message-id email)
+        from-addr  (:email/author-address email)
+        {parent-eids :all nearest-eids :nearest} (thread-lookup email db)
+        ;; Recover the report-eid of an interrupted pass (pending
+        ;; retry, or crash during Phases 3-4 of a pending email) so the
+        ;; Phase 4 hooks still run.  Safe: process-email! only runs on
+        ;; emails whose Phase 4 has not completed.
+        report-eid (or report-eid (lookup/report-eid db message-id))]
+    ;; Channel gating: an email that did not reach the source's public
+    ;; channel is excluded from both threading and command dispatch --
+    ;; private replies cannot annotate a public thread.
+    (when via-channel?
+      (when (seq parent-eids)
+        (attach-as-descendant! conn eid email from-addr parent-eids))
+      (dispatch-commands! conn email report-eid (:type report-info)
+                          nearest-eids from-addr source-name source-map
+                          rroles delivery)
+      ;; Pure replies only: an email that created a report (e.g. a
+      ;; patch) must not leak its own trailers onto its thread parents.
+      (when (nil? report-eid)
+        (collect-trailers! conn email)))
+    ;; Phase 4: post-creation hooks (plan is pure, execution is effectful)
+    (when report-eid
+      (let [patches (detect/build-patch-entities email)
+            plan    (post-creation-plan report-info parent-eids patches)]
+        (run-post-creation-hooks! conn report-eid eid email from-addr source-name
+                                  report-info parent-eids nearest-eids patches plan)))
+    (mark-digested-and-rescue! conn eid email was-pending? source-map sources)))
+
 (defn process-email!
   "Process a stored email: classify source, detect report, thread,
   apply commands, manage series.
@@ -1017,86 +1081,40 @@
     :resolved-source -- pre-classified {:src-name :delivery}, skips re-resolving."
   ([conn source-map sources email] (process-email! conn source-map sources email {}))
   ([conn source-map sources email {:keys [force-thread? resolved-source] :as opts}]
-  (let [message-id   (:email/message-id email)
-        eid          (:db/id email)
-        from-addr    (:email/author-address email)
-        was-pending? (:email/pending-thread? email)
-        [source-name email delivery] (resolve-email-source! conn email sources resolved-source)]
-    (if-not source-name
-      (log/debug "No matching source for" message-id "-- skipping")
-      (let [source-cfg   (when-let [cfg (get source-map source-name)]
-                             (periods/source-cfg-at-date cfg (:email/date-sent email)))
-            via-channel? (common/sent-via-source-channel? delivery source-cfg)
-            rroles       (roles/get-tenures (d/db conn) source-name)]
-
-        ;; Phase 1: apply controls (may mutate roles).  Phases 1-2 run
-        ;; before the pending check, so a pending email already went
-        ;; through them on arrival: replaying the controls would record
-        ;; their denials a second time.
-        (when-not was-pending?
-          (apply-controls! conn rroles source-name source-cfg from-addr email via-channel?))
-
-        ;; Phase 2: detect and maybe create report (re-fetch roles after controls)
-        (let [rroles      (roles/get-tenures (d/db conn) source-name)
-              [report-eid report-info]
-              (maybe-create-report! conn eid message-id email from-addr
-                                    source-name source-cfg via-channel? rroles
-                                    was-pending?)
-              db           (d/db conn)]
-
-          (if (or force-thread? (thread-anchorable? db email))
-            ;; --- Normal path: threading, commands, post-creation hooks ---
-            (do
-              (let [{parent-eids :all nearest-eids :nearest} (thread-lookup email db)
-                    ;; Recover the report-eid of an interrupted pass
-                    ;; (pending retry, or crash during Phases 3-4 of a
-                    ;; pending email) so the Phase 4 hooks still run.
-                    ;; Safe: process-email! only runs on emails whose
-                    ;; Phase 4 has not completed.
-                    report-eid   (or report-eid
-                                     (lookup/report-eid db message-id))]
-
-                ;; Channel gating: an email that did not reach the
-                ;; source's public channel is excluded from both
-                ;; threading and command dispatch -- private replies
-                ;; cannot annotate a public thread.
-                (when via-channel?
-                  (when (seq parent-eids)
-                    (attach-as-descendant! conn eid email from-addr parent-eids))
-                  (dispatch-commands! conn email report-eid (:type report-info)
-                                      nearest-eids from-addr source-name source-map
-                                      rroles delivery)
-                  ;; Pure replies only: an email that created a report
-                  ;; (e.g. a patch) must not leak its own trailers onto
-                  ;; its thread parents.
-                  (when (nil? report-eid)
-                    (collect-trailers! conn email)))
-
-                ;; Phase 4: post-creation hooks (plan is pure, execution is effectful)
-                (when report-eid
-                  (let [patches (detect/build-patch-entities email)
-                        plan    (post-creation-plan report-info parent-eids patches)]
-                    (run-post-creation-hooks! conn report-eid eid email from-addr source-name report-info
-                                              parent-eids nearest-eids patches plan)))
-
-                (mark-digested-and-rescue! conn eid email was-pending? source-map sources)))
-
-            ;; --- Pending path: defer threading and commands ---
-            (do (d/transact! conn [{:db/id eid
-                                    :email/pending-thread? true
-                                    :email/digested-at (Date.)}])
-                (pending-index-add! conn eid (:email/ancestor-mid-hashes email))
-                (log/info "Pending:" message-id "-- no digested ancestor in DB"
-                          "(in-reply-to" (:email/in-reply-to email) ")")
-                ;; An ancestor digested after the anchor check above
-                ;; may have run its rescue before this email entered
-                ;; the pending index, and missed it: check again now
-                ;; that it is indexed.
-                (when (thread-anchorable? (d/db conn) email)
-                  (log/info "Ancestor arrived meanwhile, re-processing" message-id)
-                  (process-email! conn source-map sources
-                                  (d/pull (d/db conn) email-pull-pattern eid)
-                                  opts))))))))))
+   (let [message-id   (:email/message-id email)
+         eid          (:db/id email)
+         from-addr    (:email/author-address email)
+         was-pending? (:email/pending-thread? email)
+         [source-name email delivery] (resolve-email-source! conn email sources resolved-source)]
+     (if-not source-name
+       (log/debug "No matching source for" message-id "-- skipping")
+       (let [source-cfg   (when-let [cfg (get source-map source-name)]
+                            (periods/source-cfg-at-date cfg (:email/date-sent email)))
+             via-channel? (common/sent-via-source-channel? delivery source-cfg)
+             rroles       (roles/get-tenures (d/db conn) source-name)]
+         ;; Phase 1: apply controls (may mutate roles).  Phases 1-2 run
+         ;; before the pending check, so a pending email already went
+         ;; through them on arrival: replaying the controls would record
+         ;; their denials a second time.
+         (when-not was-pending?
+           (apply-controls! conn rroles source-name source-cfg from-addr email via-channel?))
+         ;; Phase 2: detect and maybe create report (re-fetch roles after controls)
+         (let [rroles (roles/get-tenures (d/db conn) source-name)
+               [report-eid report-info]
+               (maybe-create-report! conn eid message-id email from-addr
+                                     source-name source-cfg via-channel? rroles
+                                     was-pending?)]
+           (if (or force-thread? (thread-anchorable? (d/db conn) email))
+             (process-anchored! conn source-map sources
+                                {:email        email
+                                 :source-name  source-name
+                                 :delivery     delivery
+                                 :via-channel? via-channel?
+                                 :rroles       rroles
+                                 :report-eid   report-eid
+                                 :report-info  report-info
+                                 :was-pending? was-pending?})
+             (defer-pending! conn source-map sources email opts))))))))
 
 ;; Message-ids being digested, so that two watch threads never digest
 ;; one email at once (:owned).  A pending email found owned is not
