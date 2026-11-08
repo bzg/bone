@@ -31,3 +31,14 @@
   "Bump :meta/last-modified without targeting a specific report."
   [conn]
   (d/transact! conn [{:meta/ident meta-ident :meta/last-modified (Date.)}]))
+
+(defn ensure-created-at!
+  "Stamp :meta/created-at once, the first time the database is opened:
+  its birth.  bb notify mails no command failure whose email predates
+  it, so a --fresh replay stays silent."
+  [conn]
+  (let [db (d/db conn)]
+    (when-not (some->> (d/entid db [:meta/ident meta-ident])
+                       (d/pull db [:meta/created-at])
+                       :meta/created-at)
+      (d/transact! conn [{:meta/ident meta-ident :meta/created-at (Date.)}]))))

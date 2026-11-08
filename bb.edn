@@ -30,9 +30,9 @@
                           (rm-rf dir)
                           (println "Deleted classes/")))
                         ;; Drop the incremental watermark so the next
-                        ;; export rebuilds everything.  .failures.edn
-                        ;; and .last-notify-failures.edn are owned by
-                        ;; the daemon / notifier and survive.
+                        ;; export rebuilds everything.
+                        ;; .last-notify-failures.edn is owned by the
+                        ;; notifier and survives.
                         (let [f (clojure.java.io/file "data/.last-export")]
                          (when (.exists f)
                           (.delete f)

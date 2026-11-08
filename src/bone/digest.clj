@@ -633,16 +633,18 @@
                                   body-text (:email/date-sent email) strict?))))
 
 (defn- record-creation-denial!
-  "Record a denied report-creation attempt.  :report-mid is empty
-  (the report wasn't created) so notifications render the subject.
-  Audience :maintainers so the lead sees the attempt."
-  [source-name from-addr email report-info reason]
+  "Record a denied report-creation attempt.  No :report-eid (the report
+  wasn't created): the subject rides in the command text so the
+  notification can show it.  Audience :maintainers so the lead sees
+  the attempt."
+  [conn source-name from-addr email report-info reason]
   (when from-addr
     (commands/record-failure!
-     {:source     source-name
+     {:conn       conn
+      :source     source-name
       :from-addr  from-addr
       :email-date (:email/date-sent email)
-      :report-mid ""
+      :email-eid  (:db/id email)
       :reason     :insufficient-scope
       :audience   :maintainers
       :command    (str "Create " (name (:type report-info))
@@ -683,7 +685,7 @@
       (do (log/warn "Denied:" from-addr "cannot create" (name (:type report-info))
                     (str "(" (denial-reason-labels decision) ")"))
           (when-not replay?
-            (record-creation-denial! source-name from-addr email report-info decision))
+            (record-creation-denial! conn source-name from-addr email report-info decision))
           [nil report-info])
 
       ;; nil -- no report detected

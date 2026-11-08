@@ -10,8 +10,6 @@
             [bone.roles :as roles]
             [bone.test-helpers :as th]))
 
-(use-fixtures :once th/with-temp-failures-file)
-
 ;; fresh-conn registers each connection here so the :each fixture can
 ;; close it and delete its /tmp directory -- without it every run leaked
 ;; one directory and one open connection per call site.

@@ -159,6 +159,9 @@
  :meta/ident         {:db/valueType :db.type/string
                       :db/unique    :db.unique/identity}
  :meta/last-modified {:db/valueType :db.type/instant}
+ ;; When this database was first opened.  bb notify mails no command
+ ;; failure whose email predates it: a --fresh replay stays silent.
+ :meta/created-at    {:db/valueType :db.type/instant}
 
  ;; --- Votes (one entity per voter per report) ---
  :vote/key    {:db/valueType :db.type/string
@@ -167,6 +170,24 @@
  :vote/email  {:db/valueType :db.type/ref}
  :vote/value  {:db/valueType :db.type/keyword}     ;; :up :down :null
  :vote/voter  {:db/valueType :db.type/string}
+
+ ;; --- Command failures (one entity per refused command) ---
+ ;; Derived from the mail like votes and relations: rebuilt by a --fresh
+ ;; replay, idempotent on a re-digest through :failure/key.  Enumerate
+ ;; them on :failure/recorded-at, never by a d/q on the unique key.
+ :failure/key         {:db/valueType :db.type/string
+                       :db/unique    :db.unique/identity}  ;; sha256 of source|from|email|reason|command
+ :failure/source      {:db/valueType :db.type/string}
+ :failure/from        {:db/valueType :db.type/string}     ;; lower-cased sender
+ :failure/date        {:db/valueType :db.type/instant}    ;; the email's Date:
+ ;; Wall-clock time of the digest: bb notify watermarks on this, not on
+ ;; :failure/date -- a delayed or pending email must still be notified.
+ :failure/recorded-at {:db/valueType :db.type/instant}
+ :failure/reason      {:db/valueType :db.type/keyword}    ;; labels in bone.export/reason-labels
+ :failure/command     {:db/valueType :db.type/string}
+ :failure/audience    {:db/valueType :db.type/keyword}    ;; :author or :maintainers
+ :failure/email       {:db/valueType :db.type/ref}        ;; the refusing email, when known
+ :failure/report      {:db/valueType :db.type/ref}        ;; the targeted report, when it exists
 
  :report/series  {:db/valueType :db.type/ref}
  :report/patches {:db/valueType   :db.type/ref

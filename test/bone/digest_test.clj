@@ -7,18 +7,17 @@
   Ported from test/bone-digest-test.clj (bb version)."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [clojure.test :refer [are deftest is testing use-fixtures]]
+            [clojure.test :refer [are deftest is testing]]
             [datalevin.core :as d]
             [bone.commands :as commands]
             [bone.common :as common]
             [bone.lookup :as lookup]
             [bone.digest :as digest]
             [bone.roles :as roles]
+            [bone.tracking :as tracking]
             [bone.test-helpers :as th])
   (:import [java.text SimpleDateFormat]
            [java.util TimeZone]))
-
-(use-fixtures :once th/with-temp-failures-file)
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -3005,6 +3004,64 @@
                                :body "Closed.\n"}))
           (is (empty? @recorded)
               "no :insufficient-scope failure for a no-op word on a closed report"))
+        (finally
+          (teardown! ctx))))))
+
+(deftest failures-live-in-the-database
+  (testing "A refused command is one :failure entity, idempotent on a re-digest."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          smap     (assoc-in source-map ["direct" :commands]
+                             {:closed {:scope :maintainer}})
+          process! (fn [m]
+                     (d/transact! conn [(assoc m :email/source "direct")])
+                     (let [eid (lookup/email-eid (d/db conn) (:email/message-id m))]
+                       (digest/process-email!
+                        conn smap sources
+                        (d/pull (d/db conn) digest/email-pull-pattern eid))))
+          failures (fn []
+                     (map first (d/q '[:find (pull ?f [* {:failure/report [:report/message-id]}
+                                                       {:failure/email [:db/id :email/message-id]}])
+                                       :where [?f :failure/recorded-at]]
+                                     (d/db conn))))]
+      (try
+        (process! (mk-email {:mid "<db-bug@test.org>"
+                             :subject "[BUG] crash"
+                             :from "user@test.org"
+                             :date #inst "2026-05-01T10:00:00"
+                             :body "broken\n"}))
+        (process! (mk-email {:mid "<db-close@test.org>"
+                             :subject "Re: [BUG] crash"
+                             :from "user@test.org"
+                             :date #inst "2026-05-01T11:00:00"
+                             :in-reply-to "<db-bug@test.org>"
+                             :body "Closed.\n"}))
+        (let [[f :as all] (failures)]
+          (is (= 1 (count all)))
+          (is (= :insufficient-scope (:failure/reason f)))
+          (is (= :maintainers (:failure/audience f)))
+          (is (= "direct" (:failure/source f)))
+          (is (= "user@test.org" (:failure/from f)))
+          (is (= "Closed." (:failure/command f)))
+          (is (= #inst "2026-05-01T11:00:00" (:failure/date f)))
+          (is (inst? (:failure/recorded-at f)))
+          (is (= "<db-bug@test.org>" (:report/message-id (:failure/report f))))
+          (is (= "<db-close@test.org>" (:email/message-id (:failure/email f))))
+          ;; The same refusal recorded again is a no-op.
+          (commands/record-failure! {:conn conn :source "direct"
+                                     :from-addr "User@test.org"
+                                     :email-date #inst "2026-05-01T11:00:00"
+                                     :email-eid (:db/id (:failure/email f))
+                                     :reason :insufficient-scope
+                                     :command "Closed." :audience :maintainers})
+          (is (= 1 (count (failures)))))
+        (testing ":meta/created-at is stamped once"
+          (tracking/ensure-created-at! conn)
+          (let [born (fn [] (:meta/created-at
+                             (d/pull (d/db conn) [:meta/created-at] [:meta/ident "global"])))
+                t0   (born)]
+            (is (inst? t0))
+            (tracking/ensure-created-at! conn)
+            (is (= t0 (born)))))
         (finally
           (teardown! ctx))))))
 

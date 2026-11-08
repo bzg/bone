@@ -26,8 +26,7 @@
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
             [bone.common :refer [get-header-values format-date-iso
-                                    report-priority bone-schema mid-hash
-                                    failures-file-path read-failures-file]]
+                                    report-priority bone-schema]]
             [bone.config :refer [load-config db-path build-source-map]]
             [bone.export :refer [format-date report-descendant-count reason-labels]]
             [bone.common-bb :refer [load-datalevin-pod! all-reports]]))
@@ -74,19 +73,37 @@
 ;; Failure queries
 ;; ---------------------------------------------------------------------------
 
+(def ^:private failure-pull
+  '[:failure/source :failure/from :failure/date :failure/recorded-at
+    :failure/reason :failure/command :failure/audience
+    {:failure/report [{:report/email [:email/subject]}]}])
+
+(defn- db-created-at
+  "When the database was first opened (:meta/created-at), or nil."
+  [db]
+  (some->> (d/entid db [:meta/ident "global"])
+           (d/pull db [:meta/created-at])
+           :meta/created-at))
+
 (defn- load-failures
-  "Read the failures file, returning a vector of failure maps."
-  []
-  (read-failures-file failures-file-path
-                      (fn [e]
-                        (log/warn "Could not parse" failures-file-path ":"
-                                  (.getMessage e)))))
+  "The command failures whose email postdates the database.  Those
+  from before are history -- mailed by the previous incarnation, or
+  nobody's business -- so a --fresh replay mails nothing.  Enumerated
+  on :failure/recorded-at, never by a d/q on the unique key."
+  [db]
+  (let [^java.util.Date born (db-created-at db)]
+    (->> (d/q (list :find (list 'pull '?f failure-pull)
+                    :where '[?f :failure/recorded-at])
+              db)
+         (map first)
+         (filter (fn [{:failure/keys [^java.util.Date date]}]
+                   (or (nil? born) (and date (.after date born))))))))
 
 (defn- failures-for-subscriber
-  "Return failures on `:source` routed to `:email`, posted after `:since`
-  (or all of them if `:since` is nil).
+  "Return failures on `:source` routed to `:email`, recorded after
+  `:since` (or all of them if `:since` is nil).
 
-  Routing is driven by the `:audience` field on each failure entry:
+  Routing is driven by :failure/audience:
   - `:author`      -- shown only to the address that triggered the
                      failure (someone seeing their own typo); default
                      when the field is absent.
@@ -94,29 +111,18 @@
   [all-failures {:keys [email source since]}]
   (let [addr (str/lower-case email)]
     (->> all-failures
-         (filter (fn [{:keys [from audience date recorded-at] src :source}]
+         (filter (fn [{:failure/keys [from audience ^java.util.Date recorded-at]
+                       src :failure/source}]
                    (and (= source src)
                         (or (nil? since)
-                            ;; Watermark on the wall-clock :recorded-at,
-                            ;; not :date (the email's Date: header): a
+                            ;; Watermark on the wall-clock :failure/recorded-at,
+                            ;; not :failure/date (the email's Date: header): a
                             ;; delayed email must still be notified.
-                            ;; Old entries fall back to :date.
-                            (let [^java.util.Date ts (or recorded-at date)]
-                              (and ts (.after ts since))))
+                            (.after recorded-at since))
                         (case (or audience :author)
                           :author      (= addr from)
                           :maintainers true
                           false)))))))
-
-(defn- report-subject-by-mid
-  "Look up the report's email subject from its message-id.  entid +
-  pull, never a d/q value seek on the hash attr (same convention as
-  the JVM-side bone.lookup ns; the pod cannot require it)."
-  [db mid]
-  (when (and mid (not (str/blank? mid)))
-    (when-let [r (d/entid db [:report/message-id-hash (mid-hash mid)])]
-      (-> (d/pull db [{:report/email [:email/subject]}] r)
-          :report/email :email/subject))))
 
 ;; ---------------------------------------------------------------------------
 ;; Report formatting
@@ -138,19 +144,12 @@
   (nil? (:report/owned report)))
 
 (defn- format-failure-line
-  "Format a single command failure as a text line.
-  `subjects` is a pre-loaded {message-id -> subject} map."
-  [subjects failure]
-  (let [date    (format-date (:date failure))
-        reason  (get reason-labels (:reason failure)
-                     (some-> (:reason failure) name))
-        command (:command failure)
-        from    (:from failure)
-        mid     (:report-mid failure)
-        subject (or (get subjects mid) mid)]
-    (str "  [" date "] " command " -- " reason "\n"
-         "    by: " from "\n"
-         "    on: " subject)))
+  "Format a single command failure as a text line."
+  [{:failure/keys [date reason command from report]}]
+  (str "  [" (format-date date) "] " command " -- "
+       (get reason-labels reason (some-> reason name)) "\n"
+       "    by: " from "\n"
+       "    on: " (or (-> report :report/email :email/subject) "(no report)")))
 
 (defn- format-report-line
   "Format a single report as a text line."
@@ -215,25 +214,13 @@
                    (filter unowned?)
                    (filter #(>= (report-priority %) min-priority)))}))
 
-(defn- failure-subjects-map
-  "Build {message-id -> subject} for the message-ids referenced by `failures`."
-  [db failures]
-  (->> failures
-       (map :report-mid)
-       distinct
-       (reduce (fn [m mid]
-                 (if-let [s (report-subject-by-mid db mid)]
-                   (assoc m mid s) m))
-               {})))
-
 (defn- failures-section
   "Build the failures section text, or nil when there are no failures."
-  [db source failures]
+  [source failures]
   (when (seq failures)
-    (let [subjects (failure-subjects-map db failures)]
-      (str "== Failed commands (" source ") ==\n"
-           (str/join "\n\n" (map #(format-failure-line subjects %) failures))
-           "\n"))))
+    (str "== Failed commands (" source ") ==\n"
+         (str/join "\n\n" (map format-failure-line failures))
+         "\n")))
 
 (defn- join-sections
   "Concatenate the non-nil sections with blank-line separators and
@@ -246,8 +233,8 @@
 
 (defn build-email-body
   "Build the notification email body for one (email, subscription) pair.
-  `failures` is a seq of failure maps (from the failures file) to include."
-  [db reports email subscription failures]
+  `failures` is a seq of :failure/* entities to include."
+  [reports email subscription failures]
   (let [source   (:source subscription)
         prefs    (merge {:min-priority 1} subscription)
         relevant (->> (filter-relevant-reports reports prefs)
@@ -257,7 +244,7 @@
     (log/debug "build-email-body for" email (str "(source: " source ")"))
     (log/debug "  total reports:" (count reports) "-- relevant:" (count relevant))
     (join-sections
-     [(failures-section db source failures)
+     [(failures-section source failures)
       (section (str "== Upcoming deadlines -- owned by you (" source ") ==") dl)
       (section (str "== Open bugs/patches/requests owned by you (" source ") ==") owned)
       (section (str "== Unacked & unowned bugs/patches/requests (" source ") ==") unacked)])))
@@ -365,12 +352,12 @@
                 src-map      (build-source-map config)
                 reports      (all-reports db)
                 ;; Watermark candidate, captured BEFORE reading the
-                ;; failures file: a failure written by the daemon
-                ;; between the read and the send may be shown twice on
-                ;; the next run, but is never lost (storing the send
-                ;; time instead would skip it forever).
+                ;; failures: one recorded by the daemon between the
+                ;; read and the send may be shown twice on the next
+                ;; run, but is never lost (storing the send time
+                ;; instead would skip it forever).
                 run-started  (java.util.Date.)
-                all-failures (load-failures)
+                all-failures (load-failures db)
                 pairs        (for [[email subs] subscribers
                                    s             subs]
                                [email s])
@@ -388,7 +375,7 @@
                       failures (failures-for-subscriber
                                 all-failures
                                 {:email email :source source :since since})
-                      body     (build-email-body db reports email subscription failures)]
+                      body     (build-email-body reports email subscription failures)]
                   (if body
                     (do (log/info (if dry-run? "[dry-run]" "")
                                   "Notifying" email (str "(source: " source ")"))

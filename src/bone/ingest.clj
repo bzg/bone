@@ -7,6 +7,7 @@
   (:require [bone.common :as common]
             [bone.ics :as ics]
             [bone.lookup :as lookup]
+            [bone.tracking :as tracking]
             [datalevin.core :as d]
             [clojure.string :as str]
             [taoensso.timbre :as log])
@@ -17,9 +18,12 @@
 ;; Database connection
 ;; ---------------------------------------------------------------------------
 
-(defn connect [db-path]
+(defn connect
+  "Open the database, stamping its birth (:meta/created-at) the first time."
+  [db-path]
   (log/info "Opening Datalevin database at" db-path)
-  (d/get-conn db-path common/bone-schema {:wal? false}))
+  (doto (d/get-conn db-path common/bone-schema {:wal? false})
+    tracking/ensure-created-at!))
 
 (defn close [conn] (d/close conn))
 

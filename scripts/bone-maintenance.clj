@@ -23,7 +23,7 @@
 (ns bone-maintenance
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
-            [bone.common :refer [bone-schema failures-file-path read-failures-file]]
+            [bone.common :refer [bone-schema]]
             [bone.config :refer [load-config db-path build-source-map]]
             [bone.export :refer [parse-cutoff-date format-date reason-labels]]
             [bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]))
@@ -161,17 +161,23 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- show-failures
-  "Display command failures from the failures file, optionally filtered by source."
-  [source-name]
-  (let [all      (read-failures-file failures-file-path)
-        failures (->> all
-                      (filter #(or (nil? source-name) (= source-name (:source %))))
-                      (sort-by :date #(compare %2 %1)))]
+  "Display the command failures recorded in the database, newest
+  first, optionally filtered by source.  Enumerated on
+  :failure/recorded-at, never by a d/q on the unique key."
+  [db source-name]
+  (let [failures (->> (dq (list :find (list 'pull '?f '[:failure/source :failure/from
+                                                        :failure/date :failure/reason
+                                                        :failure/command])
+                                :where '[?f :failure/recorded-at])
+                          db)
+                      (map first)
+                      (filter #(or (nil? source-name) (= source-name (:failure/source %))))
+                      (sort-by :failure/date #(compare %2 %1)))]
     (if (empty? failures)
       (log/info "No command failures found.")
       (do
         (log/info (count failures) "command failure(s)")
-        (doseq [{:keys [from source date reason command]} failures]
+        (doseq [{:failure/keys [from source date reason command]} failures]
           (println (str "  " (format-date date)
                         " | " source
                         " | " from
@@ -200,11 +206,12 @@
                   (log/error "Available:" (str/join ", " (keys source-map)))
                   (System/exit 1))]
     (if failures?
-      ;; --failures only reads the failures EDN file -- no DB connection
-      ;; (nor retention cutoff) needed, so the daemon can keep running.
+      ;; --failures only reads: no retention cutoff, read-only connection.
       (do (when retention
             (log/warn "--retention is ignored with --failures"))
-          (show-failures source-name))
+          (let [conn (d/get-conn dbp bone-schema {:wal? false})]
+            (try (show-failures (d/db conn) source-name)
+                 (finally (try (d/close conn) (catch Exception _ nil))))))
       (let [;; Validated before the connection opens: System/exit here must
             ;; not skip the (finally (d/close conn)) below.
             cutoff (resolve-retention-cutoff retention)

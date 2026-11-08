@@ -1074,10 +1074,13 @@ In operation:
   (subscriber, source) so that =bb notify= does not mail failed-command
   entries again at every run; delete it to replay all current failures
   next time.
-- BONE keeps command failures for the digest and
-  =bb maintenance --failures=, and never mails them to the failing
-  command's author.  Maintainers see all failures with
-  =:audience :maintainers= in their digest.
+- Command failures live in the database, next to the reports they
+  concern, for the digest and =bb maintenance --failures=.  A failure
+  whose email predates the database itself is never mailed: a
+  =--fresh= rebuild replays every refusal of the past without
+  notifying anyone again.  Maintainers see all failures with
+  =:audience :maintainers= in their digest; the failing command's
+  author sees only their own.
 
 ** Logging
 

@@ -4,8 +4,8 @@
 
 (ns bone.common
   "Shared utilities for BONE.  The invariant is: no datalevin dependency,
-  loadable by both JVM and Babashka.  Mostly pure functions, plus a few
-  file readers (read-failures-file...).  Config loading lives in
+  loadable by both JVM and Babashka.  Pure functions, but for the
+  schema read from the classpath.  Config loading lives in
   `bone.config`, iCalendar handling in `bone.ics`, and what only the
   bb scripts need in `bone.export`."
   (:require [clojure.string :as str]
@@ -24,26 +24,6 @@
 
 (def bone-schema
   (edn/read-string (slurp (io/resource "bone-schema.edn"))))
-
-(def failures-file-path
-  "Shared command-failures EDN file: JVM writes, bb scripts read.
-   Kept under data/ so the public/ directory only holds files that
-   are safe to serve."
-  "data/.failures.edn")
-
-(defn read-failures-file
-  "Read the failures EDN file at `path`, returning a vector ([] if
-  missing or unparseable).  `on-error` is invoked with the exception
-  on parse failure."
-  ([path] (read-failures-file path nil))
-  ([path on-error]
-   (let [f (io/file path)]
-     (if (.exists f)
-       (try (edn/read-string (slurp f))
-            (catch Exception e
-              (when on-error (on-error e))
-              []))
-       []))))
 
 ;; ---------------------------------------------------------------------------
 ;; Pure utilities

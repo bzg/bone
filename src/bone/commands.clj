@@ -5,7 +5,6 @@
 (ns bone.commands
   "Unified command detection, resolution, and application."
   (:require [clojure.string :as str]
-            [clojure.java.io :as io]
             [datalevin.core :as d]
             [taoensso.timbre :as log]
             [bone.common :as common]
@@ -19,8 +18,7 @@
             [bone.periods :as periods]
             [bone.relations :as rel]
             [bone.tracking :as tracking])
-  (:import [java.nio.file AtomicMoveNotSupportedException Files StandardCopyOption]
-           [java.time LocalDate ZoneOffset]
+  (:import [java.time LocalDate ZoneOffset]
            [java.util Date]))
 
 ;; ---------------------------------------------------------------------------
@@ -247,73 +245,45 @@
          vec)))
 
 ;; ---------------------------------------------------------------------------
-;; Command failure recording (file-based)
+;; Command failure recording
 ;; ---------------------------------------------------------------------------
 
-(def ^:dynamic *failures-file*
-  "Path to the failures EDN file. Bound to `bone.common/failures-file-path`
-  in production; tests rebind it to a temp path so they don't pollute
-  the real file."
-  common/failures-file-path)
-
-(def ^:private max-failure-age-ms (* 365 24 60 60 1000))
-
-(def ^:private failures-lock (Object.))
-
-(defn- load-failures []
-  (common/read-failures-file *failures-file*))
-
-(defn- move-file-replace! [src dst]
-  (let [from (.toPath (io/file src))
-        to   (.toPath (io/file dst))]
-    (try
-      (Files/move from to
-                  (into-array java.nio.file.CopyOption
-                              [StandardCopyOption/ATOMIC_MOVE
-                               StandardCopyOption/REPLACE_EXISTING]))
-      (catch AtomicMoveNotSupportedException _
-        (Files/move from to
-                    (into-array java.nio.file.CopyOption
-                                [StandardCopyOption/REPLACE_EXISTING]))))))
-
-(defn- save-failures! [failures]
-  (let [target (io/file *failures-file*)]
-    (io/make-parents target)
-    (let [parent (or (.getParentFile target) (io/file "."))
-          tmp    (java.io.File/createTempFile ".failures-" ".edn" parent)]
-      (try
-        (spit tmp (pr-str failures))
-        (move-file-replace! tmp target)
-        (finally
-          (when (.exists tmp)
-            (io/delete-file tmp true)))))))
+(defn failure-entity
+  "Pure: the :failure/* entity of a refused command.  `ctx` carries
+  :source, :from-addr, :email-date, :reason, :command and :audience
+  (:author by default), plus :email-eid and :report-eid when known.
+  :failure/key makes the same refusal on a re-digest a no-op."
+  [{:keys [source from-addr email-date email-eid report-eid reason command audience]}
+   ^Date now]
+  (let [from (str/lower-case from-addr)]
+    (cond-> {:failure/key         (common/sha256
+                                   (str/join "|" [source from (or email-eid email-date)
+                                                  (name reason) command]))
+             :failure/source      source
+             :failure/from        from
+             :failure/date        (or email-date now)
+             ;; Wall-clock time: the notifier watermarks on this, not on
+             ;; :failure/date -- a delayed email must still be notified.
+             :failure/recorded-at now
+             :failure/reason      reason
+             :failure/command     command
+             :failure/audience    (or audience :author)}
+      email-eid  (assoc :failure/email email-eid)
+      report-eid (assoc :failure/report report-eid))))
 
 (defn record-failure!
-  "Append a command failure to the failures file for later
-  notification; prunes entries older than 1 year.  :audience routes
+  "Record a command failure in the database for later notification,
+  once: the same refusal on a re-digest is a no-op.  :audience routes
   the entry: :author = the sending address (default, typo-class
-  failures), :maintainers = every subscriber on the source."
-  [{:keys [source from-addr email-date reason command report-mid audience]}]
-  (let [now-ms   (System/currentTimeMillis)
-        cutoff   (Date. (- now-ms max-failure-age-ms))
-        entry    {:source      source
-                  :from        (str/lower-case from-addr)
-                  :date        (or email-date (Date.))
-                  ;; Wall-clock time: the notifier watermarks on this, not
-                  ;; on :date -- a delayed email must still be notified.
-                  :recorded-at (Date.)
-                  :reason      reason
-                  :command     command
-                  :report-mid  (or report-mid "")
-                  :audience    (or audience :author)}]
-    (locking failures-lock
-      (let [existing (load-failures)
-            pruned   (filterv (fn [{:keys [date]}]
-                                (and date (.after ^Date date cutoff)))
-                              existing)]
-        (save-failures! (conj pruned entry))))
-    (log/info "Command failure:" reason command "from" from-addr
-              (str "(audience: " (name (:audience entry)) ")"))))
+  failures), :maintainers = every subscriber on the source.  `ctx` is
+  `failure-entity`'s, plus :conn."
+  [{:keys [conn reason command from-addr] :as ctx}]
+  (let [entity (failure-entity ctx (Date.))]
+    ;; entid on the unique key, never a d/q on it (AVE index).
+    (when-not (d/entid (d/db conn) [:failure/key (:failure/key entity)])
+      (d/transact! conn [entity])
+      (log/info "Command failure:" reason command "from" from-addr
+                (str "(audience: " (name (:failure/audience entity)) ")")))))
 
 (defn resolve-commands
   "Fold a seq of parsed colon-line commands into a summary map.
@@ -1371,10 +1341,12 @@
                      (periods/source-cfg-at-date cfg email-date))
         is-maint?  (common/maintainer? roles from-addr email-date)
         fail-ctx   (when (and from-addr src-name)
-                     {:source     src-name
+                     {:conn       conn
+                      :source     src-name
                       :from-addr  from-addr
                       :email-date email-date
-                      :report-mid (:report/message-id report)})
+                      :email-eid  (:db/id email)
+                      :report-eid report-eid})
         {:keys [closed? denied lines] :as plan}
         (command-plan report report-type email source-cfg is-maint? line-filter)]
     (record-denied-words! fail-ctx denied)

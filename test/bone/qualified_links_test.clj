@@ -9,18 +9,13 @@
   in reply to a bug or request."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.test :refer [deftest is testing]]
             [datalevin.core :as d]
             [bone.commands :as commands]
             [bone.common :as common]
             [bone.lookup :as lookup]
             [bone.digest :as digest]
-            [bone.relations :as rel]
-            [bone.test-helpers :as th]))
-
-;; Denied/invalid commands exercised below must not pollute the real
-;; data/.failures.edn (bb notify would route them to real recipients).
-(use-fixtures :once th/with-temp-failures-file)
+            [bone.relations :as rel]))
 
 (defn- fresh-conn []
   (let [path (str "/tmp/bone-rel-test-" (System/currentTimeMillis) "-" (rand-int 1e6))

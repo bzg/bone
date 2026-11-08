@@ -208,8 +208,8 @@
 (defn apply-role-controls!
   "Apply Add/Remove maintainer directives from `body-text`. `tenures`
   is the pre-directive snapshot for permission checks; DB is re-read
-  between operations.  Denied attempts go to the failures file as
-  :insufficient-scope/:maintainers so the lead sees them."
+  between operations.  Denied attempts are recorded as
+  :insufficient-scope/:maintainers failures so the lead sees them."
   [conn tenures source-name from-addr body-text email-date strict-syntax?]
   (let [controls    (parse-role-controls body-text strict-syntax?)
         ;; as-of the email's date: sync-all-sources! installs *all*
@@ -219,10 +219,10 @@
         ;; Lead stays a "current" notion: Remove maintainer is
         ;; lead-only as of now.
         is-lead     (common/lead-maintainer? tenures from-addr)
-        failure-ctx {:source     source-name
+        failure-ctx {:conn       conn
+                     :source     source-name
                      :from-addr  from-addr
-                     :email-date email-date
-                     :report-mid ""}]
+                     :email-date email-date}]
     (doseq [{:keys [command addresses]} controls]
       (case command
         "Add maintainer"
