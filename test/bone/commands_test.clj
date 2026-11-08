@@ -9,6 +9,7 @@
     - accepted only with `!` prefix in :strict mode"
   (:require [clojure.test :refer [deftest is testing]]
             [bone.commands :as commands]
+            [bone.common :as common]
             [bone.roles :as roles]))
 
 (defn- src-cmds [strict?]
@@ -68,27 +69,21 @@
     (is (= "o'brien@x.org"
            (:email-address (first (detect-with false "Acked-by: o'brien@x.org\n")))))))
 
-(deftest line-loose-accepts-both-forms
+(deftest line-loose-accepts-bang-prefix
+  ;; The bare forms are detect-lines-test's, in strict equality.
   (testing "-by line"
-    (is (seq (detect-with false "Acked-by: a@b.com\n")))
     (is (seq (detect-with false "!Acked-by: a@b.com\n"))))
   (testing "Deadline"
-    (is (seq (detect-with false "Deadline: 2026-06-15\n")))
     (is (seq (detect-with false "!Deadline: 2026-06-15\n"))))
   (testing "Negative unset (Not X)"
-    (is (seq (detect-with false "Not acked\n")))
     (is (seq (detect-with false "!Not acked\n"))))
   (testing "No X form"
-    (is (seq (detect-with false "No deadline\n")))
     (is (seq (detect-with false "!No deadline\n"))))
   (testing "Superseded-by"
-    (is (seq (detect-with false "Superseded-by: <msg@example.com>\n")))
     (is (seq (detect-with false "!Superseded-by: <msg@example.com>\n"))))
   (testing "Supersedes"
-    (is (seq (detect-with false "Supersedes: <msg@example.com>\n")))
     (is (seq (detect-with false "!Supersedes: <msg@example.com>\n"))))
   (testing "Not supersedes"
-    (is (seq (detect-with false "Not supersedes: <msg@example.com>\n")))
     (is (seq (detect-with false "!Not supersedes: <msg@example.com>\n")))))
 
 (deftest line-strict-rejects-bare-form
@@ -303,6 +298,177 @@
       (is (= {:allowed [] :denied []}
              (commands/partition-lines-by-scope lines (delay {}) "x@y.z" false
                                                 (constantly false)))))))
+
+;; ---------------------------------------------------------------------------
+;; Colon-line detection (loose mode, default vocabulary) and resolution
+;; ---------------------------------------------------------------------------
+
+(def ^:private loose-line-patterns
+  (:line-patterns (src-cmds false)))
+
+(defn- detect-lines
+  "`commands/detect-lines` with the loose-mode default line patterns."
+  ([report-type body-text] (detect-lines report-type body-text nil nil))
+  ([report-type body-text overrides email-date]
+   (commands/detect-lines report-type body-text overrides email-date
+                          loose-line-patterns)))
+
+(defn- iso [s] (common/parse-iso-date s))
+
+(deftest detect-lines-test
+  (testing "-by lines credit the named address, in every RFC 5322 form"
+    (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}]
+           (detect-lines :bug "Acked-by: a@b.com\n")))
+    (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
+           (detect-lines :bug "Owned-by: x@y.com\nIgnore this line\n")))
+    (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
+           (detect-lines :bug "Thanks for the report.\nOwned-by: x@y.com\nWill look into it.\n")))
+    (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
+           (detect-lines :bug "Owned-by: Some User <x@y.com>\n")))
+    (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
+           (detect-lines :bug "Owned-by: <x@y.com>\n")))
+    (testing "the domain needs a dot, the address a single @"
+      (is (= [] (detect-lines :bug "Owned-by: alice@localhost\n")))
+      (is (= [] (detect-lines :bug "Owned-by: alice@@host.com\n")))))
+  (testing "Not and No unset"
+    (is (= [{:action :unset :attr :report/acked :scope :user :id :unacked}]
+           (detect-lines :bug "Not acked\n")))
+    (is (= [{:action :unset :attr :report/urgent :scope :user :id :unurgent}]
+           (detect-lines :bug "Not urgent\n")))
+    (is (= [{:action :unset :attr :report/important :scope :user :id :unimportant}]
+           (detect-lines :bug "Not important\n")))
+    (is (= [{:action :unset-deadline :scope :user :id :undeadline}]
+           (detect-lines :bug "No deadline\n")))
+    (is (= [{:action :unset-topics :scope :user :id :untopic}]
+           (detect-lines :bug "No topics\n")))
+    (is (= [{:action :unset-expiry :scope :user :id :unexpiry}]
+           (detect-lines :bug "No expiry\n"))))
+  (testing "Topics edits"
+    (is (= [{:action :set-topics :topics [[:add "my-topic"]] :scope :user :id :topic}]
+           (detect-lines :bug "Topics: my-topic\n")))
+    (is (= [{:action :set-topics :topics [[:remove "parser"] [:add "lexer"]]
+             :scope :user :id :topic}]
+           (detect-lines :bug "Topics: -parser lexer.\n"))))
+  (testing "Deadline and Expiry dates, ISO or relative to the email date"
+    (is (= [{:action :set-deadline :date (iso "2026-06-15") :scope :user :id :deadline}]
+           (detect-lines :bug "Deadline: 2026-06-15\n")))
+    (is (= [{:action :set-expiry :date (iso "2026-09-01") :scope :user :id :expiry}]
+           (detect-lines :bug "Expiry: 2026-09-01\n")))
+    (is (= [] (detect-lines :bug "Expiry: deadline\n"))
+        "no longer a command: :inactive-after :deadline lives in the config")
+    (is (= [{:action :set-deadline :date (iso "2026-02-09") :scope :user :id :deadline}]
+           (detect-lines :bug "Deadline: 30d\n" nil (iso "2026-01-10"))))
+    (is (= [{:action :set-expiry :date (iso "2026-01-06") :scope :user :id :expiry}]
+           (detect-lines :bug "Expiry: 3d\n" nil (iso "2026-01-03"))))
+    (is (= (iso "2026-02-14")
+           (:date (first (detect-lines :bug "Expiry: 1m 2w\n" nil (iso "2026-01-01")))))
+        "compound duration")
+    (is (= [{:action :set-expiry :date (iso "2026-09-01") :scope :user :id :expiry}]
+           (detect-lines :announcement "Expiry: 2026-09-01\n"))
+        "Expiry applies to every report type"))
+  (testing "several lines, prose, nothing"
+    (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}
+            {:action :set-deadline :date (iso "2026-07-01") :scope :user :id :deadline}
+            {:action :set-topics :topics [[:add "urgent-fix"]] :scope :user :id :topic}]
+           (detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopics: urgent-fix\n")))
+    (is (= [] (detect-lines :bug "Just a normal reply.\n")))
+    (is (nil? (detect-lines :bug nil)))))
+
+(deftest detect-lines-message-id-forms
+  (let [superseded-by [{:action :set-superseded :attr :rel/supersedes
+                        :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]]
+    (testing "Superseded-by: angle brackets, URL prefix, public-inbox URL, bare id"
+      (is (= superseded-by (detect-lines :bug "Superseded-by: <msg@example.com>\n")))
+      (is (= superseded-by (detect-lines :bug "Superseded-by: https://orgmode.org/list/<msg@example.com>\n")))
+      (is (= superseded-by (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com/\n")))
+      (is (= superseded-by (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com\n")))
+      (is (= superseded-by (detect-lines :bug "Superseded-by: msg@example.com\n"))))
+    (testing "a URL whose @ segment is not the last is no message-id"
+      (is (= [] (detect-lines :bug "Superseded-by: https://example.com/foo@bar/baz.html\n"))))
+    (testing "Supersedes and the two unsets"
+      (is (= [{:action :set-supersedes :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :supersedes}]
+             (detect-lines :bug "Supersedes: <msg@example.com>\n")))
+      (is (= [{:action :unset-superseded :attr :rel/supersedes-from :scope :user :id :unsuperseded-by :target-message-id "<msg@example.com>"}]
+             (detect-lines :bug "Not superseded-by: <msg@example.com>\n")))
+      (is (= [{:action :unset-supersedes :attr :rel/supersedes-to :scope :user :id :unsupersedes :target-message-id "<msg@example.com>"}]
+             (detect-lines :bug "Not supersedes: <msg@example.com>\n"))))))
+
+(deftest resolve-commands-test
+  (testing "the last of a set and its unset wins"
+    (is (= {:set {} :unset #{:report/acked}}
+           (commands/resolve-commands [{:action :set :attr :report/acked :email-address "a@b.com"}
+                                       {:action :unset :attr :report/acked}])))
+    (is (= {:set {:report/acked "a@b.com"} :unset #{}}
+           (commands/resolve-commands [{:action :unset :attr :report/acked}
+                                       {:action :set :attr :report/acked :email-address "a@b.com"}])))
+    (is (= {:set {} :unset #{} :undeadline? true}
+           (commands/resolve-commands [{:action :set-deadline :date (iso "2026-06-01")}
+                                       {:action :unset-deadline}])))
+    (is (= {:set {} :unset #{} :deadline (iso "2026-06-01")}
+           (commands/resolve-commands [{:action :unset-deadline}
+                                       {:action :set-deadline :date (iso "2026-06-01")}])))
+    (is (= {:set {} :unset #{} :expiry (iso "2026-09-01")}
+           (commands/resolve-commands [{:action :set-expiry :date (iso "2026-09-01")}])))
+    (is (= {:set {} :unset #{} :unexpiry? true}
+           (commands/resolve-commands [{:action :set-expiry :date (iso "2026-09-01")}
+                                       {:action :unset-expiry}]))))
+  (testing "topics edits accumulate; a clear drops the edits before it"
+    (is (= {:set {} :unset #{} :topics [[:add "first"] [:remove "second"]]}
+           (commands/resolve-commands [{:action :set-topics :topics [[:add "first"]]}
+                                       {:action :set-topics :topics [[:remove "second"]]}])))
+    (is (= {:set {} :unset #{} :untopic? true}
+           (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
+                                       {:action :unset-topics}])))
+    (is (= {:set {} :unset #{} :untopic? true :topics [[:add "bar"]]}
+           (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
+                                       {:action :unset-topics}
+                                       {:action :set-topics :topics [[:add "bar"]]}]))))
+  (testing "supersession: the unset after a set wins, in both directions"
+    (is (= {:set {} :unset #{} :superseded-by "<mid@host>"}
+           (commands/resolve-commands [{:action :set-superseded :target-message-id "<mid@host>"}])))
+    (is (= {:set {} :unset #{} :unsuperseded-by? true :unsuperseded-by-mid "<mid@host>"}
+           (commands/resolve-commands [{:action :unset-superseded :target-message-id "<mid@host>"}])))
+    (is (= {:set {} :unset #{} :unsuperseded-by? true :unsuperseded-by-mid "<mid@host>"}
+           (commands/resolve-commands [{:action :set-superseded :target-message-id "<mid@host>"}
+                                       {:action :unset-superseded :target-message-id "<mid@host>"}])))
+    (is (= {:set {} :unset #{} :supersedes "<mid@host>"}
+           (commands/resolve-commands [{:action :set-supersedes :target-message-id "<mid@host>"}])))
+    (is (= {:set {} :unset #{} :unsupersedes? true :unsupersedes-mid "<mid@host>"}
+           (commands/resolve-commands [{:action :set-supersedes :target-message-id "<mid@host>"}
+                                       {:action :unset-supersedes :target-message-id "<mid@host>"}])))))
+
+;; ---------------------------------------------------------------------------
+;; Votes
+;; ---------------------------------------------------------------------------
+
+(deftest detect-vote-test
+  (testing "up, down and null votes, with their mirror forms and trailing text"
+    (is (= :up (commands/detect-vote "+1\n")))
+    (is (= :up (commands/detect-vote "+1 thanks")))
+    (is (= :up (commands/detect-vote "+1, great idea")))
+    (is (= :up (commands/detect-vote "+1.")))
+    (is (= :up (commands/detect-vote "1+")))
+    (is (= :up (commands/detect-vote "1+ ")))
+    (is (= :down (commands/detect-vote "-1")))
+    (is (= :down (commands/detect-vote "1-")))
+    (is (= :down (commands/detect-vote "-1 nope")))
+    (is (= :down (commands/detect-vote "1-.")))
+    (is (= :null (commands/detect-vote "+0")))
+    (is (= :null (commands/detect-vote "-0")))
+    (is (= :null (commands/detect-vote "0+")))
+    (is (= :null (commands/detect-vote "0-")))
+    (is (= :null (commands/detect-vote "+0, meh"))))
+  (testing "numbers that are not votes"
+    (is (nil? (commands/detect-vote "+10")))
+    (is (nil? (commands/detect-vote "+1abc")))
+    (is (nil? (commands/detect-vote "1+2")))
+    (is (nil? (commands/detect-vote "-10")))
+    (is (nil? (commands/detect-vote "-1a")))
+    (is (nil? (commands/detect-vote "1-2")))
+    (is (nil? (commands/detect-vote "+0x")))
+    (is (nil? (commands/detect-vote "nothing here")))
+    (is (nil? (commands/detect-vote "")))
+    (is (nil? (commands/detect-vote nil)))))
 
 (deftest detect-vote-ignores-code-and-patches
   (testing "numbers in code or markup are not votes"

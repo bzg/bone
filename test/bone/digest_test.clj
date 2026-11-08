@@ -15,30 +15,13 @@
             [bone.digest :as digest]
             [bone.roles :as roles]
             [bone.tracking :as tracking]
-            [bone.test-helpers :as th])
-  (:import [java.text SimpleDateFormat]
-           [java.util TimeZone]))
+            [bone.test-helpers :as th]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-date-iso [s]
-  (let [fmt (doto (SimpleDateFormat. "yyyy-MM-dd")
-              (.setTimeZone (TimeZone/getTimeZone "UTC")))]
-    (.parse fmt s)))
-
 (def ^:private release-mid-ownership! (var-get #'digest/release-mid-ownership!))
-
-(def ^:private loose-line-patterns
-  (:line-patterns (commands/build-source-commands {})))
-
-(defn- detect-lines
-  "`commands/detect-lines` with the loose-mode default line patterns."
-  ([report-type body-text] (detect-lines report-type body-text nil nil))
-  ([report-type body-text overrides email-date]
-   (commands/detect-lines report-type body-text overrides email-date
-                          loose-line-patterns)))
 
 (defn- get-report
   "Pull a report by message-id, including the qualified-relation reverse refs.
@@ -218,43 +201,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Tests
 ;; ---------------------------------------------------------------------------
-
-(deftest detect-vote-test
-  (testing "Up votes"
-    (is (= :up (commands/detect-vote "+1")))
-    (is (= :up (commands/detect-vote "+1\n")))
-    (is (= :up (commands/detect-vote "+1 thanks")))
-    (is (= :up (commands/detect-vote "+1, great idea")))
-    (is (= :up (commands/detect-vote "+1.")))
-    (is (= :up (commands/detect-vote "+1!")))
-    (is (= :up (commands/detect-vote "1+")))
-    (is (= :up (commands/detect-vote "1+ ")))
-    (is (= :up (commands/detect-vote "I agree\n+1\nthanks"))))
-
-  (testing "Down votes"
-    (is (= :down (commands/detect-vote "-1")))
-    (is (= :down (commands/detect-vote "1-")))
-    (is (= :down (commands/detect-vote "-1 nope")))
-    (is (= :down (commands/detect-vote "1-."))))
-
-  (testing "Null votes"
-    (is (= :null (commands/detect-vote "+0")))
-    (is (= :null (commands/detect-vote "-0")))
-    (is (= :null (commands/detect-vote "0+")))
-    (is (= :null (commands/detect-vote "0-")))
-    (is (= :null (commands/detect-vote "+0, meh"))))
-
-  (testing "Non-votes"
-    (is (nil? (commands/detect-vote "+10")))
-    (is (nil? (commands/detect-vote "+1abc")))
-    (is (nil? (commands/detect-vote "1+2")))
-    (is (nil? (commands/detect-vote "-10")))
-    (is (nil? (commands/detect-vote "-1a")))
-    (is (nil? (commands/detect-vote "1-2")))
-    (is (nil? (commands/detect-vote "+0x")))
-    (is (nil? (commands/detect-vote "nothing here")))
-    (is (nil? (commands/detect-vote "")))
-    (is (nil? (commands/detect-vote nil)))))
 
 (deftest digest-integration-test
   (let [{:keys [conn] :as ctx} (setup-db!)]
@@ -605,110 +551,6 @@
             (is (= 1 (count (filter #(= :null (:value %)) votes))))
             (is (not (contains? (set (map :voter votes)) "admin@test.org")))))
 
-        ;; --- Directive unit tests ---
-        (testing "detect-lines"
-          (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}]
-                 (detect-lines :bug "Acked-by: a@b.com\n")))
-          (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (detect-lines :bug "Owned-by: x@y.com\nIgnore this line\n")))
-          (is (= [{:action :unset :attr :report/acked :scope :user :id :unacked}]
-                 (detect-lines :bug "Not acked\n")))
-          (is (= [{:action :unset :attr :report/urgent :scope :user :id :unurgent}]
-                 (detect-lines :bug "Not urgent\n")))
-          (is (= [{:action :unset :attr :report/important :scope :user :id :unimportant}]
-                 (detect-lines :bug "Not important\n")))
-          (is (= [{:action :set-deadline :date (parse-date-iso "2026-06-15") :scope :user :id :deadline}]
-                 (detect-lines :bug "Deadline: 2026-06-15\n")))
-          (is (= [{:action :unset-deadline :scope :user :id :undeadline}]
-                 (detect-lines :bug "No deadline\n")))
-          (is (= [{:action :unset-topics :scope :user :id :untopic}]
-                 (detect-lines :bug "No topics\n")))
-          (is (= [{:action :set-topics :topics [[:add "my-topic"]] :scope :user :id :topic}]
-                 (detect-lines :bug "Topics: my-topic\n")))
-          (is (= [{:action :set-topics :topics [[:remove "parser"] [:add "lexer"]]
-                   :scope :user :id :topic}]
-                 (detect-lines :bug "Topics: -parser lexer.\n")))
-          (is (= [{:action :set :attr :report/acked :email-address "a@b.com" :scope :user :id :acked-by}
-                  {:action :set-deadline :date (parse-date-iso "2026-07-01") :scope :user :id :deadline}
-                  {:action :set-topics :topics [[:add "urgent-fix"]] :scope :user :id :topic}]
-                 (detect-lines :bug "Acked-by: a@b.com\nDeadline: 2026-07-01\nTopics: urgent-fix\n")))
-          (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (detect-lines :bug "Thanks for the report.\nOwned-by: x@y.com\nWill look into it.\n")))
-          ;; RFC 5322 "Display Name <addr>" format
-          (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (detect-lines :bug "Owned-by: Some User <x@y.com>\n")))
-          ;; Bracketed address without display name: angle brackets must be stripped
-          (is (= [{:action :set :attr :report/owned :email-address "x@y.com" :scope :user :id :owned-by}]
-                 (detect-lines :bug "Owned-by: <x@y.com>\n")))
-          ;; Address must contain a dot in the domain part
-          (is (= [] (detect-lines :bug "Owned-by: alice@localhost\n")))
-          ;; Address must not contain stray @ characters
-          (is (= [] (detect-lines :bug "Owned-by: alice@@host.com\n")))
-          (is (= [] (detect-lines :bug "Just a normal reply.\n")))
-          (is (nil? (detect-lines :bug nil)))
-          ;; Expiry directive
-          (is (= [{:action :set-expiry :date (parse-date-iso "2026-09-01") :scope :user :id :expiry}]
-                 (detect-lines :bug "Expiry: 2026-09-01\n")))
-          (is (= [{:action :unset-expiry :scope :user :id :unexpiry}]
-                 (detect-lines :bug "No expiry\n")))
-          ;; "Expiry: deadline" is no longer a valid command (use :inactive-after :deadline in config)
-          (is (= [] (detect-lines :bug "Expiry: deadline\n")))
-          ;; Deadline with duration (relative to email date)
-          (let [email-date (parse-date-iso "2026-01-10")
-                result (detect-lines :bug "Deadline: 30d\n" nil email-date)]
-            (is (= 1 (count result)))
-            (is (= :set-deadline (:action (first result))))
-            (is (= (parse-date-iso "2026-02-09") (:date (first result)))))
-          ;; Expiry with duration (relative to email date)
-          (let [email-date (parse-date-iso "2026-01-03")
-                result (detect-lines :bug "Expiry: 3d\n" nil email-date)]
-            (is (= 1 (count result)))
-            (is (= :set-expiry (:action (first result))))
-            (is (= (parse-date-iso "2026-01-06") (:date (first result)))))
-          ;; Compound duration
-          (let [email-date (parse-date-iso "2026-01-01")
-                result (detect-lines :bug "Expiry: 1m 2w\n" nil email-date)]
-            (is (= 1 (count result)))
-            (is (= (parse-date-iso "2026-02-14") (:date (first result)))))
-          ;; Expiry now applies to all report types, including announcements
-          (let [result (detect-lines :announcement "Expiry: 2026-09-01\n")]
-            (is (= 1 (count result)))
-            (is (= :set-expiry (:action (first result))))
-            (is (= (parse-date-iso "2026-09-01") (:date (first result))))))
-
-        ;; --- resolve-commands unit tests ---
-        (testing "resolve-commands"
-          (is (= {:set {} :unset #{:report/acked}}
-                 (commands/resolve-commands [{:action :set :attr :report/acked :email-address "a@b.com"}
-                                             {:action :unset :attr :report/acked}])))
-          (is (= {:set {:report/acked "a@b.com"} :unset #{}}
-                 (commands/resolve-commands [{:action :unset :attr :report/acked}
-                                             {:action :set :attr :report/acked :email-address "a@b.com"}])))
-          (is (= {:set {} :unset #{} :undeadline? true}
-                 (commands/resolve-commands [{:action :set-deadline :date (parse-date-iso "2026-06-01")}
-                                             {:action :unset-deadline}])))
-          (is (= {:set {} :unset #{} :deadline (parse-date-iso "2026-06-01")}
-                 (commands/resolve-commands [{:action :unset-deadline}
-                                             {:action :set-deadline :date (parse-date-iso "2026-06-01")}])))
-          (is (= {:set {} :unset #{} :topics [[:add "first"] [:remove "second"]]}
-                 (commands/resolve-commands [{:action :set-topics :topics [[:add "first"]]}
-                                             {:action :set-topics :topics [[:remove "second"]]}])))
-          ;; Expiry resolve
-          (is (= {:set {} :unset #{} :expiry (parse-date-iso "2026-09-01")}
-                 (commands/resolve-commands [{:action :set-expiry :date (parse-date-iso "2026-09-01")}])))
-          (is (= {:set {} :unset #{} :unexpiry? true}
-                 (commands/resolve-commands [{:action :set-expiry :date (parse-date-iso "2026-09-01")}
-                                             {:action :unset-expiry}])))
-          ;; Untopic resolve: a clear drops the edits before it and
-          ;; keeps the ones after it
-          (is (= {:set {} :unset #{} :untopic? true}
-                 (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
-                                             {:action :unset-topics}])))
-          (is (= {:set {} :unset #{} :untopic? true :topics [[:add "bar"]]}
-                 (commands/resolve-commands [{:action :set-topics :topics [[:add "foo"]]}
-                                             {:action :unset-topics}
-                                             {:action :set-topics :topics [[:add "bar"]]}]))))
-
         ;; --- Bug 81 directives ---
         (testing "Bug 81 Acked-by / Owned-by credit third parties"
           (let [r (get-report db "<81@test.org>")]
@@ -825,67 +667,6 @@
             (is (not (some #(= "<114@test.org>" (:report/message-id %))
                            (all-related r106)))
                 "reverse related link is removed")))
-
-        ;; --- Directive unit tests for supersede ---
-        (testing "detect-lines: Superseded-by with angle brackets"
-          (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (detect-lines :bug "Superseded-by: <msg@example.com>\n"))))
-
-        (testing "detect-lines: Superseded-by tolerates an URL prefix"
-          (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (detect-lines :bug "Superseded-by: https://orgmode.org/list/<msg@example.com>\n"))))
-
-        (testing "detect-lines: Superseded-by accepts a public-inbox URL"
-          (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com/\n")))
-          (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (detect-lines :bug "Superseded-by: https://list.orgmode.org/orgmode/msg@example.com\n"))))
-
-        (testing "detect-lines: Superseded-by accepts a bare message-id"
-          (is (= [{:action :set-superseded :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :superseded-by}]
-                 (detect-lines :bug "Superseded-by: msg@example.com\n"))))
-
-        (testing "detect-lines: Superseded-by rejects URLs where the @ segment is non-terminal"
-          (is (= [] (detect-lines :bug "Superseded-by: https://example.com/foo@bar/baz.html\n"))))
-
-        (testing "detect-lines: Not superseded-by"
-          (is (= [{:action :unset-superseded :attr :rel/supersedes-from :scope :user :id :unsuperseded-by :target-message-id "<msg@example.com>"}]
-                 (detect-lines :bug "Not superseded-by: <msg@example.com>\n"))))
-
-        (testing "detect-lines: Supersedes (symmetric of Superseded-by)"
-          (is (= [{:action :set-supersedes :attr :rel/supersedes :target-message-id "<msg@example.com>" :scope :user :id :supersedes}]
-                 (detect-lines :bug "Supersedes: <msg@example.com>\n"))))
-
-        (testing "detect-lines: Not supersedes"
-          (is (= [{:action :unset-supersedes :attr :rel/supersedes-to :scope :user :id :unsupersedes :target-message-id "<msg@example.com>"}]
-                 (detect-lines :bug "Not supersedes: <msg@example.com>\n"))))
-
-        (testing "resolve-commands: superseded-by"
-          (is (= {:set {} :unset #{} :superseded-by "<mid@host>"}
-                 (commands/resolve-commands
-                  [{:action :set-superseded :target-message-id "<mid@host>"}]))))
-
-        (testing "resolve-commands: unsuperseded"
-          (is (= {:set {} :unset #{} :unsuperseded-by? true :unsuperseded-by-mid "<mid@host>"}
-                 (commands/resolve-commands
-                  [{:action :unset-superseded :target-message-id "<mid@host>"}]))))
-
-        (testing "resolve-commands: supersede then unsupersede"
-          (is (= {:set {} :unset #{} :unsuperseded-by? true :unsuperseded-by-mid "<mid@host>"}
-                 (commands/resolve-commands
-                  [{:action :set-superseded :target-message-id "<mid@host>"}
-                   {:action :unset-superseded :target-message-id "<mid@host>"}]))))
-
-        (testing "resolve-commands: supersedes"
-          (is (= {:set {} :unset #{} :supersedes "<mid@host>"}
-                 (commands/resolve-commands
-                  [{:action :set-supersedes :target-message-id "<mid@host>"}]))))
-
-        (testing "resolve-commands: supersedes then not superseding"
-          (is (= {:set {} :unset #{} :unsupersedes? true :unsupersedes-mid "<mid@host>"}
-                 (commands/resolve-commands
-                  [{:action :set-supersedes :target-message-id "<mid@host>"}
-                   {:action :unset-supersedes :target-message-id "<mid@host>"}]))))
 
         ;; --- Emails 130-131 Supersedes (close target) ---
         (testing "Bug 130 closed by 131 via Supersedes:"
