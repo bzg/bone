@@ -1040,15 +1040,50 @@
     (tracking/bump-report-updated! conn closed-eid)
     (tracking/bump-report-updated! conn other-eid)))
 
+(defn- line-state
+  "The report's current values for the line commands, relation setters
+  surfaced under their :setter-attr so the scope check on
+  :unsuperseded-by / :unsupersedes / :unduplicate-of works."
+  [db report-eid]
+  (merge (d/pull db line-pull-pattern report-eid)
+         (relation-setters-as-pull db report-eid closure-relation-rows)))
+
+(defn- propagate-closed-by!
+  "Closing a patch via `Closed-by:` must propagate to the bugs/requests
+  it resolves, exactly like the bareword `Closed.` path in
+  `apply-words!`.  Same opt-out: sources with \":patch-triggers?
+  false\" skip the :resolved propagation."
+  [conn report-eid email-eid source-type resolved source-cfg]
+  (when (and (= :patch source-type)
+             (contains? (:set resolved) :report/closed)
+             (common/patch-triggers? source-cfg))
+    (rel/propagate-patch-closure! conn report-eid email-eid :resolved nil)))
+
+(defn- report-row-failures!
+  "Record and log what a closure `row` could not do: an unknown,
+  self-looping or type-mismatched target on the set side, an unknown
+  mid on the unset side."
+  [failure-ctx report-eid source-type
+   {:keys [resolved syntax target-mid unset-target-mid unset-target-eid]}]
+  (let [tgt-eid (:target-eid resolved)
+        valid?  (:valid? resolved)]
+    (record-target-failures! failure-ctx syntax target-mid tgt-eid valid? report-eid)
+    ;; Unset naming an unknown mid: report :unknown-target like the set
+    ;; side, instead of a silent no-op.
+    (when (and unset-target-mid (nil? unset-target-eid))
+      (record-target-failures! failure-ctx (str "Not " (str/lower-case syntax))
+                               unset-target-mid nil nil report-eid))
+    (when (and tgt-eid (not valid?))
+      (if (= tgt-eid report-eid)
+        (log/warn (str syntax ": " target-mid
+                       " -- targets the same report (self-loop) -- ignored"))
+        (log/warn (str syntax ": type mismatch -- source")
+                  source-type "vs target" (:target-type resolved))))))
+
 (defn apply-lines! [conn report-eid lines email-eid from-addr is-maintainer?
                     failure-ctx source-cfg]
   (let [db         (d/db conn)
-        ;; Surface relation setters under their :setter-attr so the
-        ;; scope check on :unsuperseded-by / :unsupersedes / :unduplicate-of
-        ;; works.
-        current-d  (delay (merge (d/pull db line-pull-pattern report-eid)
-                                 (relation-setters-as-pull db report-eid
-                                                           closure-relation-rows)))
+        current-d  (delay (line-state db report-eid))
         permitted  (filter-permitted-lines lines current-d from-addr
                                            is-maintainer? (constantly true)
                                            failure-ctx)]
@@ -1064,15 +1099,7 @@
             did-work?   (or (seq attr-tx) (seq valid-rows) (seq clear-rows))]
         (when (seq attr-tx)
           (d/transact! conn attr-tx)
-          ;; Closing a patch via `Closed-by:` must propagate to the
-          ;; bugs/requests it resolves, exactly like the bareword
-          ;; `Closed.` path in apply-words!.  Same opt-out: sources
-          ;; with ":patch-triggers? false" skip the :resolved propagation.
-          (when (and (= :patch source-type)
-                     (contains? (:set resolved) :report/closed)
-                     (common/patch-triggers? source-cfg))
-            (rel/propagate-patch-closure! conn report-eid email-eid
-                                          :resolved nil)))
+          (propagate-closed-by! conn report-eid email-eid source-type resolved source-cfg))
         (doseq [row valid-rows]
           (apply-closure-set-row! conn row email-eid from-addr posed-at source-type))
         (doseq [row clear-rows]
@@ -1086,22 +1113,8 @@
           (log/info "Commands:"
                     (describe-lines resolved)
                     (str "(by " from-addr ")")))
-        (doseq [{:keys [resolved syntax target-mid unset-target-mid
-                        unset-target-eid]} rows
-                :let [tgt-eid (:target-eid resolved)
-                      valid?  (:valid? resolved)]]
-          (record-target-failures! failure-ctx syntax target-mid tgt-eid valid? report-eid)
-          ;; Unset naming an unknown mid: report :unknown-target like
-          ;; the set side, instead of a silent no-op.
-          (when (and unset-target-mid (nil? unset-target-eid))
-            (record-target-failures! failure-ctx (str "Not " (str/lower-case syntax))
-                                     unset-target-mid nil nil report-eid))
-          (when (and tgt-eid (not valid?))
-            (if (= tgt-eid report-eid)
-              (log/warn (str syntax ": " target-mid
-                             " -- targets the same report (self-loop) -- ignored"))
-              (log/warn (str syntax ": type mismatch -- source")
-                        source-type "vs target" (:target-type resolved)))))
+        (doseq [row rows]
+          (report-row-failures! failure-ctx report-eid source-type row))
         (apply-related-to! conn report-eid resolved email-eid from-addr failure-ctx)))))
 
 (defn- try-unclosed!
