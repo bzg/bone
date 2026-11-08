@@ -4,23 +4,18 @@
 
 (ns bone.relations-test
   (:require [clojure.test :refer [deftest is testing]]
-            [bone.commands.registry :as registry]
             [bone.relations :as r]))
 
-(deftest patch-closure-effects-test
+(deftest closure-propagates?-test
+  ;; The table itself is pinned by the propagation tests of
+  ;; qualified_links_test and digest_test.
   (testing "the registry table drives the :patch-triggers? gate"
     (is (true?  (r/closure-propagates? :resolved {})))
     (is (false? (r/closure-propagates? :resolved {:patch-triggers? false})))
     (is (true?  (r/closure-propagates? :canceled {:patch-triggers? false})))
     (is (true?  (r/closure-propagates? :superseded {:patch-triggers? false})))
     (is (nil?   (r/closure-propagates? :expired {}))
-        "an unlisted reason never propagates"))
-  (testing "the table says what the manual says"
-    (is (= {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true
-                         :undo :reopen}
-            :canceled   {:targets :retract-credits}
-            :superseded {:targets :transfer-owned}}
-           registry/patch-closure-effects))))
+        "an unlisted reason never propagates")))
 
 (deftest make-relation-id-test
   (is (= "10:resolves:20"     (r/make-relation-id 10 :resolves 20)))

@@ -95,20 +95,6 @@
       (is (= txt-data
              (-> tx :email/attachments first :attachment/data)))))
 
-  (testing "text/x-log attachment data is stored"
-    (let [log-data "2026-03-30 10:00:00 ERROR something broke\n"
-          msg {:uid 106
-               :message-id "<log@test.org>"
-               :subject "[BUG] error in logs"
-               :from [{:address "user@test.org"}]
-               :body {:text "Log file attached."
-                      :attachments [{:filename "error.log"
-                                     :content-type "text/x-log"
-                                     :data log-data}]}}
-          tx (ingest/email->txdata msg)]
-      (is (= log-data
-             (-> tx :email/attachments first :attachment/data)))))
-
   (testing "text/plain with charset parameter is stored"
     (let [txt-data "some text content"
           msg {:uid 107

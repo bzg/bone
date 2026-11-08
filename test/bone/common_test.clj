@@ -365,10 +365,10 @@
 ;; resolve-command-syntax
 ;; ---------------------------------------------------------------------------
 
-(deftest resolve-command-syntax-accepts-keywords
-  (is (= :loose  (common/resolve-command-syntax {})))
-  (is (= :loose  (common/resolve-command-syntax {:command-syntax :loose})))
-  (is (= :strict (common/resolve-command-syntax {:command-syntax :strict}))))
+(deftest resolve-command-syntax-rejects-unknown
+  ;; The accepted values are covered through build-source-commands.
+  (is (thrown? clojure.lang.ExceptionInfo
+               (common/resolve-command-syntax {:command-syntax :bad}))))
 
 ;; ---------------------------------------------------------------------------
 ;; sent-via-source-channel?

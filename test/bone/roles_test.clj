@@ -93,15 +93,7 @@
              (common/lead-maintainer (roles/get-tenures (d/db conn) "s")))))))
 
 (deftest rfc5322-address-forms
-  (testing "plain bare address"
-    (let [conn (fresh-conn)
-          _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")
-          t0   (roles/get-tenures (d/db conn) "s")]
-      (roles/apply-role-controls! conn t0 "s" "co@x.org"
-                                  "Add maintainer: peer@x.org" t1 false)
-      (is (common/maintainer? (roles/get-tenures (d/db conn) "s")
-                              "peer@x.org"))))
-
+  ;; The bare form is add-maintainer-permissions' own case.
   (testing "Display Name <addr> form"
     (let [conn (fresh-conn)
           _    (seed-two-maintainers! conn "s" "lead@x.org" "co@x.org")

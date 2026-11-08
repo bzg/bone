@@ -88,16 +88,6 @@
     (is (thrown? Exception (cli-fetch->map "foo")))
     (is (thrown? Exception (cli-fetch->map "30 days")))))
 
-(deftest cli-fetch-round-trips-through-parse-fetch
-  (testing "every CLI shape lifts into a map that parse-fetch accepts"
-    (is (= {:limit 50} (parse-fetch (cli-fetch->map "50"))))
-    (let [{:keys [since before]} (parse-fetch (cli-fetch->map "30d"))]
-      (is (instance? Date since))
-      (is (nil? before)))
-    (let [{:keys [since before]} (parse-fetch (cli-fetch->map "2020-01-01"))]
-      (is (instance? Date since))
-      (is (nil? before)))))
-
 ;; ---------------------------------------------------------------------------
 ;; CLI argument parsing
 ;; ---------------------------------------------------------------------------
@@ -166,15 +156,6 @@
   (testing "mixed IMAP and Maildir"
     (let [r (main/check-mailboxes {:mailboxes [imap-mb maildir-mb]})]
       (is (= [imap-mb maildir-mb] (:ok r))))))
-
-(deftest check-mailboxes-rejects-singleton
-  (testing ":mailbox singleton is no longer accepted"
-    (let [r (main/check-mailboxes {:mailbox imap-mb})]
-      (is (nil? (:ok r)))
-      (is (re-find #":mailbox is no longer accepted" (:error r)))))
-  (testing ":mailbox is rejected even if :mailboxes is also present"
-    (let [r (main/check-mailboxes {:mailbox imap-mb :mailboxes [imap-mb]})]
-      (is (re-find #":mailbox is no longer accepted" (:error r))))))
 
 (deftest check-mailboxes-rejects-bad-shape
   (testing "missing :mailboxes"

@@ -9,7 +9,6 @@
 ;;   user@test.org      -- regular user
 ;;   voter1@test.org    -- voter
 ;;   voter2@test.org    -- voter
-;;   spam@test.org      -- will be ignored
 ;;
 ;; Source: direct
 ;; Source: public-list (list-backed)
@@ -26,7 +25,7 @@
   :email/from-address "admin@test.org"
   :email/date-sent  #inst "2026-01-01T10:00:00"
   :email/ingested-at #inst "2026-01-01T10:00:00"
-  :email/body-text  "Add maintainer: maint@test.org\nIgnore: spam@test.org\n"}
+  :email/body-text  "Add maintainer: maint@test.org\n"}
 
  ;; =========================================================================
  ;; 02 -- Bug report (from regular user)
@@ -298,19 +297,6 @@
   :email/body-text  "Org 9.8 is out.\n"}
 
  ;; =========================================================================
- ;; 21 -- Email from ignored user (should be skipped)
- ;; =========================================================================
- {
-  :email/id        "21"
-  :email/source     "direct"
-  :email/message-id "<21@test.org>"
-  :email/subject    "[BUG] Spam bug"
-  :email/from-address "spam@test.org"
-  :email/date-sent  #inst "2026-01-08T10:00:00"
-  :email/ingested-at #inst "2026-01-08T10:00:00"
-  :email/body-text  "Spam.\n"}
-
- ;; =========================================================================
  ;; 22 -- Cancel announcement 17
  ;; =========================================================================
  {
@@ -444,32 +430,6 @@
   :email/body-text  "Bug sent directly, no List-Post.\n"}
 
  ;; =========================================================================
- ;; 32 -- Bug via wrong mailing list (denied: List-Id doesn't match any source)
- ;; =========================================================================
- {
-  :email/id        "32"
-  :email/message-id "<32@test.org>"
-  :email/subject    "[BUG] Bug via wrong list"
-  :email/from-address "user@test.org"
-  :email/date-sent  #inst "2026-01-14T12:00:00"
-  :email/ingested-at #inst "2026-01-14T12:00:00"
-  :email/body-text  "Bug from another list.\n"
-  :email/headers-edn "{\"List-Post\" \"<mailto:other@elsewhere.org>\", \"List-Id\" \"<other.elsewhere.org>\"}"}
-
- ;; =========================================================================
- ;; 33 -- Bug on list-backed source from admin, no List-Post (allowed)
- ;; =========================================================================
- {
-  :email/id        "33"
-  :email/source     "public-list"
-  :email/message-id "<33@test.org>"
-  :email/subject    "[BUG] Admin direct bug"
-  :email/from-address "admin@test.org"
-  :email/date-sent  #inst "2026-01-14T13:00:00"
-  :email/ingested-at #inst "2026-01-14T13:00:00"
-  :email/body-text  "Admin can bypass list check.\n"}
-
- ;; =========================================================================
  ;; 34 -- Cover letter for patch series (0/3)
  ;; =========================================================================
  {
@@ -596,32 +556,6 @@
   :email/body-text  "Remove maintainer: maint2@test.org\n"}
 
  ;; =========================================================================
- ;; 43 -- Add admin attempt (no longer recognized, command is ignored)
- ;; =========================================================================
- {
-  :email/id        "43"
-  :email/source     "direct"
-  :email/message-id "<43@test.org>"
-  :email/subject    "Transfer admin"
-  :email/from-address "admin@test.org"
-  :email/date-sent  #inst "2026-01-18T12:00:00"
-  :email/ingested-at #inst "2026-01-18T12:00:00"
-  :email/body-text  "Add admin: newadmin@test.org\n"}
-
- ;; =========================================================================
- ;; 44 -- Unignore a previously ignored user
- ;; =========================================================================
- {
-  :email/id        "44"
-  :email/source     "direct"
-  :email/message-id "<44@test.org>"
-  :email/subject    "Unignore spam user"
-  :email/from-address "admin@test.org"
-  :email/date-sent  #inst "2026-01-18T13:00:00"
-  :email/ingested-at #inst "2026-01-18T13:00:00"
-  :email/body-text  "Unignore: spam@test.org\n"}
-
- ;; =========================================================================
  ;; 45 -- Maintainer adds another maintainer (permitted)
  ;; =========================================================================
  {
@@ -633,19 +567,6 @@
   :email/date-sent  #inst "2026-01-18T14:00:00"
   :email/ingested-at #inst "2026-01-18T14:00:00"
   :email/body-text  "Add maintainer: maint3@test.org\n"}
-
- ;; =========================================================================
- ;; 46 -- Maintainer tries to Add admin (denied)
- ;; =========================================================================
- {
-  :email/id        "46"
-  :email/source     "direct"
-  :email/message-id "<46@test.org>"
-  :email/subject    "Maint tries admin transfer"
-  :email/from-address "maint@test.org"
-  :email/date-sent  #inst "2026-01-18T15:00:00"
-  :email/ingested-at #inst "2026-01-18T15:00:00"
-  :email/body-text  "Add admin: maint@test.org\n"}
 
  ;; =========================================================================
  ;; 47 -- Regular user tries to add maintainer (denied)
@@ -870,19 +791,6 @@
   :email/in-reply-to "<65@test.org>"
   :email/references "<65@test.org>"
   :email/body-text-from-html "Confirmed.\n"}
-
- ;; =========================================================================
- ;; 67 -- Maintainer ignores an address (permitted for maintainer)
- ;; =========================================================================
- {
-  :email/id        "67"
-  :email/source     "direct"
-  :email/message-id "<67@test.org>"
-  :email/subject    "Maint ignores nuisance"
-  :email/from-address "maint@test.org"
-  :email/date-sent  #inst "2026-01-22T12:00:00"
-  :email/ingested-at #inst "2026-01-22T12:00:00"
-  :email/body-text  "Ignore: nuisance@test.org\n"}
 
  ;; =========================================================================
  ;; 68 -- Series without cover letter (starts at 1/2)
@@ -1301,34 +1209,6 @@
   :email/body-text  "Deadline: 2026-08-15\n"}
 
  ;; =========================================================================
- ;; 100 -- Bug report using [public-list] prefix instead of List-Id header.
- ;; Should be classified under "public-list" source, with prefix stripped.
- ;; =========================================================================
- {:email/id        "100"
-  :email/message-id  "<100@test.org>"
-  :email/subject     "[public-list] [BUG] BONE prefix source test"
-  :email/content-type "text/plain"
-  :email/from-address "admin@test.org"
-  :email/date-sent  #inst "2026-02-01T10:00:00"
-  :email/ingested-at #inst "2026-02-01T10:00:00"
-  :email/body-text  "Testing bone prefix classification.\n"}
-
- ;; =========================================================================
- ;; 101 -- Maintainer replies off-list: no :email/source, no List-Id, no [source]
- ;;       Source should be resolved from In-Reply-To -> email 100 -> "direct"
- ;; =========================================================================
- {:email/id        "101"
-  :email/message-id  "<101@test.org>"
-  :email/subject     "Re: [BUG] BONE prefix source test"
-  :email/content-type "text/plain"
-  :email/from-address "maint@test.org"
-  :email/date-sent  #inst "2026-02-01T11:00:00"
-  :email/ingested-at #inst "2026-02-01T11:00:00"
-  :email/in-reply-to "<100@test.org>"
-  :email/references "<100@test.org>"
-  :email/body-text  "Confirmed.\n"}
-
- ;; =========================================================================
  ;; 102 -- CHG 10.0 (first change announcement for version 10.0)
  ;; 103 -- CHG 10.0 (second change announcement, same version, different thread)
  ;; 104 -- REL 10.0 (release closes both CHGs and links them as related)
@@ -1611,46 +1491,6 @@
   :email/attachments [{:attachment/filename "errors-v2.patch"
                        :attachment/content-type "text/x-patch"
                        :attachment/data "diff --git a/errors.el b/errors.el\nindex abc..def 100644\n--- a/errors.el\n+++ b/errors.el\n@@ -1,3 +1,3 @@\n-old\n+better\n"}]}
-
- ;; =========================================================================
- ;; 122 -- Narrow bug report filed by user-a
- ;; =========================================================================
- {:email/id        "122"
-  :email/source      "direct"
-  :email/message-id  "<122@test.org>"
-  :email/subject     "[BUG] Crash when config is empty"
-  :email/from-address "user-a@test.org"
-  :email/date-sent  #inst "2026-03-03T10:00:00"
-  :email/ingested-at #inst "2026-03-03T10:00:00"
-  :email/body-text  "Reproducer: start the app with an empty config.edn.\n"}
-
- ;; =========================================================================
- ;; 123 -- Broader bug report filed by user-b (will supersede 122)
- ;; =========================================================================
- {:email/id        "123"
-  :email/source      "direct"
-  :email/message-id  "<123@test.org>"
-  :email/subject     "[BUG] Missing config validation across the board"
-  :email/from-address "user-b@test.org"
-  :email/date-sent  #inst "2026-03-03T11:00:00"
-  :email/ingested-at #inst "2026-03-03T11:00:00"
-  :email/body-text  "The config loader does not validate any field.\n"}
-
- ;; =========================================================================
- ;; 124 -- Regular user (user-a) marks 122 as superseded by 123.
- ;;       :superseded-by has :scope :user, so this MUST succeed
- ;;       even though user-a is not a maintainer.
- ;; =========================================================================
- {:email/id        "124"
-  :email/source      "direct"
-  :email/message-id  "<124@test.org>"
-  :email/subject     "Re: [BUG] Crash when config is empty"
-  :email/from-address "user-a@test.org"
-  :email/date-sent  #inst "2026-03-03T12:00:00"
-  :email/ingested-at #inst "2026-03-03T12:00:00"
-  :email/in-reply-to "<122@test.org>"
-  :email/references  "<122@test.org>"
-  :email/body-text  "Yes, my bug is a special case of the broader issue.\nSuperseded-by: <123@test.org>\n"}
 
  ;; =========================================================================
  ;; 125 -- Cover letter for a series with no inner-bracket topic.

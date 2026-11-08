@@ -124,18 +124,6 @@
   (is (= 1 (count (roles/parse-role-controls "!Add maintainer: a@b.com" true)))))
 
 ;; ---------------------------------------------------------------------------
-;; Role control pattern -- strict mode requires the bang prefix
-;; ---------------------------------------------------------------------------
-
-(deftest role-control-pattern-mode-aware
-  (let [loose  (roles/role-control-pattern false)
-        strict (roles/role-control-pattern true)]
-    (is (some? (re-find loose "Add maintainer: x@y.z")))
-    (is (some? (re-find loose "!Add maintainer: x@y.z")))
-    (is (nil?  (re-find strict "Add maintainer: x@y.z")))
-    (is (some? (re-find strict "!Add maintainer: x@y.z")))))
-
-;; ---------------------------------------------------------------------------
 ;; build-source-commands shape
 ;; ---------------------------------------------------------------------------
 
@@ -294,6 +282,12 @@
                                    {:commands {:closed {:scope :maintainer}}} false nil)]
         (is (= {:report/acked true} (dissoc words :report/close-reason)))
         (is (= [:report/closed] denied))))))
+
+(deftest describe-denied-word-labels
+  (let [describe (var-get #'commands/describe-denied-word)]
+    (is (= "Closed." (describe :report/closed)))
+    (is (= "Acked." (describe :report/acked)))
+    (is (= "Urgent." (describe :report/urgent)))))
 
 (deftest partition-lines-by-scope-pure
   (let [lines [{:id :closed-by :action :set :attr :report/closed

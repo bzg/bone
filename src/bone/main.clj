@@ -870,15 +870,12 @@
 
 (defn check-mailboxes
   "Validate the :mailboxes vector.  Returns either {:ok mailboxes}
-  or {:error message}.  Rejects the singleton :mailbox key explicitly
-  (BONE is in 0.y.z -- no rétrocompat).  Pure -- callers decide
-  whether to exit or surface the error.  Name format is shared with
+  or {:error message}.  Pure -- callers decide whether to exit or
+  surface the error.  Name format is shared with
   :sources via `common/valid-config-name?`."
   [config]
   (let [mailboxes (:mailboxes config)]
-    (or (when (contains? config :mailbox)
-          {:error common/singleton-mailbox-error})
-        (when (or (not (vector? mailboxes)) (empty? mailboxes))
+    (or (when (or (not (vector? mailboxes)) (empty? mailboxes))
           {:error ":mailboxes must be a non-empty vector of mailbox maps."})
         (some (fn [[idx mb]]
                 (when-not (common/valid-config-name? (:name mb))

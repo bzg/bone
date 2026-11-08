@@ -50,11 +50,6 @@
        (not (str/blank? s))
        (some? (re-matches config-name-regex s))))
 
-(def singleton-mailbox-error
-  "Single source of truth for the rejected-`:mailbox`-key message."
-  (str ":mailbox is no longer accepted (even when set to nil) "
-       "-- use :mailboxes [{...}] (vector of mailbox maps with a :name each)."))
-
 (defn all-distinct?
   "True iff `coll` contains no duplicates (under `=`).  Prefer over
   `(apply distinct? coll)` -- the latter throws on empty collections

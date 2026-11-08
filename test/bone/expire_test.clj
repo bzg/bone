@@ -217,26 +217,7 @@
       (teardown! ctx))))
 
 (deftest after-deadline-test
-  (testing "Report with :inactive-after :deadline expires when deadline is past"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after :deadline}}}}
-          eid (insert-email! conn {:mid "<dl-past@test>" :date-sent (days-ago 10)})
-          rid (insert-report! conn {:mid "<dl-past@test>" :type :bug :email-eid eid})
-          _   (d/transact! conn [[:db/add rid :report/deadline-value (days-ago 2)]])]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<dl-past@test>"))
-      (teardown! ctx)))
-
-  (testing "Report with :inactive-after :deadline does NOT expire when deadline is future"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after :deadline}}}}
-          eid (insert-email! conn {:mid "<dl-future@test>" :date-sent (days-ago 10)})
-          rid (insert-report! conn {:mid "<dl-future@test>" :type :bug :email-eid eid})
-          _   (d/transact! conn [[:db/add rid :report/deadline-value (days-from-now 5)]])]
-      (expire/expire-reports! conn source-map)
-      (is (not (report-closed? conn "<dl-future@test>")))
-      (teardown! ctx)))
-
+  ;; Past and future deadlines are covered by deadline-day-is-inclusive-test.
   (testing "Report with :inactive-after :deadline but no deadline is NOT expired"
     (let [{:keys [conn] :as ctx} (setup-db!)
           source-map {"test-src" {:expiry {:bug {:inactive-after :deadline}}}}
@@ -247,24 +228,7 @@
       (teardown! ctx))))
 
 (deftest fixed-date-rule-test
-  (testing "Rule with a past ISO :inactive-after date expires the report"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after "2020-01-01"}}}}
-          eid (insert-email! conn {:mid "<date-past@test>" :date-sent (days-ago 3)})
-          _   (insert-report! conn {:mid "<date-past@test>" :type :bug :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<date-past@test>"))
-      (teardown! ctx)))
-
-  (testing "Rule with a future ISO :inactive-after date does NOT expire"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after "2999-01-01"}}}}
-          eid (insert-email! conn {:mid "<date-future@test>" :date-sent (days-ago 100)})
-          _   (insert-report! conn {:mid "<date-future@test>" :type :bug :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (not (report-closed? conn "<date-future@test>")))
-      (teardown! ctx)))
-
+  ;; Past and future dates are covered by deadline-day-is-inclusive-test.
   (testing "Calendar-invalid ISO date expires nothing (rule skipped)"
     (let [{:keys [conn] :as ctx} (setup-db!)
           source-map {"test-src" {:expiry {:bug {:inactive-after "2026-02-30"}}}}
@@ -289,42 +253,8 @@
       (add-descendant! conn rid reply)
       (expire/expire-reports! conn source-map)
       (is (report-closed? conn "<combo-yes@test>"))
-      (teardown! ctx)))
-
-  (testing "One condition fails (priority too high) -- does NOT expire"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after"5d"
-                                                 :max-status 0
-                                                 :max-priority 0}}}}
-          eid (insert-email! conn {:mid "<combo-no@test>" :date-sent (days-ago 10)
-                                   :from "reporter@test.org"})
-          rid (insert-report! conn {:mid "<combo-no@test>" :type :bug :email-eid eid})
-          urg-eid (insert-email! conn {:mid "<combo-urg@test>" :from "maint@test.org"})
-          reply (insert-email! conn {:mid "<combo-r@test>"
-                                     :from "other@test.org"
-                                     :date-sent (days-ago 8)})]
-      (set-report-state! conn rid urg-eid [:report/urgent])
-      (add-descendant! conn rid reply)
-      (expire/expire-reports! conn source-map)
-      (is (not (report-closed? conn "<combo-no@test>")))
-      (teardown! ctx)))
-
-  (testing "One condition fails (acked, score=1 > max-status=0) -- does NOT expire"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after"5d"
-                                                 :max-status 0
-                                                 :max-priority 0}}}}
-          eid (insert-email! conn {:mid "<combo-ack@test>" :date-sent (days-ago 10)
-                                   :from "reporter@test.org"})
-          rid (insert-report! conn {:mid "<combo-ack@test>" :type :bug :email-eid eid})
-          ack-eid (insert-email! conn {:mid "<combo-a@test>" :from "maint@test.org"})
-          reply (insert-email! conn {:mid "<combo-ar@test>"
-                                     :from "other@test.org"
-                                     :date-sent (days-ago 8)})]
-      (set-report-state! conn rid ack-eid [:report/acked])
-      (add-descendant! conn rid reply)
-      (expire/expire-reports! conn source-map)
-      (is (not (report-closed? conn "<combo-ack@test>")))
+      ;; Each failing condition alone is covered by max-priority-test
+      ;; and max-status-test; rule-matches? is a plain `and`.
       (teardown! ctx))))
 
 (deftest no-expiry-rule-test

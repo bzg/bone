@@ -8,20 +8,12 @@
             [bone.export :as export]))
 
 (deftest extract-bracketed-id-raw-test
+  ;; Token selection and malformed input are common/bracketed-token's,
+  ;; covered by common_test/extract-bracketed-id-test.
   (testing "preserves original case of the id-right"
     (is (= "<abc@Example.COM>" (export/extract-bracketed-id-raw "<abc@Example.COM>")))
     (is (= "<Local-Part@EXAMPLE.com>"
-           (export/extract-bracketed-id-raw "<Local-Part@EXAMPLE.com>"))))
-  (testing "first bracketed token wins, padding trimmed, vector accepted"
-    (is (= "<abc@X>" (export/extract-bracketed-id-raw "<abc@X> (c) <other@Y>")))
-    (is (= "<abc@X>" (export/extract-bracketed-id-raw "   <abc@X>   ")))
-    (is (= "<abc@X>" (export/extract-bracketed-id-raw ["<abc@X>" "<other@Y>"]))))
-  (testing "rejects malformed input identically to extract-bracketed-id"
-    (is (nil? (export/extract-bracketed-id-raw "no brackets")))
-    (is (nil? (export/extract-bracketed-id-raw "<foo bar@X>")))
-    (is (nil? (export/extract-bracketed-id-raw nil)))
-    (is (nil? (export/extract-bracketed-id-raw "")))
-    (is (nil? (export/extract-bracketed-id-raw "   ")))))
+           (export/extract-bracketed-id-raw "<Local-Part@EXAMPLE.com>")))))
 
 (deftest effective-source-config-test
   (let [config {:labels   {:bug ["BUG" "DEFECT"]}

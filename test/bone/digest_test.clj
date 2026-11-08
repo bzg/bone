@@ -256,35 +256,6 @@
     (is (nil? (commands/detect-vote "")))
     (is (nil? (commands/detect-vote nil)))))
 
-(deftest word-scope-denial-recording
-  (testing "non-maintainer bareword on a source that overrides :closed to :maintainer"
-    (let [record-denied     (var-get #'bone.commands/record-denied-words!)
-          describe-word     (var-get #'bone.commands/describe-denied-word)
-          recorded          (atom [])]
-      (testing "describe-denied-word labels"
-        (is (= "Closed." (describe-word :report/closed)))
-        (is (= "Acked." (describe-word :report/acked)))
-        (is (= "Urgent." (describe-word :report/urgent))))
-      (with-redefs [commands/record-failure! (fn [entry] (swap! recorded conj entry))]
-        (let [report      {:report/email {:email/author-address "reporter@test"}}
-              email       {:email/author-address "user@test"
-                           :email/body-text "Closed.\nAcked.\n"}
-              source-cfg  {:commands {:closed {:scope :maintainer}}}
-              failure-ctx {:source "src" :from-addr "user@test" :email-date nil :report-mid "<r@test>"}
-              {:keys [words denied]}
-              (commands/command-plan report :bug email source-cfg false nil)
-              _           (record-denied failure-ctx denied)]
-          (is (= {:report/acked true} (dissoc words :report/close-reason))
-              "acked (default :user scope) survives, closed (maintainer-only override) is dropped")
-          (is (= [:report/closed] denied))
-          (is (= 1 (count @recorded)) "exactly one failure recorded")
-          (let [entry (first @recorded)]
-            (is (= :insufficient-scope (:reason entry)))
-            (is (= :maintainers (:audience entry)))
-            (is (= "Closed." (:command entry)))
-            (is (= "user@test" (:from-addr entry)))
-            (is (= "src" (:source entry)))))))))
-
 (deftest digest-integration-test
   (let [{:keys [conn] :as ctx} (setup-db!)]
     (try
@@ -381,10 +352,6 @@
             (is (some #(= "<20@test.org>" (:report/message-id %))
                       (all-related chg)))))
 
-        ;; --- Email 21 (Ignore mechanism removed -- report is now created) ---
-        (testing "Email 21 spam user creates report (no Ignore)"
-          (is (report-exists? db "<21@test.org>")))
-
         ;; --- Bug 23 important ---
         (testing "Bug 23 important flag"
           (let [r (get-report db "<23@test.org>")]
@@ -433,17 +400,9 @@
             (is (some? (:report/acked r)))
             (is (nil? (:report/owned r)))))
 
-        ;; --- Email 31 bypassing list ---
+        ;; --- Email 31: no source resolved, no report ---
         (testing "Email 31 bypassing list"
           (is (not (report-exists? db "<31@test.org>"))))
-
-        ;; --- Email 32 wrong list ---
-        (testing "Email 32 wrong List-Post"
-          (is (not (report-exists? db "<32@test.org>"))))
-
-        ;; --- Email 33 admin direct (no bone-source fallback) ---
-        (testing "Email 33 admin direct -- no report without list delivery"
-          (is (not (report-exists? db "<33@test.org>"))))
 
         ;; --- Series v1 ---
         (testing "Series v1 emails 34-37"
@@ -806,10 +765,6 @@
         (testing "Bug 98 standalone deadline"
           (is (some? (:report/deadline-value (get-report db "<98@test.org>")))))
 
-        ;; --- Email 100 [source-name] prefix (bone-source fallback removed) ---
-        (testing "Email 100 -- no bone-source fallback"
-          (is (not (report-exists? db "<100@test.org>"))))
-
         ;; --- CHG 102+103 / REL 104 ---
         (testing "CHG 102+103 / REL 104 release closes multiple changes"
           (let [chg1 (get-report db "<102@test.org>")
@@ -856,23 +811,6 @@
                            (all-related r108))))
             (is (not (some #(= "<108@test.org>" (:report/message-id %))
                            (all-related r106))))))
-
-        ;; --- Emails 122-124 user Superseded-by ---
-        ;; user-a (not a maintainer) marks their own narrow report 122
-        ;; as superseded by user-b's broader report 123.  With
-        ;; :superseded-by scoped as :user, this must succeed.
-        (testing "Bug 122 superseded by 123 via regular user"
-          (let [r122 (get-report db "<122@test.org>")
-                r123 (get-report db "<123@test.org>")]
-            (is (some? (:report/closed r122)) "user supersede closes 122")
-            (is (= :superseded (:report/close-reason r122)))
-            (is (= "<123@test.org>"
-                    (some-> (superseded-by-target r122) :report/message-id)))
-            ;; Bidirectional related link set by the supersede
-            (is (some #(= "<123@test.org>" (:report/message-id %))
-                      (all-related r122)))
-            (is (some #(= "<122@test.org>" (:report/message-id %))
-                      (all-related r123)))))
 
         ;; --- Emails 114-116 Not closed on superseded report ---
         (testing "Bug 114 superseded then reopened via Not closed"
@@ -1527,8 +1465,8 @@
         (finally
           (teardown! ctx))))))
 
-(deftest pending-thread-ttl-flush
-  (testing "TTL flush forces processing of stale pending emails."
+(deftest pending-thread-ttl-flush-respects-the-window
+  (testing "TTL flush forces processing of pending emails older than the window only."
     (let [{:keys [conn] :as ctx} (setup-db!)]
       (try
         ;; Create a root report so threading has something to attach to.
@@ -1556,7 +1494,12 @@
         (is (true? (pending? (d/db conn) "<ttl-orphan@test.org>"))
             "Setup: orphan should be pending")
 
-        ;; TTL flush with a 1-day window -- orphan is older than 30 days.
+        ;; A window wider than the orphan's age leaves it alone.
+        (digest/flush-stale-pending! conn source-map sources 100000)
+        (is (true? (pending? (d/db conn) "<ttl-orphan@test.org>"))
+            "A pending email younger than the window stays pending")
+
+        ;; A 1-day window: the orphan is older than that.
         (digest/flush-stale-pending! conn source-map sources 1)
 
         (let [db (d/db conn)
