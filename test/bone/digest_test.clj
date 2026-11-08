@@ -259,7 +259,7 @@
 
 (deftest word-scope-denial-recording
   (testing "non-maintainer bareword on a source that overrides :closed to :maintainer"
-    (let [filter-words      (var-get #'bone.commands/filter-words-by-scope)
+    (let [record-denied     (var-get #'bone.commands/record-denied-words!)
           describe-word     (var-get #'bone.commands/describe-denied-word)
           recorded          (atom [])]
       (testing "describe-denied-word labels"
@@ -267,12 +267,17 @@
         (is (= "Acked." (describe-word :report/acked)))
         (is (= "Urgent." (describe-word :report/urgent))))
       (with-redefs [commands/record-failure! (fn [entry] (swap! recorded conj entry))]
-        (let [word-result {:report/closed true :report/acked true}
-              overrides   {:closed {:scope :maintainer}}
+        (let [report      {:report/email {:email/author-address "reporter@test"}}
+              email       {:email/author-address "user@test"
+                           :email/body-text "Closed.\nAcked.\n"}
+              source-cfg  {:commands {:closed {:scope :maintainer}}}
               failure-ctx {:source "src" :from-addr "user@test" :email-date nil :report-mid "<r@test>"}
-              filtered    (filter-words word-result overrides false failure-ctx)]
-          (is (= {:report/acked true} filtered)
+              {:keys [words denied]}
+              (commands/command-plan report :bug email source-cfg false nil)
+              _           (record-denied failure-ctx denied)]
+          (is (= {:report/acked true} (dissoc words :report/close-reason))
               "acked (default :user scope) survives, closed (maintainer-only override) is dropped")
+          (is (= [:report/closed] denied))
           (is (= 1 (count @recorded)) "exactly one failure recorded")
           (let [entry (first @recorded)]
             (is (= :insufficient-scope (:reason entry)))

@@ -248,6 +248,53 @@
                            {:report/closed true}
                            {:closed {:scope :maintainer}} false)))))))
 
+(deftest command-plan-pure
+  (let [report {:report/email {:email/author-address "Reporter@x.org"}}
+        email  (fn [from body] {:email/author-address from
+                                :email/body-text body
+                                :email/in-reply-to "<parent@x.org>"})
+        body   "Acked.\nSupersedes: <old@x.org>\nAcked-by: carol@x.org\nUrgent.\n"
+        plan   #(commands/command-plan report %1 (email "bob@x.org" body) {} false %2)]
+    (testing "an open report: words, lines, no vote on a bug"
+      (let [{:keys [closed? words denied lines vote]} (plan :bug nil)]
+        (is (false? closed?))
+        (is (= {:report/acked true :report/urgent true} words))
+        (is (= [] denied))
+        (is (= [:supersedes :acked-by] (mapv :id lines)))
+        (is (nil? vote))))
+    (testing "a closed report keeps its lines, nothing else"
+      (let [{:keys [closed? words denied lines]}
+            (commands/command-plan (assoc report :report/closed {:db/id 1})
+                                   :bug (email "bob@x.org" body) {} false nil)]
+        (is (true? closed?))
+        (is (nil? words))
+        (is (nil? denied))
+        (is (= [:supersedes :acked-by] (mapv :id lines)))))
+    (testing ":carrier-only keeps the carrier lines only"
+      (let [{:keys [words lines vote]} (plan :request :carrier-only)]
+        (is (nil? words))
+        (is (= [:supersedes] (mapv :id lines)))
+        (is (nil? vote))))
+    (testing ":no-carrier drops them"
+      (is (= [:acked-by] (mapv :id (:lines (plan :bug :no-carrier))))))
+    (testing "a reporter cannot ack their own report, by word or by line"
+      (let [{:keys [words lines]}
+            (commands/command-plan report :bug
+                                   (email "reporter@x.org"
+                                          "Acked.\nAcked-by: Reporter@x.org\nUrgent.\n")
+                                   {} false nil)]
+        (is (= {:report/urgent true} words))
+        (is (= [] lines))))
+    (testing "a vote on an open request"
+      (is (= :up (:vote (commands/command-plan report :request (email "bob@x.org" "+1\n")
+                                               {} false nil)))))
+    (testing "a scope denial is reported, not applied"
+      (let [{:keys [words denied]}
+            (commands/command-plan report :bug (email "bob@x.org" "Closed.\nAcked.\n")
+                                   {:commands {:closed {:scope :maintainer}}} false nil)]
+        (is (= {:report/acked true} (dissoc words :report/close-reason)))
+        (is (= [:report/closed] denied))))))
+
 (deftest partition-lines-by-scope-pure
   (let [lines [{:id :closed-by :action :set :attr :report/closed
                 :scope :maintainer :email-address "a@b.c"}

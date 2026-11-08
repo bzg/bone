@@ -1188,23 +1188,19 @@
                   (assoc :report/close-reason (:report/close-reason word-result))))
      :denied  (mapv key denied)}))
 
-(defn- filter-words-by-scope
-  "Effectful shell over `partition-words-by-scope`: with a non-nil
-  `failure-ctx`, each denied bareword is recorded as an
-  :insufficient-scope failure (audience :maintainers, so denied
-  attempts surface to maintainer subscribers via the notification
-  loop); the allowed map is returned."
-  [word-result overrides is-maintainer? failure-ctx]
-  (when word-result
-    (let [{:keys [allowed denied]}
-          (partition-words-by-scope word-result overrides is-maintainer?)]
-      (when failure-ctx
-        (doseq [attr denied]
-          (record-failure! (assoc failure-ctx
-                                  :reason   :insufficient-scope
-                                  :audience :maintainers
-                                  :command  (describe-denied-word attr)))))
-      allowed)))
+(defn- record-denied-words!
+  "Record each bareword of `denied` (attrs, from
+  `partition-words-by-scope`) as an :insufficient-scope failure, with
+  audience :maintainers so denied attempts surface to maintainer
+  subscribers via the notification loop.  Nothing without a
+  `failure-ctx`."
+  [failure-ctx denied]
+  (when failure-ctx
+    (doseq [attr denied]
+      (record-failure! (assoc failure-ctx
+                              :reason   :insufficient-scope
+                              :audience :maintainers
+                              :command  (describe-denied-word attr))))))
 
 ;; Carrier-eligible commands: when a mail simultaneously creates a new
 ;; report AND carries one of these annotations, the annotation applies
@@ -1229,14 +1225,30 @@
     :supersedes    :unsupersedes
     :duplicate-of  :unduplicate-of})
 
-(defn apply-commands!
-  "Apply commands from `email` against `report-eid`; true when a
-  command was detected -- a line command counts even when every
-  detected command is then refused by scope, so callers (digest) still
-  record the sender as a participant on the source.  A reply shipping
-  patch content also fires an implicit
-  `Acked. Owned.` (gated by :patch-triggers? and report-type in
-  #{:bug :request}).
+(defn- line-keeper
+  "Predicate keeping the detected lines `line-filter` lets through,
+  see `command-plan`."
+  [line-filter]
+  (case line-filter
+    :carrier-only  #(contains? carrier-eligible-ids (:id %))
+    :no-carrier    #(not (contains? carrier-eligible-ids (:id %)))
+    :no-cross-refs #(not (contains? cross-ref-line-ids (:id %)))
+    (constantly true)))
+
+(defn command-plan
+  "Pure: what `email` commands on `report`, a pull of :report/closed
+  and the author of :report/email.  Returns
+    :closed? -- the report is closed: barewords and votes are ignored
+    :words   -- the allowed barewords (implicit `Acked. Owned.` of a
+                reply shipping patch content included, gated by
+                :patch-triggers? and report-type in #{:bug :request});
+                a reporter cannot ack their own report
+    :denied  -- the typed barewords refused by scope, to record as
+                failures (an implicit one never is: the user did not
+                type it)
+    :lines   -- the colon-line commands, after `line-filter`, minus a
+                reporter's `Acked-by:` of themselves
+    :vote    -- the vote of an open request, when any.
 
   `line-filter`:
     nil            -- process every command.
@@ -1249,85 +1261,112 @@
     :no-cross-refs -- everything EXCEPT `cross-ref-line-ids`
                       (cover-letter broadcast to a patch series;
                       closure relations still go through)."
-  [conn report-eid report-type email source-map roles delivery line-filter]
-  (let [carrier-only? (= :carrier-only line-filter)
-        body-text     (common/email-body-text email)
-        db            (d/db conn)
-        from-addr     (:email/author-address email)
-        eid           (:db/id email)
-        report        (d/pull db [:report/message-id :report/closed
-                                  {:report/email [:email/author-address :email/source]}]
-                              report-eid)
-        report-mid    (:report/message-id report)
-        src-name      (-> report :report/email :email/source)
-        source-cfg    (when-let [cfg (get source-map src-name)]
-                        (periods/source-cfg-at-date cfg (:email/date-sent email)))
-        src-cmds      (build-source-commands source-cfg)
-        overrides     (:overrides src-cmds)
-        is-maint?     (common/maintainer? roles from-addr (:email/date-sent email))
-        fail-ctx      (when (and from-addr src-name)
-                        {:source     src-name
-                         :from-addr  from-addr
-                         :email-date (:email/date-sent email)
-                         :report-mid report-mid})
-        ;; In :carrier-only mode we don't credit anyone on the brand-
-        ;; new report -- words, votes, implicit ack/own all go to the
-        ;; thread parent through the sibling :no-carrier call.
-        body-words    (when-not carrier-only?
-                        (detect-words report-type body-text src-cmds))
-        implicit      (when (and (not carrier-only?)
-                                 (contains? #{:bug :request} report-type)
-                                 (common/patch-triggers? source-cfg)
-                                 (:email/in-reply-to email)
-                                 (detect/has-patch-content? email))
-                        {:report/acked true :report/owned true})
-        reporter      (some-> report :report/email :email/author-address str/lower-case)
-        self-ack?     (and from-addr reporter (= (str/lower-case from-addr) reporter))
+  [report report-type email source-cfg is-maintainer? line-filter]
+  (let [carrier-only?  (= :carrier-only line-filter)
+        body-text      (common/email-body-text email)
+        from-addr      (:email/author-address email)
+        src-cmds       (build-source-commands source-cfg)
+        overrides      (:overrides src-cmds)
+        closed?        (some? (:report/closed report))
+        reporter       (some-> report :report/email :email/author-address str/lower-case)
+        self-ack?      (and from-addr reporter (= (str/lower-case from-addr) reporter))
         self-ack-line? (fn [d]
                          (and (= :set (:action d))
                               (= :report/acked (:attr d))
                               reporter
                               (= (some-> (:email-address d) str/lower-case) reporter)))
-        closed?       (some? (:report/closed report))
-        ;; Scope-filter implicit ack/own without a failure-ctx: the user
-        ;; never typed those commands, so a denial must not surface as an
-        ;; :insufficient-scope failure in maintainer notifications.
+        ;; In :carrier-only mode we don't credit anyone on the brand-
+        ;; new report -- words, votes, implicit ack/own all go to the
+        ;; thread parent through the sibling :no-carrier call.
+        body-words     (when-not carrier-only?
+                         (detect-words report-type body-text src-cmds))
+        implicit       (when (and (not carrier-only?)
+                                  (contains? #{:bug :request} report-type)
+                                  (common/patch-triggers? source-cfg)
+                                  (:email/in-reply-to email)
+                                  (detect/has-patch-content? email))
+                         {:report/acked true :report/owned true})
         ;; Barewords are ignored on a closed report: skip them before
         ;; the scope check, so a no-op word records no failure either.
-        word-result   (when-not closed?
-                        (cond-> (merge (filter-words-by-scope implicit overrides
-                                                              is-maint? nil)
-                                       (filter-words-by-scope body-words overrides
-                                                              is-maint? fail-ctx))
-                          self-ack? (dissoc :report/acked)))
-        keep-line?    (case line-filter
-                        :carrier-only #(contains? carrier-eligible-ids (:id %))
-                        :no-carrier   #(not (contains? carrier-eligible-ids (:id %)))
-                        :no-cross-refs #(not (contains? cross-ref-line-ids (:id %)))
-                        (constantly true))
-        lines         (when body-text
-                        (->> (detect-lines report-type body-text overrides
-                                           (:email/date-sent email)
-                                           (:line-patterns src-cmds))
-                             (filter keep-line?)
-                             (remove self-ack-line?)
-                             vec))]
+        typed          (when-not closed?
+                         (partition-words-by-scope body-words overrides is-maintainer?))
+        words          (when-not closed?
+                         (cond-> (merge (:allowed (partition-words-by-scope
+                                                   implicit overrides is-maintainer?))
+                                        (:allowed typed))
+                           self-ack? (dissoc :report/acked)))
+        lines          (when body-text
+                         (->> (detect-lines report-type body-text overrides
+                                            (:email/date-sent email)
+                                            (:line-patterns src-cmds))
+                              (filter (line-keeper line-filter))
+                              (remove self-ack-line?)
+                              vec))]
+    {:closed? closed?
+     :words   words
+     :denied  (:denied typed)
+     :lines   lines
+     :vote    (when (and (not closed?) (not carrier-only?)
+                         (= :request report-type) from-addr)
+                (detect-vote body-text))}))
+
+(defn- apply-on-closed!
+  "The `lines` of a closed report: closure relations replace the
+  previous one through `apply-lines!`, the rest may only reopen it,
+  through `try-unclosed!`.  True when there was a line."
+  [conn report-eid lines email-eid from-addr is-maintainer? failure-ctx source-cfg]
+  (let [{rel-lines true, other-lines false}
+        (group-by #(contains? closure-command-ids (:id %)) lines)]
+    (when (seq other-lines)
+      (try-unclosed! conn report-eid other-lines email-eid is-maintainer? from-addr
+                     failure-ctx))
+    (when (seq rel-lines)
+      (apply-lines! conn report-eid rel-lines email-eid from-addr is-maintainer?
+                    failure-ctx source-cfg))
+    (boolean (seq lines))))
+
+(defn- apply-on-open!
+  "The `command-plan` of an open report: vote, barewords, then lines.
+  True when there was a command."
+  [conn report-eid {:keys [words lines vote]} email from-addr is-maintainer?
+   failure-ctx delivery source-cfg]
+  (let [email-eid (:db/id email)
+        voted?    (when vote
+                    (apply-vote! conn report-eid from-addr vote email delivery source-cfg)
+                    true)]
+    (apply-words! conn report-eid words email-eid (:email/message-id email) from-addr
+                  source-cfg)
+    (apply-lines! conn report-eid lines email-eid from-addr is-maintainer? failure-ctx
+                  source-cfg)
+    (boolean (or (seq words) (seq lines) voted?))))
+
+(defn apply-commands!
+  "Apply commands from `email` against `report-eid`, as `command-plan`
+  reads them; true when a command was detected -- a line command
+  counts even when every detected command is then refused by scope,
+  so callers (digest) still record the sender as a participant on the
+  source.  `line-filter` is `command-plan`'s."
+  [conn report-eid report-type email source-map roles delivery line-filter]
+  (let [from-addr  (:email/author-address email)
+        email-date (:email/date-sent email)
+        report     (d/pull (d/db conn)
+                           [:report/message-id :report/closed
+                            {:report/email [:email/author-address :email/source]}]
+                           report-eid)
+        src-name   (-> report :report/email :email/source)
+        source-cfg (when-let [cfg (get source-map src-name)]
+                     (periods/source-cfg-at-date cfg email-date))
+        is-maint?  (common/maintainer? roles from-addr email-date)
+        fail-ctx   (when (and from-addr src-name)
+                     {:source     src-name
+                      :from-addr  from-addr
+                      :email-date email-date
+                      :report-mid (:report/message-id report)})
+        {:keys [closed? denied lines] :as plan}
+        (command-plan report report-type email source-cfg is-maint? line-filter)]
+    (record-denied-words! fail-ctx denied)
     (if closed?
-      (let [{rel-lines true, other-lines false}
-            (group-by #(contains? closure-command-ids (:id %)) lines)]
-        (when (seq other-lines)
-          (try-unclosed! conn report-eid other-lines eid is-maint? from-addr fail-ctx))
-        (when (seq rel-lines)
-          (apply-lines! conn report-eid rel-lines eid from-addr is-maint? fail-ctx
-                        source-cfg))
-        (boolean (seq lines)))
-      (let [voted? (when-let [vote (and (not carrier-only?)
-                                        (= :request report-type) from-addr
-                                        (detect-vote body-text))]
-                     (apply-vote! conn report-eid from-addr vote email delivery source-cfg)
-                     true)]
-        (apply-words! conn report-eid word-result eid (:email/message-id email) from-addr
-                      source-cfg)
-        (apply-lines! conn report-eid lines eid from-addr is-maint? fail-ctx
-                      source-cfg)
-        (boolean (or (seq word-result) (seq lines) voted?))))))
+      (apply-on-closed! conn report-eid lines (:db/id email) from-addr is-maint?
+                        fail-ctx source-cfg)
+      (apply-on-open! conn report-eid plan email from-addr is-maint? fail-ctx
+                      delivery source-cfg))))
