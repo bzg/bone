@@ -55,9 +55,6 @@ bb export                   # incremental (skips if nothing changed)
 bb export --force           # full rebuild, ignore timestamps
 bb export root              # regenerate top-level public/index.html only
 bb export --topics-filter "event"  # only reports with topic "event"
-#
-# Individual formats remain available as positional args:
-#   bb export json | rss | org | html | stats | patches | text | events
 
 # 4. Send notification emails
 bb notify              # send notifications
@@ -88,8 +85,7 @@ bb export [--force]                       Incremental export of all formats
        [--html-columns COLS]              HTML table columns (csv subset)
        [--html-columns-sort COL]          Default sort column (default: date)
        [--closed-retention DUR]           Drop reports closed before cutoff
-bb export <format>                        Single format: json|rss|org|html|
-                                          stats|patches|text|events|root|all
+bb export root                            Regenerate top-level index.html only
 bb notify [--dry-run] [--debug]           Send notification emails
 bb maintenance [--delete] [--verbose] [-n source]  Purge orphan emails
        [--retention DUR]                  Orphan retention (default 90d)
@@ -116,11 +112,11 @@ theme for HTML exports.  Values are resolved in order:
 Set to ="none"= to disable theming.
 
 #+begin_example
-bb export html --html-theme org                             # pico-themes name
-bb export html --html-theme https://example.com/custom.css  # external URL
-bb export html --html-theme file:///home/user/my-theme.css  # local file
-bb export html --html-theme themes/custom.css               # relative path
-bb export html --html-theme none                            # no theme
+bb export --html-theme org                             # pico-themes name
+bb export --html-theme https://example.com/custom.css  # external URL
+bb export --html-theme file:///home/user/my-theme.css  # local file
+bb export --html-theme themes/custom.css               # relative path
+bb export --html-theme none                            # no theme
 #+end_example
 
 * Configuration

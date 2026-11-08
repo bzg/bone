@@ -611,8 +611,7 @@ description, for filtering.  HTML pages advertise their feeds,
 as the specification recommends.
 
 Export is incremental: it covers only the sources modified since the
-last export.  =--force= rebuilds everything, and
-=bb export {json|rss|org|html|stats|text|events}= builds one format.
+last export.  =--force= rebuilds everything.
 
 | Flag                 | Purpose                                                  | Configurable |
 |----------------------+----------------------------------------------------------+--------------|
@@ -1216,11 +1215,10 @@ Export, notification and maintenance tasks run through
 | =bb export --force=                                 | Full rebuild, ignore timestamps                                      |
 | =bb export root=                                    | Regenerate top-level =index.html= only                                 |
 | =bb export --html-page-size 100=                    | Paginate HTML table (100 reports/page)                               |
-| =bb export html --html-columns "type,subject,date"= | Show only those HTML table columns                                   |
+| =bb export --html-columns "type,subject,date"=      | Show only those HTML table columns                                   |
 | =bb export --closed-retention 1y=                   | Keep only reports closed within the last 12 months                   |
 | =bb export --topics-filter "a,b"=                   | Only export reports with a topic in the list                         |
 | =bb export --only-open=                             | Also export =-open= files (all-open.json, etc.)                        |
-| =bb export FORMAT=                                  | One of json, rss, org, html, stats, patches, text, events, root, all |
 | =bb notify=                                         | Send notification emails                                             |
 | =bb notify --dry-run=                               | Preview notifications without sending                                |
 | =bb notify --debug=                                 | Verbose filtering diagnostics                                        |

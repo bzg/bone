@@ -24,21 +24,13 @@
 ;;
 ;; Usage:
 ;;   bb export               -- incremental export (skip if nothing changed)
-;;   bb export json          -- export all.json for each source
-;;   bb export rss           -- export all.xml for each source
-;;   bb export org           -- export all.org for each source
-;;   bb export html          -- generate index.html for each source
-;;   bb export stats         -- generate stats.json for each source
-;;   bb export patches       -- export patch files for each source
-;;   bb export events        -- export ICS event files and announcements*.ics for each source
-;;   bb export text          -- export text/plain and text/x-log attachments
+;;   bb export all           -- the same, spelled out
 ;;   bb export root          -- regenerate public/index.html (source listing)
 ;;   bb export --index-only  -- same as "root"
-;;   bb export all           -- all formats (still incremental)
 ;;   bb export --force       -- force full export, ignore timestamps
-;;   bb export json -n src   -- export only source "src"
-;;   bb export json -p 2     -- only priority >= 2
-;;   bb export json -s 3     -- only status >= 3
+;;   bb export -n src        -- export only source "src"
+;;   bb export -p 2          -- only priority >= 2
+;;   bb export -s 3          -- only status >= 3
 ;;   bb export --closed-retention 90d  -- drop reports closed before a date/duration
 ;;   bb export --topics-filter a,b     -- only reports with one of these topics
 ;;   bb export --html-theme <name|path|url> --html-page-size <n>
@@ -1637,14 +1629,12 @@
     (log/info "Wrote public/index.html with" (count rows) "source(s)")))
 
 (defn export-source!
-  "Export a single source in the given format(s).
-  The \"all\", \"json\" and \"html\" formats always produce all-open.json
-  and all-closed.json (used by index.html).
-  When format is \"all\", per-type feeds respect :export-formats from config.
+  "Export a single source: the formats :export-formats enables for it,
+  plus all-open.json and all-closed.json (used by index.html) always.
   `changed-types` (optional map {report-type count}, used as a set-like
   predicate) limits per-type file regeneration to those types during
   incremental export; aggregate files are always rebuilt."
-  [format reports base-dir source-name source-map maintainers-map cli-extra
+  [reports base-dir source-name source-map maintainers-map cli-extra
    & {:keys [changed-types since regen-shell? regen-docs?]}]
   (let [reports-dir (str base-dir "/reports")
         patches-dir (str base-dir "/patches")
@@ -1657,58 +1647,35 @@
                      :reports-dir     reports-dir
                      :source-name     source-name
                      :source-map      source-map
-                     :maintainers-map maintainers-map}
-        do-format
-        (fn [fmt]
-          (case fmt
-            "json"    (do (dump-json! reports reports-dir source-name source-map maintainers-map)
-                          (dump-votes! reports reports-dir)
-                          (dump-per-type! scope #{"json"})
-                          (dump-open-closed! scope #{"json"}))
-            "rss"     (do (dump-rss!  reports reports-dir source-name source-map maintainers-map)
-                          (dump-per-type! scope #{"rss"}))
-            "org"     (do (dump-org!  reports reports-dir source-name source-map maintainers-map)
-                          (dump-per-type! scope #{"org"})
-                          (dump-open-closed! scope #{"org"}))
-            "patches" (dump-patches! reports patches-dir :since since)
-            "text"    (dump-text! reports text-dir :since since)
-            "events"  (do (dump-events! reports events-dir :since since)
-                          (dump-events-filtered! scope ef)
-                          (dump-events-ics! reports events-dir source-name))
-            "html"    (do (dump-json! reports reports-dir source-name source-map maintainers-map)
-                          (dump-votes! reports reports-dir)
-                          (dump-per-type! scope #{"json"})
-                          (dump-open-closed! scope #{"json"})
-                          (dump-docs! base-dir source-name cli-extra)
-                          (dump-html! base-dir reports-dir cli-extra))
-            "stats"   (dump-stats! base-dir reports-dir source-name "json" cli-extra)))]
-    (if (= format "all")
-      (do (when (ef "json") (dump-json! reports reports-dir source-name source-map maintainers-map))
-          ;; Votes are only consumed by JSON and HTML outputs.
-          (when (or (ef "json") (ef "html")) (dump-votes! reports reports-dir))
-          (when (ef "rss")  (dump-rss!  reports reports-dir source-name source-map maintainers-map))
-          (when (ef "org")  (dump-org!  reports reports-dir source-name source-map maintainers-map))
-          (dump-per-type! scope ef :changed-types changed-types)
-          (dump-open-closed! scope ef :changed-types changed-types)
-          (dump-patches! reports patches-dir :since since)
-          (dump-text! reports text-dir :since since)
-          (dump-events! reports events-dir :since since)
-          (dump-events-filtered! scope ef)
-          (dump-events-ics! reports events-dir source-name)
-          ;; stats.json is a data file (always refreshed); data.html, like
-          ;; index.html/docs.html, is a data-independent shell skipped on
-          ;; data-only runs (the orchestrator preserves it across the swap).
-          (dump-stats! base-dir reports-dir source-name "json" cli-extra)
-          (when regen-docs?  (dump-docs! base-dir source-name cli-extra))
-          (when regen-shell? (dump-html! base-dir reports-dir cli-extra))
-          (when regen-shell? (dump-stats! base-dir reports-dir source-name "html" cli-extra)))
-      (do-format format))))
+                     :maintainers-map maintainers-map}]
+    (when (ef "json") (dump-json! reports reports-dir source-name source-map maintainers-map))
+    ;; Votes are only consumed by JSON and HTML outputs.
+    (when (or (ef "json") (ef "html")) (dump-votes! reports reports-dir))
+    (when (ef "rss")  (dump-rss!  reports reports-dir source-name source-map maintainers-map))
+    (when (ef "org")  (dump-org!  reports reports-dir source-name source-map maintainers-map))
+    (dump-per-type! scope ef :changed-types changed-types)
+    (dump-open-closed! scope ef :changed-types changed-types)
+    (dump-patches! reports patches-dir :since since)
+    (dump-text! reports text-dir :since since)
+    (dump-events! reports events-dir :since since)
+    (dump-events-filtered! scope ef)
+    (dump-events-ics! reports events-dir source-name)
+    ;; stats.json is a data file (always refreshed); data.html, like
+    ;; index.html/docs.html, is a data-independent shell skipped on
+    ;; data-only runs (the orchestrator preserves it across the swap).
+    (dump-stats! base-dir reports-dir source-name "json" cli-extra)
+    (when regen-docs?  (dump-docs! base-dir source-name cli-extra))
+    (when regen-shell? (dump-html! base-dir reports-dir cli-extra))
+    (when regen-shell? (dump-stats! base-dir reports-dir source-name "html" cli-extra))))
 
 ;; ---------------------------------------------------------------------------
 ;; Main
 ;; ---------------------------------------------------------------------------
 
-(def formats #{"json" "rss" "org" "html" "all" "stats" "patches" "text" "events" "root"})
+(def formats
+  "\"all\" exports every source in every format; \"root\" only
+  regenerates public/index.html."
+  #{"all" "root"})
 
 (defn- validate-opts!
   "Exit with status 1 on an unknown format, an out-of-range -p/-s, or a
@@ -1716,7 +1683,7 @@
   [{:keys [format source-name min-priority min-status]} source-map]
   (when-not (formats format)
     (log/error "Unknown format:" format)
-    (log/error "Formats: json rss org html stats patches text events root all")
+    (log/error "Formats: all root")
     (System/exit 1))
   (when (and min-priority (not (#{1 2 3} min-priority)))
     (log/error "Invalid --min-priority:" min-priority "(must be 1, 2, or 3)")
@@ -1785,7 +1752,7 @@
   "Export one source into a staging dir, then swap it into public/<slug>.
   Returns true when something was published, false when the source has
   no reports and no previous export."
-  [{:keys [format db source-map maintainers-map all-reps cli-tf drop-cutoff cli-extra
+  [{:keys [db source-map maintainers-map all-reps cli-tf drop-cutoff cli-extra
            changed-st incremental? last-export min-priority min-status]}
    src-name]
   (let [reports     (filter-reports all-reps {:source       src-name
@@ -1823,22 +1790,19 @@
                        (if incremental? " (incremental)" "")))
         (try
           (delete-dir! (io/file staging))
-          ;; Single-format runs: FULL copy of final-dir, or the swap would
-          ;; wipe the other formats.  "all": incremental seeds only the
-          ;; subdirs it does not rewrite; a full run starts from an empty
-          ;; staging so stale files are purged.
-          (if (not= format "all")
-            (copy-dir! (io/file final-dir) (io/file staging))
-            (when incremental?
-              (doseq [sub ["reports" "patches" "text" "events"]]
-                (copy-dir! (io/file final-dir sub) (io/file staging sub)))))
+          ;; An incremental run seeds the staging dir with the subdirs it
+          ;; does not rewrite; a full run starts from an empty staging so
+          ;; stale files are purged.
+          (when incremental?
+            (doseq [sub ["reports" "patches" "text" "events"]]
+              (copy-dir! (io/file final-dir sub) (io/file staging sub))))
           ;; Preserve the previous HTML shells when not regenerating them:
           ;; they are top-level files not covered by the subdir seed above,
           ;; and would vanish in the atomic swap.
           (preserve-shell! regen-shell? final-dir staging "index.html")
           (preserve-shell! regen-shell? final-dir staging "data.html")
           (preserve-shell! regen-docs?  final-dir staging "docs.html")
-          (export-source! format reports staging src-name
+          (export-source! reports staging src-name
                           source-map maintainers-map cli-extra
                           :changed-types src-changed
                           :since (when incremental? last-export)
@@ -1965,8 +1929,7 @@
                                         (log/info "CLI topics filter:" (str/join ", " cli-tf)))
                           _           (when drop-cutoff
                                         (log/info "Dropping reports closed before" drop-cutoff))
-                          ctx         {:format          format
-                                       :db              db
+                          ctx         {:db              db
                                        :source-map      source-map
                                        :maintainers-map (build-maintainers db source-map)
                                        :all-reps        (all-reports-by-date db)
