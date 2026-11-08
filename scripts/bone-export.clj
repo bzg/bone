@@ -47,16 +47,16 @@
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
             [bone.common :refer [parse-headers get-header slugify mid-hash
-                                 format-date format-date-iso
-                                 extract-bracketed-id-raw
-                                 report-priority report-status report-descendant-count
-                                 parse-cli-args parse-delay parse-cutoff-date
-                                 reproducible-config-str
-                                 bone-schema bone-format
-                                 report-type-spec type->plural
-                                 votes-by-report vote-counts
+                                 format-date-iso report-priority parse-delay
+                                 bone-schema report-type-spec
                                  text-attachment? email-body-text]]
-            [bone.config :refer [load-config load-mailmap db-path build-source-map]]
+            [bone.config :refer [load-config db-path build-source-map]]
+            [bone.export :refer [bone-format format-date parse-cutoff-date
+                                 extract-bracketed-id-raw
+                                 report-status report-descendant-count
+                                 reproducible-config-str type->plural
+                                 votes-by-report vote-counts
+                                 load-mailmap parse-cli-args]]
             [bone.ics :refer [ics-file? normalize-ics-eol
                               extract-vevents extract-vtimezones
                               dedupe-vevents dedupe-vtimezones build-vcalendar]]
@@ -1962,13 +1962,12 @@
               ;; Always list every configured source: source-names is narrowed
               ;; to one entry by -n, and the root index must not shrink to it
               ;; (the :when meta filter drops never-exported sources anyway).
-              (when (and (#{"all" "root"} format)
-                         (or (= format "root") (seq exported-srcs)))
+              (when (or (= format "root") (seq exported-srcs))
                 (dump-root-index! (mapv :name (:sources config)) source-map))
               (notify-exported! exported-srcs incremental? new-st state-st))
             ;; Advance the incremental watermark only after a full,
-            ;; unfiltered run: a partial run (single format, -n, or a
-            ;; priority/status/topics filter) does not publish everything,
+            ;; unfiltered run: a partial run (-n, or a priority/status/
+            ;; topics filter) does not publish everything,
             ;; so moving the watermark would hide those changes from the
             ;; next incremental export.  --closed-retention is fine: it
             ;; only drops old closed reports, and day-crossed? forces a

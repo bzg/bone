@@ -7,6 +7,7 @@
   and DB queries that run via the pod.  Scripts require this ns
   alongside `bone.common`; there is no more `load-file` dance."
   (:require [bone.common :as common]
+            [bone.export :as export]
             [clojure.edn :as edn]
             [taoensso.timbre :as log]))
 
@@ -41,7 +42,7 @@
 (defn all-reports
   "Fetch all reports. Must be called after load-datalevin-pod!."
   [db]
-  (->> (dq (list :find (list 'pull '?r common/report-pull-pattern)
+  (->> (dq (list :find (list 'pull '?r export/report-pull-pattern)
                  :where ['?r :report/type '_])
            db)
        (map first)))
@@ -51,7 +52,7 @@
   Returns the attachment-pull-pattern projection, or nil."
   [db message-id]
   (when message-id
-    (dpull db common/attachment-pull-pattern
+    (dpull db export/attachment-pull-pattern
            [:report/message-id-hash (common/mid-hash message-id)])))
 
 (defn get-tenures

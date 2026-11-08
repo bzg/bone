@@ -20,9 +20,10 @@
             [taoensso.timbre :as log]
             [bone.common :refer [default-labels default-commands close-reasons
                                     resolve-labels-map resolve-commands-map
-                                    resolve-command-syntax reproducible-config-str
-                                    parse-cli-args format-date-iso bone-schema lead-maintainer]]
-            [bone.config :refer [load-config load-mailmap db-path build-source-map]]
+                                    resolve-command-syntax
+                                    format-date-iso bone-schema lead-maintainer]]
+            [bone.config :refer [load-config db-path build-source-map]]
+            [bone.export :refer [reproducible-config-str parse-cli-args load-mailmap]]
             [bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]
             [bone.html-bb :refer [set-theme! head-hiccup
                                      footer-css theme-toggle-css bone-footer wrap-js
@@ -383,7 +384,7 @@
   drops into their own BONE instance to reproduce this source on their
   own copy of the mail.  Global :labels/:commands/... are folded in and
   secrets/operator-internal keys are dropped (see
-  `bone.common/effective-source-config`)."
+  `bone.export/effective-source-config`)."
   [config source-name]
   (when-let [edn (and source-name (reproducible-config-str config source-name))]
     (list [:h2#configuration "Configuration"]

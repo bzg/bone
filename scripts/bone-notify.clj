@@ -25,12 +25,11 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
-            [bone.common :refer [get-header-values format-date format-date-iso
-                                    report-priority report-descendant-count
-                                    bone-schema mid-hash
-                                    failures-file-path read-failures-file
-                                    reason-labels]]
+            [bone.common :refer [get-header-values format-date-iso
+                                    report-priority bone-schema mid-hash
+                                    failures-file-path read-failures-file]]
             [bone.config :refer [load-config db-path build-source-map]]
+            [bone.export :refer [format-date report-descendant-count reason-labels]]
             [bone.common-bb :refer [load-datalevin-pod! all-reports]]))
 
 (load-datalevin-pod!)

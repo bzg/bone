@@ -10,6 +10,7 @@
 
 (ns validate-config
   (:require [clojure.spec.alpha :as s]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.java.io :as io]
             [taoensso.timbre :as log]
@@ -190,7 +191,7 @@
                                    :opt-un [:notif/smtp :notif/subscribers :notif/admin-bcc]))
 
 ;; Valid report type keywords -- derived from common/report-type-spec.
-(def valid-report-types common/report-type-keywords)
+(def valid-report-types (into #{} (map :type) common/report-type-spec))
 
 ;; Command IDs (for extended :commands format) -- derived from the
 ;; registry so a new command is automatically accepted here.
@@ -204,6 +205,19 @@
 (def valid-plain-scopes  #{:user :maintainer})
 (def valid-setter-scopes #{:user :maintainer :setter-or-maintainer})
 
+;; Commands that support a :setter-or-maintainer scope override:
+;; - unset lines keyed on a setter-ref attribute, plus
+;; - explicit relation-backed unsets (:unsuperseded-by, :unsupersedes,
+;;   :unduplicate-of).
+;; All of them default to :scope :user; this set only matters when a
+;; source tightens one back via config.
+(def setter-scoped-command-ids
+  (into #{:unsuperseded-by :unsupersedes :unduplicate-of}
+        (comp (filter #(str/starts-with? (name (:action %)) "unset"))
+              (filter #(contains? reg/setter-ref-attrs (:attr %)))
+              (map :id))
+        reg/commands))
+
 ;; Per-source commands (optional).
 ;; Values are maps with any of :words, :scope, :report-types (at least one).
 ;; Each word in :words is a bare string. For historical vocabulary
@@ -215,14 +229,14 @@
 (defn valid-command-value?
   "Validate a single command override. `cmd-id` is needed because
   :setter-or-maintainer is only allowed on the commands listed in
-  `reg/setter-scoped-command-ids`."
+  `setter-scoped-command-ids`."
   [cmd-id v]
   (and (map? v)
        (seq v)
        (every? #{:words :scope :report-types} (keys v))
        (if (:words v) (s/valid? ::trigger-words (:words v)) true)
        (if-let [sc (:scope v)]
-         (if (contains? reg/setter-scoped-command-ids cmd-id)
+         (if (contains? setter-scoped-command-ids cmd-id)
            (contains? valid-setter-scopes sc)
            (contains? valid-plain-scopes sc))
          true)
@@ -379,7 +393,7 @@
                        :else
                        (let [bad-keys   (remove #{:words :scope :report-types} (keys v))
                              sc         (:scope v)
-                             allows-s-o-m? (contains? reg/setter-scoped-command-ids cmd-id)
+                             allows-s-o-m? (contains? setter-scoped-command-ids cmd-id)
                              allowed-scopes (if allows-s-o-m?
                                               valid-setter-scopes
                                               valid-plain-scopes)]
@@ -480,6 +494,28 @@
 ;; Main
 ;; ---------------------------------------------------------------------------
 
+(defn- inline-password-locations
+  "Read config.edn as it was written -- without resolving #bone/env or
+   :password-file -- and return a vector of human-readable location
+   labels where :password is a plain inline string: a reminder that
+   credentials can live in a sidecar file or environment variable
+   instead."
+  [path]
+  (let [f (io/file path)]
+    (when (.exists f)
+      (let [env-marker ::env
+            raw        (edn/read-string
+                        {:readers {'bone/env (constantly env-marker)}}
+                        (slurp f))
+            inline?    #(and (map? %)
+                             (string? (:password %))
+                             (not (:password-file %)))
+            mailboxes  (for [mb (:mailboxes raw) :when (inline? mb)]
+                         (str "mailbox " (pr-str (:name mb))))
+            smtp       (when (inline? (get-in raw [:notifications :smtp]))
+                         "notifications :smtp")]
+        (vec (cond-> (vec mailboxes) smtp (conj smtp)))))))
+
 (defn -main [& args]
   (let [path (or (first args)
                  (System/getenv "BONE_CONFIG")
@@ -494,7 +530,7 @@
                        (log/error "Invalid EDN:" (.getMessage e))
                        (System/exit 1)))
             result (validate-config config)
-            inline-pwds (config/inline-password-locations path)]
+            inline-pwds (inline-password-locations path)]
         (doseq [loc inline-pwds]
           (log/warn "Inline :password in" loc
                     "-- consider :password-file or #bone/env to keep"

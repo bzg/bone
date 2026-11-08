@@ -21,7 +21,7 @@
             [clojure.string :as str]
             [hiccup2.core :as h]
             [taoensso.timbre :as log]
-            [bone.common :refer [parse-cli-args escape-script-payload]]
+            [bone.export :refer [parse-cli-args escape-script-payload]]
             [bone.html-bb :refer [set-theme! head-hiccup page-title source-feeds
                                      footer-css theme-toggle-css
                                      bone-footer wrap-js spit-html

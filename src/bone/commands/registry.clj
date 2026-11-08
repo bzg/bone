@@ -3,8 +3,7 @@
 ;; License-Filename: LICENSES/EPL-2.0.txt
 
 (ns bone.commands.registry
-  "Pure command registry -- static data, no runtime deps (loadable from bb)."
-  (:require [clojure.string :as str]))
+  "Pure command registry -- static data, no runtime deps (loadable from bb).")
 
 ;; ---------------------------------------------------------------------------
 ;; Vocabulary
@@ -171,16 +170,3 @@
    :report/topic         :report/topic-value
    :report/deadline      :report/deadline-value
    :report/expiry        :report/expiry-value})
-
-;; Commands that support a :setter-or-maintainer scope override:
-;; - unset lines keyed on a setter-ref attribute, plus
-;; - explicit relation-backed unsets (:unsuperseded-by, :unsupersedes,
-;;   :unduplicate-of).
-;; All of them default to :scope :user; this set only matters when a
-;; source tightens one back via config.
-(def setter-scoped-command-ids
-  (into #{:unsuperseded-by :unsupersedes :unduplicate-of}
-        (comp (filter #(str/starts-with? (name (:action %)) "unset"))
-              (filter #(contains? setter-ref-attrs (:attr %)))
-              (map :id))
-        commands))

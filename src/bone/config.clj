@@ -4,8 +4,9 @@
 
 (ns bone.config
   "config.edn loading (reader tags, :password-file resolution), the
-  derived per-source map, mailmap.edn and the DB path.  No datalevin
-  dependency: shared by the JVM daemon and the bb scripts."
+  derived per-source map and the DB path.  No datalevin dependency:
+  shared by the JVM daemon and the bb scripts.  mailmap.edn, read by
+  the exports only, lives in `bone.export`."
   (:require [bone.common :as common]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -64,44 +65,6 @@
      (when (.exists f)
        (-> (edn/read-string {:readers config-edn-readers} (slurp f))
            resolve-password-files)))))
-
-(defn inline-password-locations
-  "Read config.edn as it was written -- without resolving #bone/env or
-   :password-file -- and return a vector of human-readable location
-   labels where :password is a plain inline string.  Used by
-   `bb test-config` to remind operators that credentials can live in
-   a sidecar file or environment variable instead."
-  [path]
-  (let [f (io/file path)]
-    (when (.exists f)
-      (let [env-marker ::env
-            raw        (edn/read-string
-                        {:readers {'bone/env (constantly env-marker)}}
-                        (slurp f))
-            inline?    #(and (map? %)
-                             (string? (:password %))
-                             (not (:password-file %)))
-            mailboxes  (for [mb (:mailboxes raw) :when (inline? mb)]
-                         (str "mailbox " (pr-str (:name mb))))
-            smtp       (when (inline? (get-in raw [:notifications :smtp]))
-                         "notifications :smtp")]
-        (vec (cond-> (vec mailboxes) smtp (conj smtp)))))))
-
-(defn load-mailmap
-  "Load ./mailmap.edn (shape `{\"Canonical Name\" [emails...]}`) and return
-  `{email-lc -> canonical-name}` (inverted, flat).  Returns `{}` if
-  the file is absent.  Export-only -- never read on the ingest path."
-  []
-  (let [f (io/file "mailmap.edn")]
-    (if (.exists f)
-      (let [m (edn/read-string (slurp f))]
-        (reduce-kv
-         (fn [acc nm emails]
-           (reduce (fn [a e] (assoc a (str/lower-case e) nm))
-                   acc
-                   emails))
-         {} m))
-      {})))
 
 (defn db-path
   "Resolve the Datalevin DB path: prefer :db {:path ...} from the

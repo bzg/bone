@@ -1182,7 +1182,7 @@
   (some-> (attr->word-cmd attr) :id name str/capitalize (str ".")))
 
 (defn partition-words-by-scope
-  "Pure decision behind `filter-words-by-scope`: split `word-result`
+  "Pure decision behind `command-plan`'s barewords: split `word-result`
   into {:allowed <word-map-or-nil> :denied [attr ...]} by each
   bareword's effective scope.  :report/close-reason is no bareword:
   it rides back onto a non-empty allowed map (build-word-tx only

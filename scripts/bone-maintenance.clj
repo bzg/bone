@@ -23,11 +23,9 @@
 (ns bone-maintenance
   (:require [clojure.string :as str]
             [taoensso.timbre :as log]
-            [bone.common :refer [parse-cutoff-date
-                                    bone-schema format-date
-                                    failures-file-path read-failures-file
-                                    reason-labels]]
+            [bone.common :refer [bone-schema failures-file-path read-failures-file]]
             [bone.config :refer [load-config db-path build-source-map]]
+            [bone.export :refer [parse-cutoff-date format-date reason-labels]]
             [bone.common-bb :refer [load-datalevin-pod! dq get-tenures]]))
 
 ;; ---------------------------------------------------------------------------
