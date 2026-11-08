@@ -478,12 +478,10 @@
                                    close-reason (conj (str "close-reason:" (name close-reason)))))
                   (str "(by " email-mid ")"))
         ;; Propagate bareword-driven closure of a patch to the
-        ;; bugs/requests it resolves (no successor here).
-        ;; :patch-triggers? false opts out of :resolved propagation;
-        ;; :canceled retraction still runs.
+        ;; bugs/requests it resolves (no successor here), as the
+        ;; registry's patch-closure-effects says for the reason.
         (when (and (= :patch rtype) close-reason (:report/closed new-sets)
-                   (or (not= :resolved close-reason)
-                       (common/patch-triggers? source-cfg)))
+                   (rel/closure-propagates? close-reason source-cfg))
           (rel/propagate-patch-closure! conn report-eid email-eid
                                         close-reason nil))))))
 
@@ -1021,12 +1019,12 @@
 (defn- propagate-closed-by!
   "Closing a patch via `Closed-by:` must propagate to the bugs/requests
   it resolves, exactly like the bareword `Closed.` path in
-  `apply-words!`.  Same opt-out: sources with \":patch-triggers?
-  false\" skip the :resolved propagation."
+  `apply-words!`: a :resolved closure, under the same :patch-triggers?
+  gate."
   [conn report-eid email-eid source-type resolved source-cfg]
   (when (and (= :patch source-type)
              (contains? (:set resolved) :report/closed)
-             (common/patch-triggers? source-cfg))
+             (rel/closure-propagates? :resolved source-cfg))
     (rel/propagate-patch-closure! conn report-eid email-eid :resolved nil)))
 
 (defn- report-row-failures!

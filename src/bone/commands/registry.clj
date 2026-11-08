@@ -170,3 +170,36 @@
    :report/topic         :report/topic-value
    :report/deadline      :report/deadline-value
    :report/expiry        :report/expiry-value})
+
+;; ---------------------------------------------------------------------------
+;; Patch closure propagation
+;; ---------------------------------------------------------------------------
+;;
+;; A patch report posted in reply to a bug or request :resolves it
+;; (bone.digest/link-rel!) and, unless the source sets
+;; ":patch-triggers? false", credits its author Acked and Owned on it.
+;; Closing the patch then propagates to the reports it resolves, by
+;; close reason, as this table says: bone.relations reads it
+;; (propagate-patch-closure!, closure-propagates?) and the manual's
+;; "Resolving a bug or request with a patch" restates it.
+;;
+;; Only earned credits move: an Acked or Owned whose setting email is
+;; a patch resolving the report (the implicit credit, or an explicit
+;; word in that patch's own mail).  Propagation is one-way: reopening
+;; the patch or retracting its supersession undoes nothing on the
+;; targets.  A series restart closes the old series as :superseded
+;; without going through this table.
+(def patch-closure-effects
+  "Close reason of a patch => its effects on the bugs/requests it :resolves.
+    :targets  -- :close            close them too, same reason, same closer
+                 :retract-credits  drop the Acked and Owned earned on them
+                 :transfer-owned   hand an earned Owned to the successor's
+                                   author, which inherits the :resolves link
+                                   (Acked stays with whoever first confirmed)
+    :upthread -- :supersede        also close the still-open patch reports
+                                   upthread of this one as :superseded by it
+    :needs-patch-triggers? -- skipped when the source sets :patch-triggers? false
+  A reason absent from the table (:expired) propagates nothing."
+  {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true}
+   :canceled   {:targets :retract-credits}
+   :superseded {:targets :transfer-owned}})

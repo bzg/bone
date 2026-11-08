@@ -10,6 +10,8 @@
   by ascending eid order.  See bone-schema.edn for the :rel/* attrs."
   (:require [clojure.string :as str]
             [datalevin.core :as d]
+            [bone.common :as common]
+            [bone.commands.registry :as registry]
             [bone.tracking :as tracking]
             [taoensso.timbre :as log]))
 
@@ -400,25 +402,42 @@
            acc)))
      [] bugs)))
 
+(defn closure-propagates?
+  "Pure.  Whether a patch closed for `close-reason` on a source
+  configured by `source-cfg` propagates to the reports it resolves,
+  by `registry/patch-closure-effects`: :resolved needs
+  :patch-triggers?, the other listed reasons always do, an unlisted
+  one (:expired) never."
+  [close-reason source-cfg]
+  (when-let [{:keys [needs-patch-triggers?]}
+             (get registry/patch-closure-effects close-reason)]
+    (or (not needs-patch-triggers?)
+        (common/patch-triggers? source-cfg))))
+
 (defn propagate-patch-closure!
-  "Propagate a patch's closure to the bugs/requests it :resolves:
-  :resolved closes them; :canceled retracts auto-credits; :superseded
+  "Propagate a patch's closure to the bugs/requests it :resolves, as
+  `registry/patch-closure-effects` says for `close-reason`: :resolved
+  closes them and supersedes the still-open patch reports upthread
+  (applying the head of a revision chain retires the revisions it
+  replaced); :canceled retracts the earned credits; :superseded
   transfers :owned to `successor-eid` (acked stays with the original
-  acker -- a historical act, not transferable).  A :resolved closure
-  also supersedes the still-open patch reports upthread: applying the
-  head of a revision chain retires the revisions it replaced.  Bumps
-  every modified target so the incremental export and notifications
-  pick them up."
+  acker -- a historical act, not transferable).  The :patch-triggers?
+  gate is the caller's, through `closure-propagates?`.  Bumps every
+  modified target so the incremental export and notifications pick
+  them up."
   [conn patch-eid email-eid close-reason successor-eid]
   (let [db      (d/db conn)
         bugs    (active-targets db patch-eid :resolves)
-        touched (case close-reason
-                  :resolved   (into (vec (close-resolved-targets! conn db bugs email-eid))
-                                    (supersede-upthread-revisions! conn db patch-eid email-eid))
-                  :canceled   (retract-canceled-credits! conn bugs)
-                  :superseded (when successor-eid
-                                (transfer-superseded-ownership! conn db bugs successor-eid))
-                  ;; Other reasons (:expired, etc.) do not propagate.
-                  nil)]
+        {:keys [targets upthread]} (get registry/patch-closure-effects close-reason)
+        touched (-> (case targets
+                      :close           (close-resolved-targets! conn db bugs email-eid)
+                      :retract-credits (retract-canceled-credits! conn bugs)
+                      :transfer-owned  (when successor-eid
+                                         (transfer-superseded-ownership! conn db bugs
+                                                                         successor-eid))
+                      nil)
+                    vec
+                    (into (when (= :supersede upthread)
+                            (supersede-upthread-revisions! conn db patch-eid email-eid))))]
     (when (seq touched)
       (tracking/bump-report-updated! conn touched))))
