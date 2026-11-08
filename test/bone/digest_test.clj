@@ -917,27 +917,9 @@
    (when-let [e (lookup/email-eid db mid)]
      (:email/pending-thread? (d/pull db [:email/pending-thread?] e)))))
 
-(deftest pending-thread-no-irt-not-flagged
-  (testing "An email with no In-Reply-To is never flagged pending."
-    (let [{:keys [conn] :as ctx} (setup-db!)]
-      (try
-        (store-and-process! conn
-                            (mk-email {:mid "<root-1@test.org>"
-                                       :subject "[BUG] something"
-                                       :from "user@test.org"
-                                       :date #inst "2026-05-01T10:00:00"
-                                       :body "broken\n"})
-                            "direct")
-        (let [db (d/db conn)]
-          (is (false? (pending? db "<root-1@test.org>"))
-              "Root email should not be pending")
-          (is (report-exists? db "<root-1@test.org>")
-              "Bug report should be created"))
-        (finally
-          (teardown! ctx))))))
-
 (deftest pending-thread-in-order-typical
-  (testing "In-order : reply arrives after parent => no pending flag, command applied."
+  (testing "In-order: a root is never pending; a reply arriving after its
+            parent is not pending either and its command applies."
     (let [{:keys [conn] :as ctx} (setup-db!)]
       (try
         (store-and-process! conn
@@ -957,6 +939,9 @@
                             "direct")
         (let [db (d/db conn)
               r  (get-report db "<inord-1@test.org>")]
+          (is (false? (pending? db "<inord-1@test.org>"))
+              "A root email (no In-Reply-To) is never pending")
+          (is (some? r) "Bug report created")
           (is (false? (pending? db "<inord-2@test.org>"))
               "Reply with resolved IRT should not be pending")
           (is (some? (:report/closed r)) "Bug should be closed by the reply"))
@@ -1374,50 +1359,6 @@
         (finally
           (teardown! ctx))))))
 
-(deftest cover-letter-broadcast-closure
-  (testing "Closed. on a cover letter closes every patch of the series."
-    (let [{:keys [conn] :as ctx} (setup-db!)]
-      (try
-        (store-and-process! conn
-                            (mk-email {:mid "<cov2@test.org>"
-                                       :subject "[PATCH topic 0/2] series"
-                                       :from "user@test.org"
-                                       :date #inst "2026-06-03T10:00:00"
-                                       :body "Series\n"})
-                            "direct")
-        (doseq [i [1 2]]
-          (store-and-process! conn
-                              (mk-email {:mid (str "<q" i "@test.org>")
-                                         :subject (str "[PATCH topic " i "/2] step " i)
-                                         :from "user@test.org"
-                                         :date #inst "2026-06-03T10:01:00"
-                                         :in-reply-to "<cov2@test.org>"
-                                         :body (str "step " i "\n\n"
-                                                    "diff --git a/y.clj b/y.clj\n"
-                                                    "--- a/y.clj\n+++ b/y.clj\n"
-                                                    "@@ -1,1 +1,1 @@\n-a\n+b\n")})
-                              "direct"))
-        (store-and-process! conn
-                            (mk-email {:mid "<close-rev@test.org>"
-                                       :subject "Re: [PATCH topic 0/2] series"
-                                       :from "admin@test.org"
-                                       :date #inst "2026-06-04T09:00:00"
-                                       :in-reply-to "<cov2@test.org>"
-                                       :body "Closed.\n"})
-                            "direct")
-        (let [db (d/db conn)
-              cover (get-report db "<cov2@test.org>")
-              q1    (get-report db "<q1@test.org>")
-              q2    (get-report db "<q2@test.org>")]
-          (is (some? (:report/closed cover)) "cover closed")
-          (is (some? (:report/closed q1))    "patch 1/2 closed")
-          (is (some? (:report/closed q2))    "patch 2/2 closed")
-          (is (= :resolved (:report/close-reason cover)))
-          (is (= :resolved (:report/close-reason q1)))
-          (is (= :resolved (:report/close-reason q2))))
-        (finally
-          (teardown! ctx))))))
-
 (deftest series-restart-keeps-own-cover-series
   (testing "A re-roll posted with a fresh cover letter supersedes the
             old series WITHOUT closing the series its own cover just
@@ -1487,11 +1428,13 @@
                                        :in-reply-to "<sr-cov@test.org>"
                                        :body "Applied. Thanks!\n"})
                             "direct")
-        (let [db (d/db conn)]
-          (is (some? (:report/closed (get-report db "<sr-v2-1@test.org>")))
-              "patch 1/2 closed via cover broadcast")
-          (is (some? (:report/closed (get-report db "<sr-v2-2@test.org>")))
-              "patch 2/2 closed via cover broadcast"))
+        (let [db (d/db conn)
+              cover (get-report db "<sr-cov@test.org>")
+              p1    (get-report db "<sr-v2-1@test.org>")
+              p2    (get-report db "<sr-v2-2@test.org>")]
+          (is (= :resolved (:report/close-reason cover)) "cover closed")
+          (is (= :resolved (:report/close-reason p1)) "patch 1/2 closed via cover broadcast")
+          (is (= :resolved (:report/close-reason p2)) "patch 2/2 closed via cover broadcast"))
         (finally
           (teardown! ctx))))))
 
@@ -1625,7 +1568,9 @@
             v1, but the reviewer's comment -- and so v3 -- branched off v1
             on a different reply path that never mentions v2.  Walking only
             the immediate ancestor chain (`nearest-report-eids`) missed this
-            still-open sibling; `open-patch-eids-by-sender` closes the gap."
+            still-open sibling; `open-patch-eids-by-sender` closes the gap.
+            v2's From is cased differently from v1's and v3's: the
+            sender-wide search must match case-insensitively."
     (let [{:keys [conn] :as ctx} (setup-db!)]
       (try
         (store-and-process! conn
@@ -1638,7 +1583,7 @@
         (store-and-process! conn
                             (assoc (mk-email {:mid "<v2@test.org>"
                                               :subject "Re: [PATCH v2] widget: fix the thing"
-                                              :from "user@test.org"
+                                              :from "User@Test.org"
                                               :date #inst "2026-06-12T14:59:00"
                                               :in-reply-to "<v1@test.org>"
                                               :body "Updated version of the patch.\n"})
@@ -1673,7 +1618,7 @@
           (is (some? v3) "v3 report was created")
           (is (some? (:report/closed v1)) "v1 was closed (superseded by v2)")
           (is (some? (:report/closed v2))
-              "v2 was closed (superseded by v3) despite not being on v3's reply chain")
+              "v2 was closed (superseded by v3) despite not being on v3's reply chain, and its differently-cased From")
           (is (= :superseded (:report/close-reason v2)))
           (is (nil? (:report/closed v3)) "v3 itself stays open"))
         (finally
@@ -1997,57 +1942,6 @@
               a  (get-report db "<a@test.org>")]
           (is (some? (:report/closed a))
               "A closed: C carries the same patch as A's inline one"))
-        (finally
-          (teardown! ctx))))))
-
-(deftest supersede-sender-match-is-case-insensitive
-  (testing "the sender-wide candidate search matches the author address
-            case-insensitively: a sibling-branch v2 stored with a
-            differently-cased From is still found and closed by v3"
-    (let [{:keys [conn] :as ctx} (setup-db!)]
-      (try
-        (store-and-process! conn
-                            (mk-email {:mid "<v1@test.org>"
-                                       :subject "[PATCH] widget: fix the thing"
-                                       :from "user@test.org"
-                                       :date #inst "2026-06-08T19:15:00"
-                                       :body "Initial patch.\n"})
-                            "direct")
-        ;; v2's From is cased differently than v1/v3's.
-        (store-and-process! conn
-                            (assoc (mk-email {:mid "<v2@test.org>"
-                                              :subject "Re: [PATCH v2] widget: fix the thing"
-                                              :from "User@Test.org"
-                                              :date #inst "2026-06-12T14:59:00"
-                                              :in-reply-to "<v1@test.org>"
-                                              :body "Updated version of the patch.\n"})
-                                   :email/attachments [{:attachment/filename "0002-fix.patch"}])
-                            "direct")
-        (store-and-process! conn
-                            (mk-email {:mid "<review@test.org>"
-                                       :subject "Re: [PATCH] widget: fix the thing"
-                                       :from "reviewer@test.org"
-                                       :date #inst "2026-06-15T10:00:00"
-                                       :in-reply-to "<v1@test.org>"
-                                       :body "Some review comments, no patch attached.\n"})
-                            "direct")
-        ;; v3 replies to the reviewer's comment: v2 is only reachable
-        ;; through the sender-wide search, which must ignore the case
-        ;; difference.
-        (store-and-process! conn
-                            (assoc (mk-email {:mid "<v3@test.org>"
-                                              :subject "Re: [PATCH v3] widget: fix the thing"
-                                              :from "user@test.org"
-                                              :date #inst "2026-06-17T06:37:00"
-                                              :in-reply-to "<review@test.org>"
-                                              :body "Third version, addressing review.\n"})
-                                   :email/attachments [{:attachment/filename "0003-fix.patch"}])
-                            "direct")
-        (let [db (d/db conn)
-              v2 (get-report db "<v2@test.org>")]
-          (is (some? (:report/closed v2))
-              "v2 closed despite its differently-cased author address")
-          (is (= :superseded (:report/close-reason v2))))
         (finally
           (teardown! ctx))))))
 
@@ -2542,60 +2436,11 @@
 ;; Applying a patch supersedes its stale upthread revisions
 ;; ---------------------------------------------------------------------------
 
-(deftest applied-revision-supersedes-upthread-patches
-  (testing "Closing a patch as :resolved supersedes the still-open patch
-            reports upthread -- the cross-sender revision case that
-            arrival-time auto-supersession (same-sender) misses."
-    (let [{:keys [conn] :as ctx} (setup-db!)]
-      (try
-        (store-and-process! conn
-                            (mk-email {:mid "<ar-v1@test.org>"
-                                       :subject "[PATCH] widget: fix the thing"
-                                       :from "user@test.org"
-                                       :date #inst "2026-07-01T10:00:00"
-                                       :body "Initial patch.\n"})
-                            "direct")
-        ;; The maintainer posts an improved version in the same thread:
-        ;; different sender and base subject, so arrival-time
-        ;; supersession stays out of the picture.
-        (store-and-process! conn
-                            (assoc (mk-email {:mid "<ar-v2@test.org>"
-                                              :subject "Re: [PATCH] widget: improved fix"
-                                              :from "maint@test.org"
-                                              :date #inst "2026-07-02T10:00:00"
-                                              :in-reply-to "<ar-v1@test.org>"
-                                              :body "Improved version attached.\n"})
-                                   :email/attachments
-                                   [{:attachment/filename "0001-improved.patch"}])
-                            "direct")
-        (is (nil? (:report/closed (get-report (d/db conn) "<ar-v1@test.org>")))
-            "v1 still open after the cross-sender v2 arrives")
-        (store-and-process! conn
-                            (mk-email {:mid "<ar-applied@test.org>"
-                                       :subject "Re: [PATCH] widget: improved fix"
-                                       :from "admin@test.org"
-                                       :date #inst "2026-07-03T09:00:00"
-                                       :in-reply-to "<ar-v2@test.org>"
-                                       :refs ["<ar-v1@test.org>" "<ar-v2@test.org>"]
-                                       :body "Applied.\n"})
-                            "direct")
-        (let [db (d/db conn)
-              v1 (get-report db "<ar-v1@test.org>")
-              v2 (get-report db "<ar-v2@test.org>")]
-          (is (some? (:report/closed v2)) "applied v2 is closed")
-          (is (= :resolved (:report/close-reason v2)))
-          (is (some? (:report/closed v1))
-              "stale v1 closed by the application of v2")
-          (is (= :superseded (:report/close-reason v1)))
-          (is (= "<ar-v2@test.org>"
-                 (some-> (superseded-by-target v1) :report/message-id))
-              "v1 records being superseded by v2"))
-        (finally
-          (teardown! ctx))))))
-
 (deftest not-closed-reopens-what-the-closure-propagated
-  (testing "Not closed. on an applied patch reopens the bug it resolved and
-            the revision it retired, unless another email closed them since."
+  (testing "Applying a patch supersedes the still-open revisions upthread
+            (the cross-sender case arrival-time auto-supersession misses);
+            Not closed. then reopens the bug it resolved and the revision
+            it retired, unless another email closed them since."
     (let [{:keys [conn] :as ctx} (setup-db!)
           process! #(store-and-process! conn % "direct")
           report   #(get-report (d/db conn) %)
@@ -2624,6 +2469,8 @@
                                     :body "Improved version attached.\n"})
                          :email/attachments
                          [{:attachment/filename "0001-improved.patch"}]))
+        (is (nil? (:report/closed (report "<un-v1@test.org>")))
+            "v1 still open after the cross-sender v2 arrives")
         (process! (mk-email {:mid "<un-applied@test.org>"
                              :subject "Re: [PATCH] widget: improved fix"
                              :from "admin@test.org"
@@ -2631,7 +2478,8 @@
                              :in-reply-to "<un-v2@test.org>"
                              :refs ["<un-bug@test.org>" "<un-v1@test.org>" "<un-v2@test.org>"]
                              :body "Applied.\n"}))
-        (testing "setup: the application closed the bug and retired v1"
+        (testing "the application closed the bug and retired v1"
+          (is (= :resolved (:report/close-reason (report "<un-v2@test.org>"))))
           (is (= :resolved (:report/close-reason (report "<un-bug@test.org>"))))
           (is (= "<un-applied@test.org>" (closer "<un-bug@test.org>")))
           (is (= :superseded (:report/close-reason (report "<un-v1@test.org>"))))
@@ -3231,29 +3079,21 @@
 ;; mailboxes subscribe to the same source in watch mode.
 ;; ---------------------------------------------------------------------------
 
-(deftest mid-ownership-first-caller-wins
-  ;; Use a unique mid to avoid colliding with other tests via the
-  ;; shared atom.
-  (let [mid "<lock-test-1@example.org>"]
+(deftest mid-ownership-test
+  ;; Unique mids: the ownership atom is shared with every other test.
+  (let [m1 "<lock-test-1@example.org>"
+        m2 "<lock-test-2@example.org>"]
     (try
-      (testing "first take-mid-ownership! claims the mid"
-        (is (true? (digest/take-mid-ownership! mid))))
-      (testing "second take-mid-ownership! observes the claim and returns false"
-        (is (false? (digest/take-mid-ownership! mid))))
+      (testing "the first caller claims a mid, the second observes the claim"
+        (is (true? (digest/take-mid-ownership! m1)))
+        (is (false? (digest/take-mid-ownership! m1))))
+      (testing "another mid is independent"
+        (is (true? (digest/take-mid-ownership! m2)))
+        (is (false? (digest/take-mid-ownership! m2)))
+        (is (false? (digest/take-mid-ownership! m1))))
       (testing "after release another caller can take it again"
-        (release-mid-ownership! mid)
-        (is (true? (digest/take-mid-ownership! mid))))
-      (finally
-        (release-mid-ownership! mid)))))
-
-(deftest mid-ownership-independent-mids-do-not-block
-  (let [m1 "<lock-test-2a@example.org>"
-        m2 "<lock-test-2b@example.org>"]
-    (try
-      (is (true? (digest/take-mid-ownership! m1)))
-      (is (true? (digest/take-mid-ownership! m2)))
-      (is (false? (digest/take-mid-ownership! m1)))
-      (is (false? (digest/take-mid-ownership! m2)))
+        (release-mid-ownership! m1)
+        (is (true? (digest/take-mid-ownership! m1))))
       (finally
         (release-mid-ownership! m1)
         (release-mid-ownership! m2)))))

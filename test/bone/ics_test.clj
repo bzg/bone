@@ -9,51 +9,25 @@
 ;; ICS attachment detection (bone.ics)
 ;; ---------------------------------------------------------------------------
 
-(deftest ics-file-test
-  (is (true?  (ics/ics-file? "event.ics")))
-  (is (true?  (ics/ics-file? "Meeting.ICS")))
-  (is (true?  (ics/ics-file? "path/to/file.ics")))
-  (is (false? (ics/ics-file? "readme.txt")))
-  (is (false? (ics/ics-file? "ics-like.doc")))
-  (is (false? (ics/ics-file? nil))))
-
-(deftest has-ics-attachment-test
-  (testing "detects .ics attachment"
-    (is (ics/has-ics-attachment?
-         [{:attachment/filename "meeting.ics"}])))
-
-  (testing "case-insensitive"
-    (is (ics/has-ics-attachment?
-         [{:attachment/filename "Event.ICS"}])))
-
-  (testing "no .ics attachment"
-    (is (not (ics/has-ics-attachment?
-              [{:attachment/filename "readme.txt"}]))))
-
-  (testing "nil attachments"
-    (is (not (ics/has-ics-attachment? nil))))
-
-  (testing "empty attachments"
-    (is (not (ics/has-ics-attachment? [])))))
-
-;; ---------------------------------------------------------------------------
-;; Inline ICS detection (bone.ics)
-;; ---------------------------------------------------------------------------
-
-(deftest has-inline-ics-test
-  (testing "detects inline VCALENDAR with VEVENT"
+(deftest ics-detection-test
+  (testing "ics-file?: the .ics extension, case-insensitive, anywhere in a path"
+    (is (true?  (ics/ics-file? "event.ics")))
+    (is (true?  (ics/ics-file? "Meeting.ICS")))
+    (is (true?  (ics/ics-file? "path/to/file.ics")))
+    (is (false? (ics/ics-file? "readme.txt")))
+    (is (false? (ics/ics-file? "ics-like.doc")))
+    (is (false? (ics/ics-file? nil))))
+  (testing "has-ics-attachment?: some attachment is an ics-file?"
+    (is (ics/has-ics-attachment? [{:attachment/filename "readme.txt"}
+                                  {:attachment/filename "meeting.ics"}]))
+    (is (not (ics/has-ics-attachment? nil)))
+    (is (not (ics/has-ics-attachment? []))))
+  (testing "has-inline-ics?: a VCALENDAR holding a VEVENT"
     (is (ics/has-inline-ics?
-         "Some text\nBEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nSUMMARY:Test\nEND:VEVENT\nEND:VCALENDAR")))
-
-  (testing "nil body"
-    (is (not (ics/has-inline-ics? nil))))
-
-  (testing "VCALENDAR without VEVENT"
-    (is (not (ics/has-inline-ics?
-              "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR"))))
-
-  (testing "plain text without ICS"
-    (is (not (ics/has-inline-ics? "Hello world")))))
+         "Some text\nBEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nSUMMARY:Test\nEND:VEVENT\nEND:VCALENDAR"))
+    (is (not (ics/has-inline-ics? "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR")))
+    (is (not (ics/has-inline-ics? "Hello world")))
+    (is (not (ics/has-inline-ics? nil)))))
 
 ;; ---------------------------------------------------------------------------
 ;; ICS parsing and assembly (bone.ics)

@@ -141,110 +141,93 @@
 ;; Phase 3: Superseded-by directive -- relation pose / retract
 ;; ---------------------------------------------------------------------------
 
-(deftest superseded-by-posts-supersedes-relation
-  (testing "Superseded-by: <mid> posts a :supersedes relation, closes source"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [tgt-mid    "<patch-v2@x>"
-              src-mid    "<patch-v1@x>"
-              tgt-email  (mk-email! conn tgt-mid "carol@x" #inst "2026-02-02")
-              _tgt-eid   (mk-report! conn tgt-mid tgt-email :patch)
-              src-email  (mk-email! conn src-mid "alice@x" #inst "2026-02-01")
-              src-eid    (mk-report! conn src-mid src-email :patch)
-              ;; "Reply" email carrying the directive
-              cmd-email-eid (mk-email! conn "<cmd-1@x>" "bob@x" #inst "2026-02-03")
-              cmd-email     {:db/id cmd-email-eid
-                             :email/author-address "bob@x"
-                             :email/date-sent #inst "2026-02-03"
-                             :email/body-text (str "Hi.\n\nSuperseded-by: " tgt-mid "\n")}]
-          ;; Apply directive on src-eid
-          (commands/apply-commands! conn src-eid :patch cmd-email
-                                    {} {} :direct nil)
-          (let [src-after (d/pull (d/db conn)
-                                  [:report/closed :report/close-reason] src-eid)
-                rels (get-relations (d/db conn) src-eid)
-                kinds (set (map :kind rels))]
-            (is (some? (:report/closed src-after))
-                "source report is closed")
-            (is (= :superseded (:report/close-reason src-after))
-                "close-reason is :superseded")
-            (is (contains? kinds :supersedes)    ":supersedes posted")
-            (is (contains? kinds :superseded-by) "inverse :superseded-by posted")
-            (is (contains? kinds :related-to)
-                ":related-to also posted (cohesion with link-rel!)")))
-        (finally (close-and-cleanup! setup))))))
+;; Superseded-by: and Duplicate-of: share one code path
+;; (closure-relation-rows => compute-closure-rows => apply-closure-*-row!):
+;; the tests below run once per command.
+(def ^:private closure-commands
+  [{:syntax "Superseded-by" :unset "Not superseded-by"
+    :kind :supersedes :inverse :superseded-by :reason :superseded
+    :type :patch :cross-types [:bug :patch]}
+   {:syntax "Duplicate-of" :unset "Not duplicate-of"
+    :kind :duplicates :inverse :duplicated-by :reason :canceled
+    :type :bug :cross-types [:request :bug]}])
 
-(deftest superseded-by-rejects-cross-type
-  (testing "Superseded-by: ignored when source/target types differ"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [bug-mid   "<bug-1@x>"
-              bug-email (mk-email! conn bug-mid "alice@x" #inst "2026-02-01")
-              bug-eid   (mk-report! conn bug-mid bug-email :bug)
-              patch-mid "<patch-1@x>"
-              patch-email (mk-email! conn patch-mid "alice@x" #inst "2026-02-02")
-              _patch-eid (mk-report! conn patch-mid patch-email :patch)
-              cmd-email-eid (mk-email! conn "<cmd@x>" "bob@x" #inst "2026-02-03")
-              cmd-email     {:db/id cmd-email-eid
-                             :email/author-address "bob@x"
-                             :email/date-sent #inst "2026-02-03"
-                             :email/body-text (str "Superseded-by: " patch-mid "\n")}]
-          (commands/apply-commands! conn bug-eid :bug cmd-email
-                                    {} {} :direct nil)
-          (let [src-after (d/pull (d/db conn)
-                                  [:report/closed :report/close-reason] bug-eid)
-                rels (get-relations (d/db conn) bug-eid)
-                kinds (set (map :kind rels))]
-            (is (nil? (:report/closed src-after))
-                "bug not closed when target is a patch (different type)")
-            (is (not (contains? kinds :supersedes))
-                ":supersedes not posted")))
-        (finally (close-and-cleanup! setup))))))
+(defn- command-email
+  "An email entity + map carrying one command line, as apply-commands! takes it."
+  [conn mid from date line]
+  {:db/id (mk-email! conn mid from date)
+   :email/author-address from
+   :email/date-sent date
+   :email/body-text (str "Hi.\n\n" line "\n")})
 
-(deftest not-superseded-retracts-relation
-  (testing "Not superseded-by: retracts the :supersedes relation and reopens"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [tgt-mid   "<patch-v2@x>"
-              src-mid   "<patch-v1@x>"
-              _tgt-email (mk-email! conn tgt-mid "carol@x" #inst "2026-02-02")
-              _tgt-eid  (mk-report! conn tgt-mid
-                                    (lookup/email-eid (d/db conn) tgt-mid)
-                                    :patch)
-              src-email (mk-email! conn src-mid "alice@x" #inst "2026-02-01")
-              src-eid   (mk-report! conn src-mid src-email :patch)
-              ;; Apply Superseded-by first (alice as setter)
-              set-email-eid (mk-email! conn "<set@x>" "alice@x" #inst "2026-02-03")
-              set-email {:db/id set-email-eid
-                         :email/author-address "alice@x"
-                         :email/date-sent #inst "2026-02-03"
-                         :email/body-text (str "Superseded-by: " tgt-mid "\n")}
-              _ (commands/apply-commands! conn src-eid :patch set-email
-                                          {} {} :direct nil)
-              ;; Now retract -- same setter (alice)
-              unset-email-eid (mk-email! conn "<unset@x>" "alice@x" #inst "2026-02-04")
-              unset-email {:db/id unset-email-eid
-                           :email/author-address "alice@x"
-                           :email/date-sent #inst "2026-02-04"
-                           :email/body-text (str "Not superseded-by: " tgt-mid "\n")}]
-          (commands/apply-commands! conn src-eid :patch unset-email
-                                    {} {} :direct nil)
-          (let [src-after (d/pull (d/db conn)
-                                  [:report/closed :report/close-reason] src-eid)
-                ;; All relations of kind :supersedes from src-eid should be inactive
-                active-supersedes (d/q '[:find [?e ...] :in $ ?from
-                                         :where
-                                         [?e :rel/from ?from]
-                                         [?e :rel/kind :supersedes]
-                                         [?e :rel/active? true]]
-                                       (d/db conn) src-eid)]
-            (is (nil? (:report/closed src-after))
-                "source report reopened")
-            (is (nil? (:report/close-reason src-after))
-                "close-reason cleared")
-            (is (empty? active-supersedes)
-                ":supersedes relation no longer active (retracted)")))
-        (finally (close-and-cleanup! setup))))))
+(defn- active-kinds [db eid]
+  (set (map :kind (get-relations db eid))))
+
+(deftest closure-command-posts-relation-and-closes
+  (doseq [{:keys [syntax kind inverse reason type]} closure-commands]
+    (testing (str syntax ": posts the relation and its inverse, :related-to, and closes the source as " reason)
+      (let [{:keys [conn] :as setup} (fresh-conn)]
+        (try
+          (let [_       (mk-report! conn "<tgt@x>" (mk-email! conn "<tgt@x>" "carol@x" #inst "2026-02-02") type)
+                src-eid (mk-report! conn "<src@x>" (mk-email! conn "<src@x>" "alice@x" #inst "2026-02-01") type)]
+            (commands/apply-commands! conn src-eid type
+                                      (command-email conn "<cmd@x>" "bob@x" #inst "2026-02-03"
+                                                     (str syntax ": <tgt@x>"))
+                                      {} {} :direct nil)
+            (let [after (d/pull (d/db conn) [:report/closed :report/close-reason] src-eid)
+                  kinds (active-kinds (d/db conn) src-eid)]
+              (is (some? (:report/closed after)) "source report is closed")
+              (is (= reason (:report/close-reason after)))
+              (is (contains? kinds kind))
+              (is (contains? kinds inverse))
+              (is (contains? kinds :related-to) ":related-to also posted (cohesion with link-rel!)")))
+          (finally (close-and-cleanup! setup)))))))
+
+(deftest closure-command-rejects-cross-type
+  (doseq [{:keys [syntax kind cross-types]} closure-commands
+          :let [[src-type tgt-type] cross-types]]
+    (testing (str syntax ": ignored when the source is a " (name src-type) " and the target a " (name tgt-type))
+      (let [{:keys [conn] :as setup} (fresh-conn)]
+        (try
+          (let [src-eid (mk-report! conn "<src@x>" (mk-email! conn "<src@x>" "alice@x" #inst "2026-02-01") src-type)
+                _       (mk-report! conn "<tgt@x>" (mk-email! conn "<tgt@x>" "alice@x" #inst "2026-02-02") tgt-type)]
+            (commands/apply-commands! conn src-eid src-type
+                                      (command-email conn "<cmd@x>" "bob@x" #inst "2026-02-03"
+                                                     (str syntax ": <tgt@x>"))
+                                      {} {} :direct nil)
+            (is (nil? (:report/closed (d/pull (d/db conn) [:report/closed] src-eid)))
+                "source not closed")
+            (is (not (contains? (active-kinds (d/db conn) src-eid) kind))
+                "relation not posted"))
+          (finally (close-and-cleanup! setup)))))))
+
+(deftest closure-command-unset-retracts-and-reopens
+  (doseq [{:keys [syntax unset kind type]} closure-commands]
+    (testing (str unset ": retracts the relation and reopens the source")
+      (let [{:keys [conn] :as setup} (fresh-conn)]
+        (try
+          (let [_       (mk-report! conn "<tgt@x>" (mk-email! conn "<tgt@x>" "carol@x" #inst "2026-02-02") type)
+                src-eid (mk-report! conn "<src@x>" (mk-email! conn "<src@x>" "alice@x" #inst "2026-02-01") type)]
+            ;; Set, then retract -- same setter.
+            (commands/apply-commands! conn src-eid type
+                                      (command-email conn "<set@x>" "alice@x" #inst "2026-02-03"
+                                                     (str syntax ": <tgt@x>"))
+                                      {} {} :direct nil)
+            (commands/apply-commands! conn src-eid type
+                                      (command-email conn "<unset@x>" "alice@x" #inst "2026-02-04"
+                                                     (str unset ": <tgt@x>"))
+                                      {} {} :direct nil)
+            (let [after  (d/pull (d/db conn) [:report/closed :report/close-reason] src-eid)
+                  active (d/q '[:find [?e ...] :in $ ?from ?kind
+                                :where
+                                [?e :rel/from ?from]
+                                [?e :rel/kind ?kind]
+                                [?e :rel/active? true]]
+                              (d/db conn) src-eid kind)]
+              (is (nil? (:report/closed after)) "source report reopened")
+              (is (nil? (:report/close-reason after)) "close-reason cleared")
+              (is (empty? active) "relation no longer active (retracted)")))
+          (finally (close-and-cleanup! setup)))))))
 
 (deftest not-superseded-with-wrong-mid-is-a-no-op
   (testing "Not superseded-by: <wrong-mid> on a closed (superseded) report
@@ -561,99 +544,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Phase 4 (partial): Duplicate-of directive
 ;; ---------------------------------------------------------------------------
-
-(deftest duplicate-of-posts-duplicates-relation
-  (testing "Duplicate-of: <mid> posts a :duplicates relation, closes with :canceled"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [orig-mid  "<bug-orig@x>"
-              dup-mid   "<bug-dup@x>"
-              orig-email (mk-email! conn orig-mid "alice@x" #inst "2026-03-01")
-              _orig-eid  (mk-report! conn orig-mid orig-email :bug)
-              dup-email  (mk-email! conn dup-mid "bob@x" #inst "2026-03-02")
-              dup-eid    (mk-report! conn dup-mid dup-email :bug)
-              cmd-email-eid (mk-email! conn "<cmd@x>" "carol@x" #inst "2026-03-03")
-              cmd-email     {:db/id cmd-email-eid
-                             :email/author-address "carol@x"
-                             :email/date-sent #inst "2026-03-03"
-                             :email/body-text (str "Duplicate-of: " orig-mid "\n")}]
-          (commands/apply-commands! conn dup-eid :bug cmd-email
-                                    {} {} :direct nil)
-          (let [src-after (d/pull (d/db conn)
-                                  [:report/closed :report/close-reason] dup-eid)
-                rels (get-relations (d/db conn) dup-eid)
-                kinds (set (map :kind rels))]
-            (is (some? (:report/closed src-after)) "duplicate report is closed")
-            (is (= :canceled (:report/close-reason src-after))
-                "close-reason is :canceled (not :resolved)")
-            (is (contains? kinds :duplicates)    ":duplicates posted")
-            (is (contains? kinds :duplicated-by) "inverse :duplicated-by posted")
-            (is (contains? kinds :related-to)
-                ":related-to also posted (cohesion)")))
-        (finally (close-and-cleanup! setup))))))
-
-(deftest duplicate-of-rejects-cross-type
-  (testing "Duplicate-of: ignored when source/target types differ"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [bug-mid    "<bug-1@x>"
-              bug-email  (mk-email! conn bug-mid "alice@x" #inst "2026-03-01")
-              _bug-eid   (mk-report! conn bug-mid bug-email :bug)
-              req-mid    "<req-1@x>"
-              req-email  (mk-email! conn req-mid "bob@x" #inst "2026-03-02")
-              req-eid    (mk-report! conn req-mid req-email :request)
-              cmd-email-eid (mk-email! conn "<cmd@x>" "carol@x" #inst "2026-03-03")
-              cmd-email     {:db/id cmd-email-eid
-                             :email/author-address "carol@x"
-                             :email/date-sent #inst "2026-03-03"
-                             :email/body-text (str "Duplicate-of: " bug-mid "\n")}]
-          (commands/apply-commands! conn req-eid :request cmd-email
-                                    {} {} :direct nil)
-          (let [src-after (d/pull (d/db conn)
-                                  [:report/closed :report/close-reason] req-eid)
-                rels (get-relations (d/db conn) req-eid)]
-            (is (nil? (:report/closed src-after))
-                "request not closed when target is a bug (different type)")
-            (is (not-any? #(= :duplicates (:kind %)) rels)
-                ":duplicates not posted")))
-        (finally (close-and-cleanup! setup))))))
-
-(deftest not-duplicate-retracts-relation
-  (testing "Not duplicate-of: retracts :duplicates and reopens"
-    (let [{:keys [conn] :as setup} (fresh-conn)]
-      (try
-        (let [orig-mid  "<bug-orig@x>"
-              dup-mid   "<bug-dup@x>"
-              orig-email (mk-email! conn orig-mid "alice@x" #inst "2026-03-01")
-              _orig-eid  (mk-report! conn orig-mid orig-email :bug)
-              dup-email  (mk-email! conn dup-mid "bob@x" #inst "2026-03-02")
-              dup-eid    (mk-report! conn dup-mid dup-email :bug)
-              ;; Carol posts Duplicate-of:
-              set-email-eid (mk-email! conn "<set@x>" "carol@x" #inst "2026-03-03")
-              set-email {:db/id set-email-eid
-                         :email/author-address "carol@x"
-                         :email/date-sent #inst "2026-03-03"
-                         :email/body-text (str "Duplicate-of: " orig-mid "\n")}
-              _ (commands/apply-commands! conn dup-eid :bug set-email {} {} :direct nil)
-              ;; Carol retracts (same setter)
-              unset-email-eid (mk-email! conn "<unset@x>" "carol@x" #inst "2026-03-04")
-              unset-email {:db/id unset-email-eid
-                           :email/author-address "carol@x"
-                           :email/date-sent #inst "2026-03-04"
-                           :email/body-text (str "Not duplicate-of: " orig-mid "\n")}]
-          (commands/apply-commands! conn dup-eid :bug unset-email {} {} :direct nil)
-          (let [after (d/pull (d/db conn)
-                              [:report/closed :report/close-reason] dup-eid)
-                active-dup (d/q '[:find [?e ...] :in $ ?from
-                                  :where
-                                  [?e :rel/from ?from]
-                                  [?e :rel/kind :duplicates]
-                                  [?e :rel/active? true]]
-                                (d/db conn) dup-eid)]
-            (is (nil? (:report/closed after))      "duplicate reopened")
-            (is (nil? (:report/close-reason after)) "close-reason cleared")
-            (is (empty? active-dup)                ":duplicates retracted")))
-        (finally (close-and-cleanup! setup))))))
 
 (defn- attach-descendant!
   "Add `email-eid` as descendant of `report-eid`."

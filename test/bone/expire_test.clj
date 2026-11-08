@@ -89,24 +89,21 @@
 ;; Tests
 ;; ---------------------------------------------------------------------------
 
-(deftest delay-basic-test
-  (testing "Report older than delay is expired"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after"10d"}}}}
-          eid (insert-email! conn {:mid "<old@test>" :date-sent (days-ago 15)})
-          _   (insert-report! conn {:mid "<old@test>" :type :bug :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<old@test>"))
-      (teardown! ctx)))
-
-  (testing "Report younger than delay is NOT expired"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:bug {:inactive-after"10d"}}}}
-          eid (insert-email! conn {:mid "<young@test>" :date-sent (days-ago 5)})
-          _   (insert-report! conn {:mid "<young@test>" :type :bug :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (not (report-closed? conn "<young@test>")))
-      (teardown! ctx)))
+(deftest inactive-after-delay-test
+  (testing "a report is expired once older than the delay, written as days, an integer or another unit"
+    ;; One non-day unit suffices: the parsing is common/parse-delay's.
+    (doseq [[rule rtype age closed?] [["10d" :bug 15 true]
+                                      ["10d" :bug 5 false]
+                                      [10 :announcement 15 true]
+                                      ["2w" :release 20 true]]]
+      (let [{:keys [conn] :as ctx} (setup-db!)
+            source-map {"test-src" {:expiry {rtype {:inactive-after rule}}}}
+            eid (insert-email! conn {:mid "<d@test>" :date-sent (days-ago age)})
+            _   (insert-report! conn {:mid "<d@test>" :type rtype :email-eid eid})]
+        (expire/expire-reports! conn source-map)
+        (is (= closed? (report-closed? conn "<d@test>"))
+            (pr-str rule rtype age))
+        (teardown! ctx))))
 
   (testing "Delay computed from last descendant, not founding email"
     (let [{:keys [conn] :as ctx} (setup-db!)
@@ -120,36 +117,6 @@
       (add-descendant! conn rid reply-eid)
       (expire/expire-reports! conn source-map)
       (is (not (report-closed? conn "<old-thread@test>")))
-      (teardown! ctx))))
-
-(deftest delay-integer-in-map-test
-  (testing "Integer :delay value inside a rule map"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:announcement {:inactive-after 10}}}}
-          eid (insert-email! conn {:mid "<intdelay@test>" :date-sent (days-ago 15)})
-          _   (insert-report! conn {:mid "<intdelay@test>" :type :announcement :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<intdelay@test>"))
-      (teardown! ctx))))
-
-(deftest delay-duration-formats-test
-  (testing "Weeks duration"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:release {:inactive-after"2w"}}}}
-          eid (insert-email! conn {:mid "<weeks@test>" :date-sent (days-ago 20)})
-          _   (insert-report! conn {:mid "<weeks@test>" :type :release :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<weeks@test>"))
-      (teardown! ctx)))
-
-  (testing "Months duration"
-    (let [{:keys [conn] :as ctx} (setup-db!)
-          source-map {"test-src" {:expiry {:change {:inactive-after"1m"}}}}
-          ;; 1m = 30 days, report is 35 days old
-          eid (insert-email! conn {:mid "<months@test>" :date-sent (days-ago 35)})
-          _   (insert-report! conn {:mid "<months@test>" :type :change :email-eid eid})]
-      (expire/expire-reports! conn source-map)
-      (is (report-closed? conn "<months@test>"))
       (teardown! ctx))))
 
 (deftest max-status-test
