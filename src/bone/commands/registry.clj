@@ -185,10 +185,11 @@
 ;;
 ;; Only earned credits move: an Acked or Owned whose setting email is
 ;; a patch resolving the report (the implicit credit, or an explicit
-;; word in that patch's own mail).  Propagation is one-way: reopening
-;; the patch or retracting its supersession undoes nothing on the
-;; targets.  A series restart closes the old series as :superseded
-;; without going through this table.
+;; word in that patch's own mail).  Undo follows the closure: `Not
+;; closed.` reopens what a :resolved closure had closed (:undo), while
+;; the credits a :canceled or :superseded closure moved stay moved.  A
+;; series restart closes the old series as :superseded without going
+;; through this table.
 (def patch-closure-effects
   "Close reason of a patch => its effects on the bugs/requests it :resolves.
     :targets  -- :close            close them too, same reason, same closer
@@ -199,7 +200,13 @@
     :upthread -- :supersede        also close the still-open patch reports
                                    upthread of this one as :superseded by it
     :needs-patch-triggers? -- skipped when the source sets :patch-triggers? false
+    :undo     -- :reopen           `Not closed.` on the patch reopens what this
+                                   closure closed, targets and upthread revisions,
+                                   unless another email closed them since, and
+                                   retracts the relations it posed; credits moved
+                                   by :canceled or :superseded are not restored
   A reason absent from the table (:expired) propagates nothing."
-  {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true}
+  {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true
+                :undo :reopen}
    :canceled   {:targets :retract-credits}
    :superseded {:targets :transfer-owned}})

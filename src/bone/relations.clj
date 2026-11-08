@@ -272,6 +272,14 @@
          [?r :rel/to ?to]]
        db from-eid kind))
 
+(defn posed-by?
+  "True when the active `kind` relation from `from-eid` to `to-eid`
+  was posed by the email `email-eid`."
+  [db from-eid kind to-eid email-eid]
+  (when-let [e (d/entid db [:rel/id (make-relation-id from-eid kind to-eid)])]
+    (let [{:rel/keys [active? email]} (d/pull db [:rel/active? {:rel/email [:db/id]}] e)]
+      (boolean (and active? (= email-eid (:db/id email)))))))
+
 (defn- retract-auto-credit-tx
   [db bug-eid attr addr-attr]
   (let [pulled (d/pull db [{attr [:db/id]} addr-attr] bug-eid)

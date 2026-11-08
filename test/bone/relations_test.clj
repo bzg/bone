@@ -16,7 +16,8 @@
     (is (nil?   (r/closure-propagates? :expired {}))
         "an unlisted reason never propagates"))
   (testing "the table says what the manual says"
-    (is (= {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true}
+    (is (= {:resolved   {:targets :close :upthread :supersede :needs-patch-triggers? true
+                         :undo :reopen}
             :canceled   {:targets :retract-credits}
             :superseded {:targets :transfer-owned}}
            registry/patch-closure-effects))))

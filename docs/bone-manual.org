@@ -227,24 +227,26 @@ patches (=[PATCH v2]=) match on version and topic instead; see
 
 A =.patch= or =.diff= reply to an open bug or request (nearest parent)
 links the patch to it and credits you =Acked= and =Owned= on it (only
-=Owned= if you reported it).  Closing the patch then propagates to the
+=Owned= if you reported it). Closing the patch then propagates to the
 bug or request it resolves, by close reason:
 
-| Patch closed as | How                                                       | On the bug or request                                                                                             | Upthread                                                  |
-|-----------------+-----------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------|
-| =:resolved=       | =Applied.=, =Fixed.=, =Closed.=, =Closed-by:=                     | closed as =:resolved= too, by the same email                                                                        | the still-open earlier patch reports close as =:superseded= |
-| =:canceled=       | =Canceled.=, =Duplicate-of:=                                  | the =Acked= and =Owned= earned by a resolving patch are retracted                                                     | --                                                        |
-| =:superseded=     | =Superseded-by:=, =Supersedes:=, a new revision in the thread | an earned =Owned= passes to the new patch's author, who inherits the link; =Acked= stays with whoever first confirmed | --                                                        |
-| =:expired=        | an expiry rule                                            | nothing                                                                                                           | --                                                        |
+| Patch closed as | How                                                       | On the bug or request                                                            |
+|-----------------+-----------------------------------------------------------+----------------------------------------------------------------------------------|
+| =:resolved=       | =Applied.=, =Fixed.=, =Closed.=, =Closed-by:=                     | closed as =:resolved= too, by the same email                                       |
+| =:canceled=       | =Canceled.=, =Duplicate-of:=                                  | the =Acked= and =Owned= earned by a resolving patch are retracted                    |
+| =:superseded=     | =Superseded-by:=, =Supersedes:=, a new revision in the thread | =Owned= passes to the new patch's author; =Acked= stays with whoever first confirmed |
+| =:expired=        | an expiry rule                                            | nothing                                                                          |
 
 The rules behind the table:
 
 - Only earned credits move: an =Acked= or =Owned= whose setting email
   is a patch resolving the report, whether implicit or written in
   that patch's own mail.  A credit set from a discussion reply stays.
-- Propagation is one-way.  =Not closed.= on the patch, or =Not
-  superseded-by:=, reopens the patch and nothing else: the bug stays
-  closed, a transferred =Owned= stays transferred.
+- Undo follows the closure.  =Not closed.= on an applied patch reopens
+  the bugs and the earlier revisions that application had closed,
+  unless another email closed them since.  Moved credits are not
+  restored: =Not superseded-by:= reopens the patch and nothing else, a
+  transferred =Owned= stays transferred.
 - A new patch-series version closes the previous series as
   =:superseded= without propagating: nothing moves on the bugs the
   old series resolved.

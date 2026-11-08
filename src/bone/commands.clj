@@ -13,7 +13,8 @@
                                             attr->word-cmd word-id->attr
                                             proxy-state-attrs
                                             address-attrs setter-ref-attrs
-                                            cross-ref-line-ids]]
+                                            cross-ref-line-ids
+                                            patch-closure-effects]]
             [bone.detect :as detect]
             [bone.periods :as periods]
             [bone.relations :as rel]
@@ -1085,11 +1086,47 @@
           (report-row-failures! failure-ctx report-eid source-type row))
         (apply-related-to! conn report-eid resolved email-eid from-addr failure-ctx)))))
 
+(defn- unpropagate-closure!
+  "Undo elsewhere what closing `report-eid` for `close-reason` had
+  propagated, when `Not closed.` (sent by `email-eid`) retracts a
+  closure the registry marks `:undo :reopen`: reopen the bugs/requests
+  it resolves and the upthread revisions it retired, as long as
+  `closer-eid`, its closing email, is still what closed them -- one
+  closed since by another email stays -- and retract the :supersedes
+  and :related-to that email posed on the revisions.  Credits moved by
+  a :canceled or :superseded closure are not restored.  Returns the
+  eids reopened."
+  [conn report-eid close-reason closer-eid email-eid]
+  (when (and closer-eid
+             (= :reopen (:undo (get patch-closure-effects close-reason))))
+    (let [db         (d/db conn)
+          closed-by? (fn [eid]
+                       (= closer-eid (some-> (d/pull db [{:report/closed [:db/id]}] eid)
+                                             :report/closed :db/id)))
+          bugs       (filterv closed-by? (rel/active-targets db report-eid :resolves))
+          revisions  (filterv #(and (closed-by? %)
+                                    (rel/posed-by? db % :supersedes report-eid closer-eid))
+                              (rel/active-targets db report-eid :superseded-by))]
+      (doseq [bug bugs]
+        (reopen-report! conn bug))
+      (doseq [rev revisions]
+        (reopen-report! conn rev)
+        (rel/retract-pair! conn rev :supersedes report-eid email-eid)
+        (rel/retract-pair! conn rev :related-to report-eid email-eid))
+      (let [reopened (into bugs revisions)]
+        (when (seq reopened)
+          (tracking/bump-report-updated! conn reopened)
+          (log/info "Reopened with the patch:" (count bugs) "resolved report(s),"
+                    (count revisions) "superseded revision(s)"))
+        reopened))))
+
 (defn- try-unclosed!
   "If a closed report has a Not closed line, retract the closure (and
   the relation if any).  `Not closed.` retracts whatever closure relation drove the closure, regardless of
-  mid.  Closure-relation commands (sets and explicit unsets) go through
-  `apply-lines!` on closed reports too -- see `apply-commands!`."
+  mid, and undoes what a :resolved closure had propagated
+  (`unpropagate-closure!`).  Closure-relation commands (sets and
+  explicit unsets) go through `apply-lines!` on closed reports too --
+  see `apply-commands!`."
   [conn report-eid lines email-eid is-maintainer? from-addr failure-ctx]
   (let [db          (d/db conn)
         current-d   (delay (d/pull db close-state-pull-pattern report-eid))
@@ -1112,7 +1149,9 @@
       (let [current @current-d
             attr-tx (reopen-tx report-eid current)]
         (when (seq attr-tx)
-          (d/transact! conn attr-tx))
+          (d/transact! conn attr-tx)
+          (unpropagate-closure! conn report-eid (:report/close-reason current)
+                                (ref-eid (:report/closed current)) email-eid))
         ;; Retract whatever closure relation drove the closure (the
         ;; supersede/duplicate pose also added a :related-to audit
         ;; link; clear it so undo restores the prior state).

@@ -2869,6 +2869,95 @@
         (finally
           (teardown! ctx))))))
 
+(deftest not-closed-reopens-what-the-closure-propagated
+  (testing "Not closed. on an applied patch reopens the bug it resolved and
+            the revision it retired, unless another email closed them since."
+    (let [{:keys [conn] :as ctx} (setup-db!)
+          process! #(store-and-process! conn % "direct")
+          report   #(get-report (d/db conn) %)
+          ;; Message-id of the closing email (pulled as a bare ref).
+          closer   #(some->> (report %) :report/closed :db/id
+                             (d/pull (d/db conn) [:email/message-id])
+                             :email/message-id)]
+      (try
+        (process! (mk-email {:mid "<un-bug@test.org>"
+                             :subject "[BUG] widget breaks"
+                             :from "user@test.org"
+                             :date #inst "2026-07-01T09:00:00"
+                             :body "It breaks.\n"}))
+        (process! (mk-email {:mid "<un-v1@test.org>"
+                             :subject "[PATCH] widget: fix the thing"
+                             :from "user@test.org"
+                             :date #inst "2026-07-01T10:00:00"
+                             :in-reply-to "<un-bug@test.org>"
+                             :body "Initial patch.\n"}))
+        (process! (assoc (mk-email {:mid "<un-v2@test.org>"
+                                    :subject "Re: [PATCH] widget: improved fix"
+                                    :from "maint@test.org"
+                                    :date #inst "2026-07-02T10:00:00"
+                                    :in-reply-to "<un-v1@test.org>"
+                                    :refs ["<un-bug@test.org>" "<un-v1@test.org>"]
+                                    :body "Improved version attached.\n"})
+                         :email/attachments
+                         [{:attachment/filename "0001-improved.patch"}]))
+        (process! (mk-email {:mid "<un-applied@test.org>"
+                             :subject "Re: [PATCH] widget: improved fix"
+                             :from "admin@test.org"
+                             :date #inst "2026-07-03T09:00:00"
+                             :in-reply-to "<un-v2@test.org>"
+                             :refs ["<un-bug@test.org>" "<un-v1@test.org>" "<un-v2@test.org>"]
+                             :body "Applied.\n"}))
+        (testing "setup: the application closed the bug and retired v1"
+          (is (= :resolved (:report/close-reason (report "<un-bug@test.org>"))))
+          (is (= "<un-applied@test.org>" (closer "<un-bug@test.org>")))
+          (is (= :superseded (:report/close-reason (report "<un-v1@test.org>"))))
+          (is (= "<un-v2@test.org>"
+                 (:report/message-id (superseded-by-target (report "<un-v1@test.org>"))))))
+        (process! (mk-email {:mid "<un-undo-1@test.org>"
+                             :subject "Re: [PATCH] widget: improved fix"
+                             :from "admin@test.org"
+                             :date #inst "2026-07-03T10:00:00"
+                             :in-reply-to "<un-v2@test.org>"
+                             :refs ["<un-bug@test.org>" "<un-v1@test.org>" "<un-v2@test.org>"]
+                             :body "Not closed.\n"}))
+        (testing "Not closed. reopens the patch, the bug and the retired revision"
+          (is (nil? (:report/closed (report "<un-v2@test.org>"))))
+          (is (nil? (:report/closed (report "<un-bug@test.org>"))))
+          (is (nil? (:report/closed (report "<un-v1@test.org>"))))
+          (is (nil? (superseded-by-target (report "<un-v1@test.org>")))
+              "the supersession the application posed is retracted"))
+        ;; The reporter closes the bug by hand, then v2 is applied again.
+        (process! (mk-email {:mid "<un-by-hand@test.org>"
+                             :subject "Re: [BUG] widget breaks"
+                             :from "user@test.org"
+                             :date #inst "2026-07-04T09:00:00"
+                             :in-reply-to "<un-bug@test.org>"
+                             :body "Closed.\n"}))
+        (process! (mk-email {:mid "<un-applied-2@test.org>"
+                             :subject "Re: [PATCH] widget: improved fix"
+                             :from "admin@test.org"
+                             :date #inst "2026-07-05T09:00:00"
+                             :in-reply-to "<un-v2@test.org>"
+                             :refs ["<un-bug@test.org>" "<un-v1@test.org>" "<un-v2@test.org>"]
+                             :body "Applied.\n"}))
+        (is (= "<un-by-hand@test.org>" (closer "<un-bug@test.org>"))
+            "setup: the bug keeps its own closure")
+        (is (= :superseded (:report/close-reason (report "<un-v1@test.org>")))
+            "setup: v1 retired again")
+        (process! (mk-email {:mid "<un-undo-2@test.org>"
+                             :subject "Re: [PATCH] widget: improved fix"
+                             :from "admin@test.org"
+                             :date #inst "2026-07-05T10:00:00"
+                             :in-reply-to "<un-v2@test.org>"
+                             :refs ["<un-bug@test.org>" "<un-v1@test.org>" "<un-v2@test.org>"]
+                             :body "Not closed.\n"}))
+        (testing "a bug closed since by another email stays closed"
+          (is (nil? (:report/closed (report "<un-v2@test.org>"))))
+          (is (nil? (:report/closed (report "<un-v1@test.org>"))))
+          (is (= "<un-by-hand@test.org>" (closer "<un-bug@test.org>"))))
+        (finally
+          (teardown! ctx))))))
+
 (deftest applied-revision-respects-patch-triggers-opt-out
   (testing "Sources with :patch-triggers? false skip the upthread
             supersession, like every other :resolved propagation."
