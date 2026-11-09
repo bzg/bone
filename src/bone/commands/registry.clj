@@ -190,8 +190,8 @@
 ;; the closure: `Not
 ;; closed.` reopens what a :resolved closure had closed (:undo), while
 ;; the credits a :canceled or :superseded closure moved stay moved.  A
-;; series restart closes the old series as :superseded without going
-;; through this table.
+;; series restart supersedes each open report of the old series by the
+;; restarting patch, through this table like any supersession.
 (def patch-closure-effects
   "Close reason of a patch => its effects on the bugs/requests it :resolves.
     :targets  -- :close            close them too, same reason, same closer

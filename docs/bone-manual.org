@@ -248,9 +248,10 @@ The rules behind the table:
   unless another email closed them since.  Moved credits are not
   restored: =Not superseded-by:= reopens the patch and nothing else, a
   transferred =Owned= stays transferred.
-- A new patch-series version closes the previous series as
-  =:superseded= without propagating: nothing moves on the bugs the
-  old series resolved.
+- A new patch-series version supersedes each open patch of the
+  previous series by the patch that restarts it, like a single
+  revision would: the new series inherits the links to the bugs the
+  old one resolved, so applying it closes them.
 - =:patch-triggers? false= on a source disables the implicit credit
   and the whole =:resolved= row, upthread supersession included; the
   =:canceled= and =:superseded= rows still apply to credits written in

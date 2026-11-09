@@ -88,22 +88,20 @@
   (d/transact! conn [{:db/id series-eid :series/closed email-eid}]))
 
 (defn- supersede-series-reports!
-  "Close all open reports in a superseded series with reason :superseded.
-  One transaction + one bump for the whole batch."
-  [conn series-eid email-eid]
-  (let [db (d/db conn)
-        report-eids (d/q '[:find [?r ...]
+  "Supersede every open report of the restarted series by
+  `new-report-eid`, the patch that restarts it: closed as :superseded
+  with the :supersedes relation posed, like a revision superseding a
+  single patch, so the new series inherits the :resolves links and
+  the earned Owned of the old one (`rel/supersede-report!`)."
+  [conn series-eid new-report-eid email]
+  (doseq [[rid mid] (d/q '[:find ?r ?mid
                            :in $ ?s
                            :where [?s :series/patches ?r]
+                           [?r :report/message-id ?mid]
                            (not [?r :report/closed _])]
-                         db series-eid)]
-    (when (seq report-eids)
-      (d/transact! conn (mapv (fn [rid]
-                                {:db/id rid
-                                 :report/closed email-eid
-                                 :report/close-reason :superseded})
-                              report-eids))
-      (tracking/bump-report-updated! conn report-eids))))
+                         (d/db conn) series-eid)]
+    (rel/supersede-report! conn rid new-report-eid email
+                           (str (pr-str mid) " (superseded by series restart)"))))
 
 (defn add-patch-to-series! [conn series-eid report-eid email]
   (let [existing (d/q '[:find [?r ...]
@@ -195,7 +193,7 @@
       (doseq [sid to-close]
         (close-series! conn sid email-eid)
         (when (:version report-info)
-          (supersede-series-reports! conn sid email-eid))
+          (supersede-series-reports! conn sid report-eid email))
         (log/info "Auto-closed series"
                   (pr-str (:series/id (d/pull (d/db conn) [:series/id] sid)))
                   "(superseded)"))

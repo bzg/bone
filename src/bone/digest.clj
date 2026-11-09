@@ -361,37 +361,6 @@
                                 :report/email)]
     (boolean (some email-closure (ancestor-mid-closure db cand-email)))))
 
-(defn- auto-supersede-patch!
-  "Close `old-rid` as :superseded by `new-report-eid`, posing the
-  :supersedes + :related-to relations in the same transaction (a crash
-  cannot leave the closure without its audit relation), then propagate
-  patch-closure effects.  Pre-existing :rel/ids go through
-  `pose-if-absent!` to keep reactivation arbitration."
-  [conn old-rid new-report-eid email log-msg]
-  (let [email-eid (:db/id email)
-        endpoints {:from-eid old-rid :to-eid new-report-eid}
-        db        (d/db conn)
-        base-opts (assoc endpoints
-                         :setter    (:email/author-address email)
-                         :email-eid email-eid
-                         :posed-at  (or (:email/date-sent email) (Date.)))
-        fresh?    (fn [kind]
-                    (not-any? #(d/entid db [:rel/id %])
-                              (rel/paired-relation-ids kind old-rid new-report-eid)))
-        {fresh true existing false} (group-by fresh? [:supersedes :related-to])]
-    (d/transact! conn
-                 (into [{:db/id old-rid
-                         :report/closed email-eid
-                         :report/close-reason :superseded}]
-                       (mapcat #(rel/pose-tx (assoc base-opts :kind %)))
-                       fresh))
-    (doseq [kind existing]
-      (rel/pose-from-email! conn email (assoc endpoints :kind kind)))
-    (rel/propagate-patch-closure! conn old-rid email-eid
-                                  :superseded new-report-eid)
-    (tracking/bump-report-updated! conn old-rid)
-    (log/info "Auto-closed patch" log-msg)))
-
 (defn- normalize-subject
   "Base subject as space-joined tokens: strip Re:/Fwd: prefixes,
   bracketed tags and parenthesized version markers (\"(v3)\"), then keep
@@ -510,7 +479,7 @@
         (when (and (= :patch (:report/type r))
                    (not (:report/closed r))
                    (match? r))
-          (auto-supersede-patch!
+          (rel/supersede-report!
            conn rid report-eid email
            (str (:report/message-id r)
                 (when-let [v (:report/version r)] (str " (" v ")"))

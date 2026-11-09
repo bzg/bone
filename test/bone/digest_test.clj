@@ -1365,12 +1365,21 @@
             a close command on the cover reaches them."
     (let [{:keys [conn] :as ctx} (setup-db!)]
       (try
-        ;; v1 series without a cover: 1/3 root, 2/3 reply (aborted).
+        ;; A bug the v1 series resolves: 1/3 replies to it.
+        (store-and-process! conn
+                            (mk-email {:mid "<sr-bug@test.org>"
+                                       :subject "[BUG] steps are wrong"
+                                       :from "reporter@test.org"
+                                       :date #inst "2026-06-09T10:00:00"
+                                       :body "They are.\n"})
+                            "direct")
+        ;; v1 series without a cover: 1/3 in reply to the bug, 2/3 reply (aborted).
         (store-and-process! conn
                             (mk-email {:mid "<sr-v1-1@test.org>"
                                        :subject "[PATCH t 1/3] step a"
                                        :from "user@test.org"
                                        :date #inst "2026-06-10T10:00:00"
+                                       :in-reply-to "<sr-bug@test.org>"
                                        :body (str "step a\n\n"
                                                   "diff --git a/z.clj b/z.clj\n"
                                                   "--- a/z.clj\n+++ b/z.clj\n"
@@ -1408,9 +1417,14 @@
                                                     "@@ -1,1 +1,1 @@\n-a\n+b\n")})
                               "direct"))
         (let [db (d/db conn)
-              v2 (get-series-by-id db "t|user@test.org|2")]
-          (testing "old v1 series is closed by the restart"
-            (is (some? (:series/closed (get-series-by-id db "t|user@test.org|3")))))
+              v2 (get-series-by-id db "t|user@test.org|2")
+              v1-1 (get-report db "<sr-v1-1@test.org>")]
+          (testing "old v1 series is closed by the restart, its patches superseded by the restarting patch"
+            (is (some? (:series/closed (get-series-by-id db "t|user@test.org|3"))))
+            (is (= :superseded (:report/close-reason v1-1)))
+            (is (= :superseded (:report/close-reason (get-report db "<sr-v1-2@test.org>"))))
+            (is (= "<sr-v2-1@test.org>"
+                   (:report/message-id (superseded-by-target v1-1)))))
           (testing "v2 patches join their own cover's series, still open"
             (is (nil? (:series/closed v2)))
             (is (= "<sr-cov@test.org>"
@@ -1433,7 +1447,9 @@
               p2    (get-report db "<sr-v2-2@test.org>")]
           (is (= :resolved (:report/close-reason cover)) "cover closed")
           (is (= :resolved (:report/close-reason p1)) "patch 1/2 closed via cover broadcast")
-          (is (= :resolved (:report/close-reason p2)) "patch 2/2 closed via cover broadcast"))
+          (is (= :resolved (:report/close-reason p2)) "patch 2/2 closed via cover broadcast")
+          (is (= :resolved (:report/close-reason (get-report db "<sr-bug@test.org>")))
+              "the bug v1 resolved closes with v2: the restart handed the link over"))
         (finally
           (teardown! ctx))))))
 

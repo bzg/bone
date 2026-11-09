@@ -441,3 +441,38 @@
                             (supersede-upthread-revisions! conn db patch-eid email-eid))))]
     (when (seq touched)
       (tracking/bump-report-updated! conn touched))))
+
+(defn supersede-report!
+  "Close `old-rid` as :superseded by `new-report-eid`, posing the
+  :supersedes + :related-to relations in the same transaction (a crash
+  cannot leave the closure without its audit relation), then propagate
+  the patch-closure effects (`patch-closure-effects` :superseded: the
+  successor inherits the :resolves links and the earned Owned).
+  `email` is the triggering email (:db/id, :email/author-address,
+  :email/date-sent).  Pre-existing :rel/ids go through
+  `pose-if-absent!` to keep reactivation arbitration.  Used by the
+  arrival-time auto-supersession of a revision and by a series
+  restart."
+  [conn old-rid new-report-eid email log-msg]
+  (let [email-eid (:db/id email)
+        endpoints {:from-eid old-rid :to-eid new-report-eid}
+        db        (d/db conn)
+        base-opts (assoc endpoints
+                         :setter    (:email/author-address email)
+                         :email-eid email-eid
+                         :posed-at  (or (:email/date-sent email) (java.util.Date.)))
+        fresh?    (fn [kind]
+                    (not-any? #(d/entid db [:rel/id %])
+                              (paired-relation-ids kind old-rid new-report-eid)))
+        {fresh true existing false} (group-by fresh? [:supersedes :related-to])]
+    (d/transact! conn
+                 (into [{:db/id old-rid
+                         :report/closed email-eid
+                         :report/close-reason :superseded}]
+                       (mapcat #(pose-tx (assoc base-opts :kind %)))
+                       fresh))
+    (doseq [kind existing]
+      (pose-from-email! conn email (assoc endpoints :kind kind)))
+    (propagate-patch-closure! conn old-rid email-eid :superseded new-report-eid)
+    (tracking/bump-report-updated! conn old-rid)
+    (log/info "Auto-closed patch" log-msg)))
