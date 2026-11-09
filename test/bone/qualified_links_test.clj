@@ -750,6 +750,47 @@
                 "P2 inherited the :resolves link to bug")))
         (finally (close-and-cleanup! setup))))))
 
+(deftest credits-move-only-for-the-patch-that-earned-them
+  (testing "Cancelling or superseding patch A leaves the credit patch B
+            earned on the same bug: a credit is the earning patch's to
+            move, not any resolving patch's."
+    (let [{:keys [conn] :as setup} (fresh-conn)]
+      (try
+        (let [bug-eid  (mk-report! conn "<bug@x>"
+                                   (mk-email! conn "<bug@x>" "alice@x" #inst "2026-04-01") :bug)
+              pa-email {:db/id (mk-email! conn "<pa@x>" "bob@x" #inst "2026-04-02")
+                        :email/author-address "bob@x"
+                        :email/date-sent #inst "2026-04-02"
+                        :email/source "test"}
+              pa-eid   (mk-report! conn "<pa@x>" (:db/id pa-email) :patch)
+              _        (#'digest/link-rel! conn pa-eid :patch pa-email [bug-eid])
+              pb-email {:db/id (mk-email! conn "<pb@x>" "carol@x" #inst "2026-04-03")
+                        :email/author-address "carol@x"
+                        :email/date-sent #inst "2026-04-03"
+                        :email/source "test"}
+              pb-eid   (mk-report! conn "<pb@x>" (:db/id pb-email) :patch)
+              _        (#'digest/link-rel! conn pb-eid :patch pb-email [bug-eid])
+              ;; Carol's patch, the later one, holds the credit.
+              _        (credit-bug! conn bug-eid (:db/id pb-email) "carol@x")
+              _        (mk-report! conn "<pn@x>"
+                                   (mk-email! conn "<pn@x>" "dave@x" #inst "2026-04-04") :patch)
+              credit   #(read-attrs (d/db conn) bug-eid
+                                    [:report/acked-address :report/owned-address])]
+          (testing "Cancelled. on A retracts nothing of Carol's"
+            (commands/apply-commands! conn pa-eid :patch
+                                      (command-email conn "<cancel@x>" "bob@x" #inst "2026-04-05"
+                                                     "Cancelled.")
+                                      {} {} :direct nil)
+            (is (= {:report/acked-address "carol@x" :report/owned-address "carol@x"}
+                   (credit))))
+          (testing "Superseded-by: on A hands nothing of Carol's to Dave"
+            (commands/apply-commands! conn pa-eid :patch
+                                      (command-email conn "<sup@x>" "bob@x" #inst "2026-04-06"
+                                                     "Superseded-by: <pn@x>")
+                                      {} {} :direct nil)
+            (is (= "carol@x" (:report/owned-address (credit))))))
+        (finally (close-and-cleanup! setup))))))
+
 (deftest r4-chain-of-supersession
   (testing "R4 chain: P1 => P2 => P3, ownership ends up with P3's author"
     (let [{:keys [conn] :as setup} (fresh-conn)]

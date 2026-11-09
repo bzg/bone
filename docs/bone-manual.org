@@ -239,9 +239,10 @@ bug or request it resolves, by close reason:
 
 The rules behind the table:
 
-- Only earned credits move: an =Acked= or =Owned= whose setting email
-  is a patch resolving the report, whether implicit or written in
-  that patch's own mail.  A credit set from a discussion reply stays.
+- Only the credits the closed patch earned move: an =Acked= or =Owned=
+  set by that patch's own mail, whether implicit or written there.  A
+  credit earned by another patch resolving the same report, or set
+  from a discussion reply, stays.
 - Undo follows the closure.  =Not closed.= on an applied patch reopens
   the bugs and the earlier revisions that application had closed,
   unless another email closed them since.  Moved credits are not

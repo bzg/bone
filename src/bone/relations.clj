@@ -241,25 +241,17 @@
 ;; Patch-closure propagation helpers
 ;; ---------------------------------------------------------------------------
 
-(defn auto-credit?
-  "True iff `bug-eid`.`attr` was set by a labelled patch report that
-  :resolves the bug (i.e. via the implicit hook on a \"[PATCH]\" reply).
-  Labelless credits (\"Re: [BUG]\" + diff) return false -- no :resolves
-  exists, so R3/R4 don't retract them.  `attr` is :report/acked or
-  :report/owned."
-  [db bug-eid attr]
-  (when-let [pose-eid (some-> (d/pull db [{attr [:db/id]}] bug-eid)
-                              (get attr)
-                              :db/id)]
-    (boolean
-     (d/q '[:find ?p . :in $ ?bug ?pose
-            :where
-            [?r :rel/from ?bug]
-            [?r :rel/kind :resolved-by]
-            [?r :rel/active? true]
-            [?r :rel/to ?p]
-            [?p :report/email ?pose]]
-          db bug-eid pose-eid))))
+(defn earned-by?
+  "True iff `bug-eid`.`attr` was set by `patch-eid`'s own email: the
+  implicit credit of a \"[PATCH]\" reply resolving the bug, or a word
+  written in that same mail.  A credit set from any other email -- a
+  discussion reply, another patch -- is not this patch's to move.
+  `attr` is :report/acked or :report/owned."
+  [db bug-eid patch-eid attr]
+  (let [pose        (some-> (d/pull db [{attr [:db/id]}] bug-eid) (get attr) :db/id)
+        patch-email (some-> (d/pull db [{:report/email [:db/id]}] patch-eid)
+                            :report/email :db/id)]
+    (boolean (and pose (= pose patch-email)))))
 
 (defn active-targets
   "Vector of `to`-eids for active outgoing relations of `kind` from `from-eid`."
@@ -356,17 +348,17 @@
     ancestors))
 
 (defn- retract-canceled-credits!
-  "Retract the :acked/:owned auto-credits a canceled patch had earned
-  on `bugs`.  Returns the bug eids touched."
-  [conn bugs]
+  "Retract the :acked/:owned credits the canceled `patch-eid` had
+  earned on `bugs`.  Returns the bug eids touched."
+  [conn patch-eid bugs]
   (reduce
    (fn [acc bug-eid]
      (let [db' (d/db conn)
            tx  (cond-> []
-                 (auto-credit? db' bug-eid :report/acked)
+                 (earned-by? db' bug-eid patch-eid :report/acked)
                  (into (retract-auto-credit-tx db' bug-eid
                                                :report/acked :report/acked-address))
-                 (auto-credit? db' bug-eid :report/owned)
+                 (earned-by? db' bug-eid patch-eid :report/owned)
                  (into (retract-auto-credit-tx db' bug-eid
                                                :report/owned :report/owned-address)))]
        (if (seq tx)
@@ -376,12 +368,12 @@
    [] bugs))
 
 (defn- transfer-superseded-ownership!
-  "Hand a superseded patch's :owned auto-credit on `bugs` to
-  `successor-eid`, which also inherits the :resolves link.  :acked is
-  a historical act -- whoever first confirmed the bug remains its
-  acker, even when the resolving patch is replaced.  Returns the bug
-  eids touched."
-  [conn db bugs successor-eid]
+  "Hand the :owned credit the superseded `patch-eid` had earned on
+  `bugs` to `successor-eid`, which also inherits the :resolves link.
+  :acked is a historical act -- whoever first confirmed the bug
+  remains its acker, even when the resolving patch is replaced.
+  Returns the bug eids touched."
+  [conn db patch-eid bugs successor-eid]
   (let [succ         (d/pull db [{:report/email [:db/id :email/author-address
                                                  :email/date-sent]}]
                              successor-eid)
@@ -392,7 +384,7 @@
     (reduce
      (fn [acc bug-eid]
        (let [db' (d/db conn)
-             tx  (when (auto-credit? db' bug-eid :report/owned)
+             tx  (when (earned-by? db' bug-eid patch-eid :report/owned)
                    [{:db/id bug-eid
                      :report/owned succ-eml-eid
                      :report/owned-address (some-> succ-addr str/lower-case)}])
@@ -439,9 +431,9 @@
         {:keys [targets upthread]} (get registry/patch-closure-effects close-reason)
         touched (-> (case targets
                       :close           (close-resolved-targets! conn db bugs email-eid)
-                      :retract-credits (retract-canceled-credits! conn bugs)
+                      :retract-credits (retract-canceled-credits! conn patch-eid bugs)
                       :transfer-owned  (when successor-eid
-                                         (transfer-superseded-ownership! conn db bugs
+                                         (transfer-superseded-ownership! conn db patch-eid bugs
                                                                          successor-eid))
                       nil)
                     vec

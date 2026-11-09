@@ -183,9 +183,11 @@
 ;; (propagate-patch-closure!, closure-propagates?) and the manual's
 ;; "Resolving a bug or request with a patch" restates it.
 ;;
-;; Only earned credits move: an Acked or Owned whose setting email is
-;; a patch resolving the report (the implicit credit, or an explicit
-;; word in that patch's own mail).  Undo follows the closure: `Not
+;; Only the credits this patch earned move: an Acked or Owned whose
+;; setting email is the patch's own mail (the implicit credit, or a
+;; word written there).  One earned by another patch resolving the
+;; same report, or set from a discussion reply, stays.  Undo follows
+;; the closure: `Not
 ;; closed.` reopens what a :resolved closure had closed (:undo), while
 ;; the credits a :canceled or :superseded closure moved stay moved.  A
 ;; series restart closes the old series as :superseded without going
