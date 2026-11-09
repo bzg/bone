@@ -1028,7 +1028,7 @@
              (rel/closure-propagates? :resolved source-cfg))
     (rel/propagate-patch-closure! conn report-eid email-eid :resolved nil)))
 
-(defn- report-row-failures!
+(defn- record-row-failures!
   "Record and log what a closure `row` could not do: an unknown,
   self-looping or type-mismatched target on the set side, an unknown
   mid on the unset side."
@@ -1049,8 +1049,12 @@
         (log/warn (str syntax ": type mismatch -- source")
                   source-type "vs target" (:target-type resolved))))))
 
-(defn apply-lines! [conn report-eid lines email-eid from-addr is-maintainer?
-                    failure-ctx source-cfg]
+(defn apply-lines!
+  "Apply the colon-line commands `lines` to the report of `ctx`, the
+  command context of `apply-commands!`: scope filter, attribute
+  transaction, closure relations, failures, related-to."
+  [{:keys [conn report-eid email-eid from-addr is-maintainer? failure-ctx source-cfg]}
+   lines]
   (let [db         (d/db conn)
         current-d  (delay (line-state db report-eid))
         permitted  (filter-permitted-lines lines current-d from-addr
@@ -1083,7 +1087,7 @@
                     (describe-lines resolved)
                     (str "(by " from-addr ")")))
         (doseq [row rows]
-          (report-row-failures! failure-ctx report-eid source-type row))
+          (record-row-failures! failure-ctx report-eid source-type row))
         (apply-related-to! conn report-eid resolved email-eid from-addr failure-ctx)))))
 
 (defn- unpropagate-closure!
@@ -1126,8 +1130,8 @@
   mid, and undoes what a :resolved closure had propagated
   (`unpropagate-closure!`).  Closure-relation commands (sets and
   explicit unsets) go through `apply-lines!` on closed reports too --
-  see `apply-commands!`."
-  [conn report-eid lines email-eid is-maintainer? from-addr failure-ctx]
+  see `apply-commands!`, whose command context `ctx` is."
+  [{:keys [conn report-eid email-eid from-addr is-maintainer? failure-ctx]} lines]
   (let [db          (d/db conn)
         current-d   (delay (d/pull db close-state-pull-pattern report-eid))
         permitted   (filter-permitted-lines
@@ -1331,33 +1335,30 @@
                 (detect-vote body-text))}))
 
 (defn- apply-on-closed!
-  "The `lines` of a closed report: closure relations replace the
-  previous one through `apply-lines!`, the rest may only reopen it,
-  through `try-unclosed!`.  True when there was a line."
-  [conn report-eid lines email-eid from-addr is-maintainer? failure-ctx source-cfg]
+  "The `command-plan` of a closed report: its lines only.  Closure
+  relations replace the previous one through `apply-lines!`, the rest
+  may only reopen it, through `try-unclosed!`.  True when there was a
+  line."
+  [ctx {:keys [lines]}]
   (let [{rel-lines true, other-lines false}
         (group-by #(contains? closure-command-ids (:id %)) lines)]
     (when (seq other-lines)
-      (try-unclosed! conn report-eid other-lines email-eid is-maintainer? from-addr
-                     failure-ctx))
+      (try-unclosed! ctx other-lines))
     (when (seq rel-lines)
-      (apply-lines! conn report-eid rel-lines email-eid from-addr is-maintainer?
-                    failure-ctx source-cfg))
+      (apply-lines! ctx rel-lines))
     (boolean (seq lines))))
 
 (defn- apply-on-open!
   "The `command-plan` of an open report: vote, barewords, then lines.
   True when there was a command."
-  [conn report-eid {:keys [words lines vote]} email from-addr is-maintainer?
-   failure-ctx delivery source-cfg]
-  (let [email-eid (:db/id email)
-        voted?    (when vote
-                    (apply-vote! conn report-eid from-addr vote email delivery source-cfg)
-                    true)]
+  [{:keys [conn report-eid email email-eid from-addr delivery source-cfg] :as ctx}
+   {:keys [words lines vote]}]
+  (let [voted? (when vote
+                 (apply-vote! conn report-eid from-addr vote email delivery source-cfg)
+                 true)]
     (apply-words! conn report-eid words email-eid (:email/message-id email) from-addr
                   source-cfg)
-    (apply-lines! conn report-eid lines email-eid from-addr is-maintainer? failure-ctx
-                  source-cfg)
+    (apply-lines! ctx lines)
     (boolean (or (seq words) (seq lines) voted?))))
 
 (defn apply-commands!
@@ -1365,7 +1366,11 @@
   reads them; true when a command was detected -- a line command
   counts even when every detected command is then refused by scope,
   so callers (digest) still record the sender as a participant on the
-  source.  `line-filter` is `command-plan`'s."
+  source.  `line-filter` is `command-plan`'s.
+
+  The appliers share one command context `ctx`: :conn, :report-eid,
+  :email and :email-eid, :from-addr, :is-maintainer?, :failure-ctx
+  (nil when nothing can be recorded), :source-cfg and :delivery."
   [conn report-eid report-type email source-map roles delivery line-filter]
   (let [from-addr  (:email/author-address email)
         email-date (:email/date-sent email)
@@ -1384,11 +1389,18 @@
                       :email-date email-date
                       :email-eid  (:db/id email)
                       :report-eid report-eid})
-        {:keys [closed? denied lines] :as plan}
+        ctx        {:conn           conn
+                    :report-eid     report-eid
+                    :email          email
+                    :email-eid      (:db/id email)
+                    :from-addr      from-addr
+                    :is-maintainer? is-maint?
+                    :failure-ctx    fail-ctx
+                    :source-cfg     source-cfg
+                    :delivery       delivery}
+        {:keys [closed? denied] :as plan}
         (command-plan report report-type email source-cfg is-maint? line-filter)]
     (record-denied-words! fail-ctx denied)
     (if closed?
-      (apply-on-closed! conn report-eid lines (:db/id email) from-addr is-maint?
-                        fail-ctx source-cfg)
-      (apply-on-open! conn report-eid plan email from-addr is-maint? fail-ctx
-                      delivery source-cfg))))
+      (apply-on-closed! ctx plan)
+      (apply-on-open! ctx plan))))
