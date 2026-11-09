@@ -454,13 +454,6 @@
                          " does not match any :sources :name"))]
         (seq errs)))))
 
-(defn- pre-check-singleton-mailbox
-  "BONE is in 0.y.z -- reject the singleton :mailbox key outright
-  (no silent wrap to :mailboxes)."
-  [config]
-  (when (contains? config :mailbox)
-    [common/singleton-mailbox-error]))
-
 (defn- partial-match-warnings
   "Warnings for a :list without a dot or an :alias/:to without an @:
   headers are matched exactly, so such a key would match nothing."
@@ -474,8 +467,7 @@
 (defn validate-config [config]
   ;; concat, not or: show every pre-check category at once instead of
   ;; making the user fix one family of errors per run.
-  (if-let [errs (seq (concat (pre-check-singleton-mailbox config)
-                             (pre-check-commands config)
+  (if-let [errs (seq (concat (pre-check-commands config)
                              (pre-check-periods config)
                              (pre-check-subscribers config)))]
     {:valid? false
