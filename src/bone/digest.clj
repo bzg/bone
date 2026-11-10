@@ -576,12 +576,7 @@
       ;; non-report mail, v2 on another branch of the same thread).
       (= :patch rtype)                                        (conj :close-superseded-thread)
       (and (= :patch rtype) (:patch-seq report-info))         (conj :manage-series)
-      ;; Patches are normally stored at creation (see report-entity);
-      ;; this hook only heals reports created pending by versions that
-      ;; predate creation-time storage.  It applies to ANY report type
-      ;; carrying patch content, not just :patch reports.
-      (seq patches)                                           (conj :store-patches)
-      ;; :auto-series stays patch-only: a synthetic series only makes
+      ;; :auto-series is patch-only: a synthetic series only makes
       ;; sense for :patch reports (series tracking is patch-specific).
       (and (= :patch rtype) (seq patches)
            (nil? (:patch-seq report-info))
@@ -842,15 +837,6 @@
       (close-superseded-thread-patches! conn report-eid report-info email cand-eids)))
   (when (:manage-series plan)
     (series/manage-series! conn report-eid email report-info from-addr parent-eids))
-  (when (:store-patches plan)
-    ;; No-op for reports created since patches moved to creation time
-    ;; (report-entity): the guard prevents duplicate :report/patches
-    ;; components on retry, while still healing reports created pending
-    ;; by older versions whose Phase 4 never ran.
-    (when (empty? (:report/patches
-                   (d/pull (d/db conn) [{:report/patches [:db/id]}] report-eid)))
-      (d/transact! conn [{:db/id report-eid :report/patches patches}])
-      (log/info (count patches) "patch file(s) stored")))
   (when (:auto-series plan)
     (let [series-eid (series/create-series! conn (:topic report-info) from-addr 1)]
       (series/add-patch-to-series! conn series-eid report-eid email)

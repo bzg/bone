@@ -2316,8 +2316,8 @@
           (is (= ["0001-fix.patch"] (mapv :patch/filename (:report/patches r)))
               "Patches should be stored at creation despite the pending flag"))
 
-        ;; TTL-flush retries the pending email; the :store-patches hook
-        ;; must not add duplicate patch components.
+        ;; TTL-flush retries the pending email; Phase 4 must not add
+        ;; duplicate patch components.
         (digest/flush-stale-pending! conn source-map sources 0)
         (let [db (d/db conn)
               r  (get-report db "<pend-patch@test.org>")]
