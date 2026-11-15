@@ -425,10 +425,12 @@ A /command/ is a keyword at the start of a line in a thread reply.
   =Duplicate-of:=.
 
 - An *annotation* sets or unsets a property -- urgency, importance,
-  topic, deadline, expiry, or a non-closing relation.  It applies to
-  the carrying mail when that mail becomes a new report, otherwise to
-  the nearest report in the thread.  Examples: =Urgent.=, =Important.=,
-  =Topics:=, =Deadline:=, =Supersedes:=, =Related-to:=.
+  topic, deadline, expiry -- or poses a relation from the report
+  itself.  It applies to the carrying mail when that mail becomes a
+  new report, otherwise to the nearest report in the thread.
+  Examples: =Urgent.=, =Important.=, =Topics:=, =Deadline:=,
+  =Related-to:=, and =Supersedes:= (which also closes the report it
+  names).
 
 Colon-prefixed commands (=Topics:=, =Deadline:=, =Expiry:=, =Acked-by:=,
 =Owned-by:=, =Closed-by:=, =Superseded-by:=, =Supersedes:=,
