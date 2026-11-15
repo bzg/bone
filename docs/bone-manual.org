@@ -1236,20 +1236,17 @@ built-in defaults.
 *** Syntax mode: =:loose= vs =:strict=
 
 =:command-syntax= sets whether commands need a =!= prefix.  The default
-=:loose= accepts both; =:strict= requires it on every command, avoiding
-false positives on common words ("Done.", "Closed.", "Applied.") in
-ordinary prose.
+=:loose= accepts both forms (=Closed.= and =!Closed.=); =:strict=
+requires the prefix, avoiding false positives on common words
+("Done.", "Closed.", "Applied.") in ordinary prose:
 
-| Form              | Loose                  | Strict                 |
-|-------------------+------------------------+------------------------|
-| Bareword          | =Closed.= / =!Closed.=     | =!Closed.=               |
-| Negative bareword | =Not acked= / =!Not acked= | =!Not acked=             |
-| =-by= line          | =Acked-by: a@b.c=        | =!Acked-by: a@b.c=       |
-| Date line         | =Deadline: 2026-06-01=   | =!Deadline: 2026-06-01=  |
-| Topics            | =Topics: event=          | =!Topics: event=         |
-| Supersede         | =Superseded-by: <mid>=   | =!Superseded-by: <mid>=  |
-| Supersede (sym.)  | =Supersedes: <mid>=      | =!Supersedes: <mid>=     |
-| Role control      | =Add maintainer: a@b.c=  | =!Add maintainer: a@b.c= |
+: !Closed.
+: !Not acked.
+: !Deadline: 2026-06-01
+: !Add maintainer: a@b.c
+
+Every command and role control takes the prefix; votes (=+1=, =-1=)
+never do.
 
 You can set it globally or per source (per-source wins):
 
