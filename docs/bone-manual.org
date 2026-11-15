@@ -624,7 +624,7 @@ BONE exports HTML pages and JSON, Org and RSS feeds.
 
 ** Exported pages and feeds
 
-=bb export all= generates, per source:
+=bb export= generates, per source:
 
 - HTML: =index.html= (reports), =data.html= (charts), =docs.html=
   (user docs).
@@ -650,22 +650,9 @@ as the specification recommends.
 Export is incremental: it covers only the sources modified since the
 last export.  =--force= rebuilds everything.
 
-| Flag                 | Purpose                                                  | Configurable |
-|----------------------+----------------------------------------------------------+--------------|
-| =-n <source>=          | restrict to one source                                   | --           |
-| =-p <N>=               | filter by minimum priority                               | --           |
-| =-s <N>=               | filter by minimum status                                 | --           |
-| =--html-page-size <N>= | paginate HTML report table (client-side rendering)       | CLI only     |
-| =--html-columns <C>=   | HTML table columns to show (CSV subset; default: all)    | CLI only     |
-| =--html-columns-sort=  | default sort column for the HTML table (default: date)   | CLI only     |
-| =--closed-retention=   | exclude reports closed before given ISO date or duration | CLI only     |
-| =--topics-filter=      | restrict to topics (comma-separated, case-insensitive)   | CLI only     |
-| =--force=              | force a full re-export                                   | CLI only     |
-
-Durations take the forms =Nd=, =Nw=, =Nm=, =Ny=
-(=--closed-retention 1y= keeps reports closed in the last 12 months).
-A run with =-p=, =-s= or =--topics-filter= is never incremental, and
-the next run is a full re-export.
+[[#cli-reference][CLI reference]] lists the export flags.  A run with =-p=, =-s= or
+=--topics-filter= is never incremental, and the next run is a full
+re-export.
 
 ** Vote transparency
 
@@ -1309,29 +1296,55 @@ clj -M:run -- --fresh   # interactive confirm, then full replay
 
 * CLI reference
 
-Export, notification and maintenance tasks run through
-[[https://babashka.org/][Babashka]]:
+The daemon runs on the JVM: =clj -M:run -- <options>=, or
+=bin/bone <options>= from the uberjar:
 
-| Task                                              | Description                                                          |
-|---------------------------------------------------+----------------------------------------------------------------------|
-| =bb export=                                         | Incremental export of all formats (skip if unchanged)                |
-| =bb export --force=                                 | Full rebuild, ignore timestamps                                      |
-| =bb export root=                                    | Regenerate top-level =index.html= only                                 |
-| =bb export --html-page-size 100=                    | Paginate HTML table (100 reports/page)                               |
-| =bb export --html-columns "type,subject,date"=      | Show only those HTML table columns                                   |
-| =bb export --closed-retention 1y=                   | Keep only reports closed within the last 12 months                   |
-| =bb export --topics-filter "a,b"=                   | Only export reports with a topic in the list                         |
-| =bb notify=                                         | Send notification emails                                             |
-| =bb notify --dry-run=                               | Preview notifications without sending                                |
-| =bb notify --debug=                                 | Verbose filtering diagnostics                                        |
-| =bb maintenance=                                    | Orphan emails and command failures ([[#maintenance][Maintenance]])                     |
-| =bb clean=                                          | Remove all files in =public/=                                          |
-| =bb build-jar=                                      | Build =target/bone.jar= + =bin/bone= wrapper                             |
-| =bb test-config=                                    | Validate =config.edn=                                                  |
-| =bb test-smtp=                                      | Test SMTP config (=--to addr=, =--send=; default = dry-run)              |
+| Option      | Purpose                                                               |
+|-------------+-----------------------------------------------------------------------|
+| (none)      | Batch: fetch since the watermark, digest, expire, exit                |
+| =--watch=     | Stay running on IMAP IDLE or Maildir filesystem events                |
+| =--fetch <V>= | Override the fetch window: count, duration or date ([[#tuning-ingestion][Tuning ingestion]]) |
+| =--fresh=     | Wipe the DB and replay, after confirmation ([[#rebuilding-history][Rebuilding history]])       |
+| =-c <path>=   | Config file (default: =BONE_CONFIG=, then =./config.edn=)                 |
 
-Export also accepts =-n <source>= (one source), =-p <N>= (minimum
-priority) and =-s <N>= (minimum status).
+Export, notification and maintenance tasks run through [[https://babashka.org/][Babashka]]:
+
+| Task                  | Purpose                                                      |
+|-----------------------+--------------------------------------------------------------|
+| =bb export=             | Incremental export of all formats (skips unchanged sources)  |
+| =bb export root=        | Regenerate the top-level =index.html= only (or =--index-only=)   |
+| =bb notify=             | Send notification emails                                     |
+| =bb maintenance=        | Orphan emails and command failures ([[#maintenance][Maintenance]])             |
+| =bb test-config [path]= | Validate =config.edn=                                          |
+| =bb test-smtp=          | Test the SMTP config; dry run unless =--send=                  |
+| =bb build-jar=          | Build =target/bone.jar= and the =bin/bone= wrapper               |
+| =bb clean=              | Remove the files in =public/= and reset the incremental export |
+| =bb test-search=        | Run the search-engine conformance cases (needs node)         |
+
+| Task        | Flag                    | Purpose                                                |
+|-------------+-------------------------+--------------------------------------------------------|
+| export      | =--force=                 | Full rebuild, ignore timestamps                        |
+|             | =-n <source>=             | Restrict to one source                                 |
+|             | =-p <N>=                  | Minimum priority (1-3)                                 |
+|             | =-s <N>=                  | Minimum status (1-7)                                   |
+|             | =--topics-filter <T>=     | Only these topics (comma-separated, case-insensitive)  |
+|             | =--closed-retention <D>=  | Drop reports closed before an ISO date or duration     |
+|             | =--html-theme <T>=        | CSS theme, overrides =:theme= ([[#html-theme][HTML theme]])               |
+|             | =--html-page-size <N>=    | Paginate the HTML report table (client-side rendering) |
+|             | =--html-columns <C>=      | HTML table columns to show (CSV subset; default: all)  |
+|             | =--html-columns-sort <C>= | Default sort column of the HTML table (default: date)  |
+| notify      | =--dry-run=               | Print the digests without sending                      |
+|             | =--debug=                 | Verbose filtering diagnostics                          |
+| maintenance | =--delete=                | Delete the orphan emails (default: dry run)            |
+|             | =--verbose=               | List individual orphan message-ids                     |
+|             | =--failures=              | List recent command failures                           |
+|             | =--retention <D>=         | Orphan retention (default: 90 days)                    |
+|             | =-n <source>=             | Restrict to one source                                 |
+| test-smtp   | =--send=                  | Actually send a test email                             |
+|             | =--to <addr>=             | Recipient (default: lead maintainer, first source)     |
+
+Durations take the forms =Nd=, =Nw=, =Nm=, =Ny=
+(=--closed-retention 1y= keeps reports closed in the last 12 months).
 
 * Appendix 1: workflow examples
 
