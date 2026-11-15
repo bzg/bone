@@ -45,20 +45,24 @@ scripts in `scripts/` are read-only.
 | `bone.digest`    | Single-email processing (classify, detect, thread)   |
 | `bone.detect`    | Report type detection from subject + attachments     |
 | `bone.commands`  | Commands (triggers, annotations) and votes           |
+| `bone.commands.registry` | Static command registry (JVM + bb)           |
 | `bone.roles`     | Permission checks and role management                |
 | `bone.relations` | Qualified relations between reports                  |
 | `bone.series`    | Patch series tracking                                |
 | `bone.expire`    | Periodic report expiry (runs inside the daemon)      |
 | `bone.periods`   | Per-source time-windowed config overrides            |
 | `bone.tracking`  | Change-tracking for incremental export               |
+| `bone.lookup`    | Entity lookups by message-id hash                    |
 | `bone.common`    | Shared utilities (JVM + Babashka)                    |
 | `bone.config`    | config.edn loading, source map, DB path (JVM + bb)   |
 | `bone.ics`       | iCalendar detection, parsing and assembly (JVM + bb) |
+| `bone.export`    | Pull patterns, scoring, mailmap, CLI parsing (bb)    |
 | `bone.logging`   | File and email log appenders                         |
 
-`bone.common`, `bone.config` and `bone.ics` carry no Datalevin
-dependency, so both the JVM and Babashka scripts load them. All other namespaces under `src/bone/`
-are JVM-only.
+`bone.common`, `bone.config`, `bone.ics`, `bone.export` and
+`bone.commands.registry` carry no Datalevin dependency, so both the
+JVM and Babashka scripts load them.  All other namespaces under
+`src/bone/` are JVM-only.
 
 ### Babashka scripts (`scripts/`)
 
