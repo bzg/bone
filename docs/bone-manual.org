@@ -1250,7 +1250,6 @@ Export, notification and maintenance tasks run through
 | =bb export --html-columns "type,subject,date"=      | Show only those HTML table columns                                   |
 | =bb export --closed-retention 1y=                   | Keep only reports closed within the last 12 months                   |
 | =bb export --topics-filter "a,b"=                   | Only export reports with a topic in the list                         |
-| =bb export --only-open=                             | Also export =-open= files (all-open.json, etc.)                        |
 | =bb notify=                                         | Send notification emails                                             |
 | =bb notify --dry-run=                               | Preview notifications without sending                                |
 | =bb notify --debug=                                 | Verbose filtering diagnostics                                        |

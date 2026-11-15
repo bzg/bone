@@ -78,7 +78,6 @@ clj -M:test
 #+begin_example
 bb export [--force]                       Incremental export of all formats
        [-n source] [-p 1|2|3] [-s 1-7]    Filter by source, priority, status
-       [--only-open]                      Also export -open files
        [--html-theme THEME]               Override CSS theme (see below)
        [--topics-filter TOPICS]           Only export matching topics (csv)
        [--html-page-size N]               Paginate HTML table (N rows/page)
