@@ -279,8 +279,9 @@ When an =[ANN]= report has an attached =.ics= file or inline =VCALENDAR=
 content, BONE stores the calendar data with the report and exports:
 
 - Individual =.ics= files in =events/<mid-hash>/=.
-- Combined calendars: =events/announcements.ics= (all),
-  =events/announcements-open.ics= and =events/announcements-closed.ics=.
+- Combined calendars, aggregating the VEVENT blocks for subscription:
+  =events/announcements.ics= (all), =events/announcements-open.ics=
+  and =events/announcements-closed.ics=.
 - =events.json=, =events.org=, =events.xml= (open announcements with ICS
   content) and =events-closed.*= (closed ones).
 
@@ -634,11 +635,8 @@ BONE exports HTML pages and JSON, Org and RSS feeds.
 - =patches/= -- attached and inline patch files.
 - =text/<mid-hash>/= -- =text/plain= and =text/x-log= attachments
   (backtraces, logs), suffixed =.txt= unless named =*.txt= or =*.log=.
-- =events/<mid-hash>/= -- =.ics= attachments from announcements;
-  =events/announcements{,-open,-closed}.ics= aggregate their VEVENT
-  blocks for subscription.
-- =events.{json,org,xml}= and =events-closed.{json,org,xml}= --
-  open/closed announcements carrying =.ics= or inline VCALENDAR content.
+- =events/= and =events*.{json,org,xml}= -- calendar data of
+  announcements (see [[#events-ics-calendar-support][Events]]).
 
 RSS feeds hold the 50 latest items; maintainer reports carry
 =<category>maintainer</category>= and =role:maintainer= in the
@@ -669,8 +667,7 @@ per-source =votes.json= makes them auditable:
 }
 #+end_src
 
-A new vote replaces the voter's previous one.  BONE derives the
-per-report JSON counts (=votes=, =votes-up=, =votes-down=,
+BONE derives the per-report JSON counts (=votes=, =votes-up=, =votes-down=,
 =votes-null=) from these entities at export time.
 
 ** Browsing BONE reports online
@@ -743,9 +740,8 @@ deadlines first), and open ones nobody has acked or owned.
 
 You cannot subscribe by email: ask the operator to edit =config.edn=
 to subscribe, unsubscribe or adjust filters (minimum priority, subject
-match, topic).  The operator runs =bb notify= from cron or a systemd
-timer (=--dry-run= prints without sending); it tracks no per-recipient
-interval.
+match, topic).  Digests go out each time the operator runs
+=bb notify=.
 
 * Deploying BONE
 
@@ -1132,7 +1128,8 @@ Each subscription accepts optional filters:
 In operation:
 
 - =bb notify= keeps no per-recipient cadence: it sends at every run, so
-  schedule it with cron or a systemd timer.
+  schedule it with cron or a systemd timer (=--dry-run= prints without
+  sending).
 - =bb test-config= checks that every subscribed =:source= matches an
   existing source =:name=.
 - =data/.last-notify-failures.edn= records the last successful send per
@@ -1254,13 +1251,8 @@ You can set it globally or per source (per-source wins):
 :command-syntax :strict
 #+end_src
 
-**** Replaying archives under a different convention
-
-If a source's vocabulary or syntax mode changed over time (e.g. it
-moved from =:loose= to =:strict=, or accepted =Done.= only in one era),
-declare per-era =:commands=, =:command-syntax= and =:maintainers= in
-=:periods= (see [[#source-periods][Source periods]]); BONE reads each email with the
-config in force at its date.
+If the syntax mode changed over time, declare it per era in =:periods=
+(see [[#source-periods][Source periods]]).
 
 ** Maintenance
 
@@ -1283,9 +1275,8 @@ bb maintenance -n my-source     # scope to a single source
 
 ** Rebuilding history
 
-You declare a source's history (vocabulary, syntax, maintainers) with
-=:periods= (see [[#source-periods][Source periods]]).  To apply edited periods, or any
-config change, retroactively, wipe the DB and replay:
+To apply edited [[#source-periods][periods]], or any config change, retroactively, wipe
+the DB and replay:
 
 #+begin_src shell
 clj -M:run -- --fresh   # interactive confirm, then full replay
@@ -1388,38 +1379,6 @@ applies it, which closes v2 (resolved):
 : Subject: Re: [PATCH parser v2 0/2] Refactor tokenizer
 : 
 : Applied, thanks!
-
-** Maintainer triage
-
-A bug has gone unanswered for a while; the maintainer triages it on the
-list:
-
-: From: eve@project.org
-: To: bugs-list@project.org
-: Subject: Re: [BUG] Crash on startup
-: 
-: Confirmed.
-: Owned.
-: Urgent.
-
-Later, the fix lands:
-
-: From: eve@project.org
-: To: bugs-list@project.org
-: Subject: Re: [BUG] Crash on startup
-: 
-: Fixed in commit abc123, thanks for reporting!
-
-** Role management
-
-Any maintainer can add a maintainer via the list; only the lead
-maintainer can =Remove maintainer:=.
-
-: From: eve@project.org
-: To: bugs-list@project.org
-: Subject: Role update
-: 
-: Add maintainer: newdev@project.org
 
 ** Automatic expiry and override
 
