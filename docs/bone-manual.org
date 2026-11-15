@@ -887,9 +887,10 @@ upstream MTA must filter forged mail.  Hence:
   anyone can retract any update by command, and the audit trail keeps
   the offending message-id.
 - =Add maintainer= / =Remove maintainer= require a maintainer (or lead)
-  issuer; nobody can remove the lead.  Announcements and releases
-  require maintainer status.  These checks are only as strong as the
-  upstream filtering.
+  issuer; nobody can remove the lead.  Announcements, releases and
+  changes require maintainer status (unless =:restricted-types= says
+  otherwise).  These checks are only as strong as the upstream
+  filtering.
 
 We recommend this posture:
 
