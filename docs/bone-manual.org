@@ -67,7 +67,7 @@ of reports, states, authors and threads.
 ** Bug, Patch, Request
 
 The subject label sets the report type: mainly =[BUG]=, =[PATCH]= and
-=[FR/TODO/POLL]= (feature requests); see [[#report-types][report types]].
+=[POLL]= or =[TODO]= (requests); see [[#report-types][report types]].
 
 BONE creates a /patch report/ when:
 
@@ -79,7 +79,7 @@ BONE creates a /patch report/ when:
 Inline or quoted diffs, and =git diff > x.patch= attached to an
 unrelabelled reply, stay regular replies: attach a real
 =git format-patch= file or relabel with =[PATCH]= instead.  BONE stores
-a patch attached to a =[BUG]= or =[FR]= email as metadata and leaves
+a patch attached to a =[BUG]= or =[POLL]= email as metadata and leaves
 the type unchanged.
 
 ** Updating reports
