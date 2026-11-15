@@ -195,7 +195,10 @@ In the new report's thread (reply or opening mail), write:
 
 A /message-id/ is =<id@host>=, bare =id@host=, or the last path segment
 of an archive URL such as =https://list.orgmode.org/orgmode/id@host/=.
-Both reports must have the same type (bug, patch or request).
+
+Both reports must have the same type (bug, patch or request): a
+request cannot supersede a bug.  To reclassify a report, link the two
+with =Related-to:= and close the old one.
 
 A report has at most one superseder: among repeated =Superseded-by:=,
 =Supersedes:= or =Duplicate-of:= lines in one email (both closing
