@@ -1351,18 +1351,18 @@ Take this config:
 #+end_src
 
 At the next expiry run, BONE closes with reason "expired" a bug whose
-last email is 91 days old and that is still unacked and unowned.  To
-keep it open, a maintainer marks it owned, lifting it above
-=:max-status 0=; =No expiry.= clears any per-report expiry date
-previously set:
+last email is 91 days old and that is still unacked and unowned.  Any
+reply to the thread restarts the 90 days; to keep the bug open for
+good, a maintainer marks it owned, lifting it above =:max-status 0=:
 
 : From: eve@project.org
 : To: bugs-list@project.org
 : Subject: Re: [BUG] Old encoding issue
 : 
 : This is still relevant, keeping it open.
-: No expiry.
 : Owned.
+
+If the bug has already expired, =Not closed.= reopens it.
 
 * Appendix 2: credits
 
