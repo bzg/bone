@@ -13,7 +13,7 @@ BONE uses its own conventions, on the project's own mailing list:
 - Patch: email the same address with subject
   `[PATCH] bone: <commit summary>`.  Attach a `git format-patch` file
   or include the diff inline; either works.
-- Feature request: subject `[FR] bone: <short description>`.
+- Feature request: subject `[POLL] bone: <short description>`.
 - General discussion: any other subject.
 
 For private matters (security, personal context) you can write
@@ -34,7 +34,7 @@ scripts in `scripts/` are read-only.
   ICS (calendar) feeds plus the HTML site and stats pages.
 
 - **`bb notify`** -- Reads the database and sends notification
-  emails to maintainers via SMTP.
+  emails to the configured subscribers via SMTP.
 
 ### JVM namespaces (`src/bone/`)
 
