@@ -91,33 +91,34 @@ A /command/ is a case-sensitive keyword starting a line: in a reply,
 =Important= require punctuation or end of line (see
 [[#priority-commands][priority commands]]).
 
-/Triggers/ change state and apply only to the closest parent report,
-never to their own email (=Acked= in a new bug does not confirm it).
-/Annotations/ set properties on the report the email creates, or else
-on the closest parent (=Urgent.= in a new bug raises its priority).
+- A *trigger* changes a report's state -- open/closed, acked, owned,
+  superseded, duplicate -- and only acts on the closest parent report,
+  never on the mail carrying it (=Acked= in a new bug does not confirm
+  it).  Examples: =Closed.=, =Acked.=, =Owned-by:=, =Superseded-by:=,
+  =Duplicate-of:=.
+- An *annotation* sets or unsets a property -- urgency, importance,
+  topic, deadline, expiry -- or poses a relation from the report
+  itself.  It applies to the carrying mail when that mail becomes a
+  new report (=Urgent.= in a new bug raises its priority), otherwise
+  to the closest parent report.  Examples: =Urgent.=, =Important.=,
+  =Topics:=, =Deadline:=, =Related-to:=, and =Supersedes:= (which also
+  closes the report it names).
+
 See the [[#all-commands][complete list of commands]].
 
 ** Retracting updates
 
-Retract a state or clear a property with the matching "Not"/"No"
-command:
+Retract a state with the matching =Not= command, clear a property
+with =No=, retract a relation by repeating it after =Not=:
 
 : Not acked.
-: Not owned.
-: Not closed.
-: Not urgent.
-: Not important.
 : No deadline.
-: No expiry.
-: No topics.
-: Not superseded-by: <new-message-id@example.com>
-: Not supersedes: <old-message-id@example.com>
-: Not duplicate-of: <target-message-id@example.com>
 : Not related-to: <other-message-id@example.com>
 
-Like every command, retraction is open to everyone unless a
-per-command =:scope= tightens it (see [[#commands][Commands]]); each
-update references its email, so you can audit and reverse it.
+[[#the-six-patterns][The six patterns]] give the rule and [[#all-commands][All commands]] every form.  Like
+every command, retraction is open to everyone unless a per-command
+=:scope= tightens it; each update references its email, so you can
+audit and reverse it.
 
 ** Crediting a third party
 
@@ -426,23 +427,8 @@ order is per source > global > built-in.
 
 * Commands
 
-A /command/ is a keyword at the start of a line in a thread reply.
-
-** Triggers and annotations
-
-- A *trigger* changes a report's state -- open/closed, acked, owned,
-  superseded, duplicate -- and only acts on existing reports, never on
-  the mail carrying it, even when that mail opens a new thread.
-  Examples: =Closed.=, =Acked.=, =Owned-by:=, =Superseded-by:=,
-  =Duplicate-of:=.
-
-- An *annotation* sets or unsets a property -- urgency, importance,
-  topic, deadline, expiry -- or poses a relation from the report
-  itself.  It applies to the carrying mail when that mail becomes a
-  new report, otherwise to the nearest report in the thread.
-  Examples: =Urgent.=, =Important.=, =Topics:=, =Deadline:=,
-  =Related-to:=, and =Supersedes:= (which also closes the report it
-  names).
+[[#updating-reports][Updating reports]] defines commands, triggers and annotations; this
+chapter is the reference.
 
 Colon-prefixed commands (=Topics:=, =Deadline:=, =Expiry:=, =Acked-by:=,
 =Owned-by:=, =Closed-by:=, =Superseded-by:=, =Supersedes:=,
