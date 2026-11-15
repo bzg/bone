@@ -320,9 +320,12 @@ includes any announcement with ICS content whatever its topic.
 Report commands need no permission (see [[#commands][Commands]]); only
 role controls require one:
 
-- Each source has exactly one lead maintainer.
+- Each source has exactly one lead maintainer: the first entry of its
+  =:maintainers= vector in =config.edn=.
 - Any maintainer can promote a user to maintainer.
 - Only the lead maintainer can demote a maintainer back to user.
+- Nobody can remove the lead, not even the lead: to change it, edit
+  =config.edn= and redeploy.
 
 Write to the source's public channel, with a bare address or the
 =Display Name <addr>= form:
@@ -339,6 +342,12 @@ Add maintainer: Dev User <dev@example.com>
 State-changing actions (commands and role controls) must go through
 the source's public channel -- mailing list or alias -- so every BONE
 instance on the same source sees the same state.
+
+Each =Add= / =Remove= opens or closes a /tenure/, a =[from, to)=
+interval during which someone held maintainer status.  BONE exports
+the full history (active and closed) to =meta.json= and shows it in
+=docs.html=, so a fresh deployment replays past commands with the
+maintainers of their time.
 
 * Report types
 
@@ -760,7 +769,13 @@ interval.
 * Deploying BONE
 
 BONE reads a single =config.edn=; validate it after editing with
-=bb test-config=.
+=bb test-config [path]=.
+
+By default BONE reads =./config.edn=.  Pass =-c <path>= to the daemon
+(=clj -M:run -- -c /path/to/config.edn=) or set =BONE_CONFIG=, which
+the =bb= scripts honor too; the precedence order is =-c= >
+=BONE_CONFIG= > =./config.edn=.  =BONE_DB= sets the database path when
+=config.edn= has no =:db {:path ...}= entry.
 
 ** Setting up an instance
 
@@ -787,6 +802,19 @@ or =:maildir=).  Optional sections default to
 =:db {:path "data/bone-db"}=, stderr logging at =:info=, and
 =:ingest {:fetch {:limit 50}}=; see =config.edn.example= for the
 annotated reference.
+
+| Field         | Required     | Description                                  |
+|---------------+--------------+----------------------------------------------|
+| =:name=         | yes          | Unique identifier (keys the watermark, logs) |
+| =:type=         | yes          | =:imap= or =:maildir=                            |
+| =:host=         | IMAP only    | IMAP server hostname                         |
+| =:port= / =:ssl=  | no           | IMAP port and TLS, e.g. =993= and =true=         |
+| =:user=         | IMAP only    | IMAP login username                          |
+| =:password=     | IMAP *       | IMAP password (* or =:oauth2-token=)           |
+| =:oauth2-token= | IMAP *       | OAuth2 (XOAUTH2) token (* or =:password=)      |
+| =:path=         | Maildir only | Parent directory of the Maildir              |
+| =:folder=       | no           | Folder name (default: ="INBOX"=)               |
+| =:ingest=       | no           | Per-mailbox overrides ([[#multiple-mailboxes][Multiple mailboxes]])   |
 
 To keep IMAP/SMTP credentials out of =config.edn=, use one of these
 forms:
@@ -940,7 +968,8 @@ Matching is exact and case-insensitive, never by substring
 (=:list "my-list"= does not match =my-list.example.org=).  BONE checks
 every value of a repeated header and every address of a
 comma-separated recipient list, and discards at ingestion the emails
-that match no source.
+that match no source.  It checks sources in the order of =:sources=;
+the first match wins.
 
 ** Source options
 
@@ -964,6 +993,19 @@ that match no source.
 | =:notifications=         | ={:enabled false}= silences this source's notifications (default: enabled)                          |
 | =:awaiting-delay=        | Duration before flagging "awaiting reply", e.g. ="14d"= (default: 14 days)                          |
 | =:periods=               | Time-windowed overrides ([[#source-periods][Source periods]])                                                          |
+
+** Canonical display names (=mailmap.edn=)
+
+To unify display names across the addresses of one person, create
+=mailmap.edn= in the directory you run =bb export= from:
+
+#+begin_src edn
+{"Bastien Guerry" ["bzg@gnu.org" "bzg@bzg.fr"]}
+#+end_src
+
+BONE applies the mailmap at export time only (it leaves the database
+untouched) to maintainers, authors and owners.  Unlisted addresses
+keep their last observed =From:= name.
 
 ** Source periods
 
@@ -1085,6 +1127,13 @@ You can set =:expiry= globally or per source (per-source wins).
    {:source "another-list" :topic "release"}]}}
 #+end_src
 
+=:notifications= is optional: when it is absent or ={:enabled false}=,
+=bb notify= exits at once.  =:smtp= needs =:host=, =:port=, =:user=,
+=:password= and =:from=; =:tls= (STARTTLS) and =:reply-to= are optional.
+=bb test-smtp= validates the configuration without sending anything;
+=bb test-smtp --send= mails a test message to the lead maintainer of
+the first source, or to the =--to <addr>= you give.
+
 Each =:subscribers= key maps a recipient address to a vector of
 subscriptions, one per source: a recipient of three sources gets three
 emails per =bb notify= run.  BONE blind-copies =:admin-bcc= (an
@@ -1116,6 +1165,28 @@ In operation:
   notifying anyone again.  Maintainers see all failures with
   =:audience :maintainers= in their digest; the failing command's
   author sees only their own.
+
+** HTML theme
+
+=:theme= in =config.edn=, or =bb export --html-theme=, sets the CSS
+theme of the HTML pages.  BONE resolves the value in this order:
+
+1. an =https://= URL -- linked as an external stylesheet;
+2. a =file:///path= -- local file, inlined in =<style>=;
+3. a path ending in =.css= (relative or absolute) -- inlined in
+   =<style>=;
+4. a bare name -- a [[https://github.com/bzg/pico-themes][pico-themes]] name; BONE loads the base theme and its
+   own overlay from jsDelivr.
+
+="none"= disables theming.
+
+#+begin_src shell
+bb export --html-theme org                             # pico-themes name
+bb export --html-theme https://example.com/custom.css  # external URL
+bb export --html-theme file:///home/user/my-theme.css  # local file
+bb export --html-theme themes/custom.css               # relative path
+bb export --html-theme none                            # no theme
+#+end_src
 
 ** Logging
 

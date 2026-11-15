@@ -35,8 +35,9 @@ For the codebase, architecture and development setup, see
 * Quick start
 
 #+begin_src sh
-# 1. Copy and edit config (minimal = 8 lines; example = annotated reference)
+# 1. Copy and edit the config (minimal: one mailbox, one source)
 cp config.edn.minimal config.edn
+bb test-config              # validate it
 
 # 2a. Run once (fetch new emails, expire, exit)
 clj -M:run
@@ -45,274 +46,34 @@ clj -M:run
 clj -M:run -- --watch
 
 # 2c. Or build an uberjar and run it (production)
-bb build-jar        # produces target/bone.jar + bin/bone wrapper
+bb build-jar                # produces target/bone.jar + bin/bone wrapper
 bin/bone --watch
-#+end_src
 
-#+begin_example
-# 3. Export reports
+# 3. Export reports to public/
 bb export                   # incremental (skips if nothing changed)
 bb export --force           # full rebuild, ignore timestamps
-bb export root              # regenerate top-level public/index.html only
-bb export --topics-filter "event"  # only reports with topic "event"
 
 # 4. Send notification emails
-bb notify              # send notifications
-bb notify --dry-run    # preview without sending
-bb notify --debug      # verbose filtering diagnostics
+bb notify --dry-run         # preview without sending
+bb notify
 
-# 5. Test SMTP configuration (dry-run by default; --send to actually send)
-bb test-smtp
-
-# 6. Maintenance
-bb maintenance --verbose   # show orphan emails
-bb maintenance --delete    # actually purge
-bb maintenance --failures  # list recent command failures
-
-# 7. Run tests
+# 5. Run tests
 clj -M:test
-#+end_example
-
-* bb tasks
-
-#+begin_example
-bb export [--force]                       Incremental export of all formats
-       [-n source] [-p 1|2|3] [-s 1-7]    Filter by source, priority, status
-       [--html-theme THEME]               Override CSS theme (see below)
-       [--topics-filter TOPICS]           Only export matching topics (csv)
-       [--html-page-size N]               Paginate HTML table (N rows/page)
-       [--html-columns COLS]              HTML table columns (csv subset)
-       [--html-columns-sort COL]          Default sort column (default: date)
-       [--closed-retention DUR]           Drop reports closed before cutoff
-bb export root                            Regenerate top-level index.html only
-bb notify [--dry-run] [--debug]           Send notification emails
-bb maintenance [--delete] [--verbose] [-n source]  Purge orphan emails
-       [--retention DUR]                  Orphan retention (default 90d)
-       [--failures]                       List recent command failures
-bb test-config [path]                     Validate config.edn
-bb test-smtp [--to addr] [--send]         Test SMTP config (default = dry-run)
-bb build-jar                              Build target/bone.jar + bin/bone wrapper
-bb clean                                  Remove all files in public/
-clj -M:run -- --fresh                     Wipe DB + full replay (interactive)
-#+end_example
-
-** Theme (=--html-theme= / =:theme=)
-
-The =--html-theme= flag (or =:theme= in =config.edn=) controls the CSS
-theme for HTML exports.  Values are resolved in order:
-
-1. *https:// URL* -- used as an external =<link>= stylesheet.
-2. *file:///path* -- local file, inlined in =<style>=.
-3. *Path ending in .css* -- relative or absolute path, inlined
-   in =<style>=.
-4. *Bare name* -- treated as a [[https://github.com/bzg/pico-themes][pico-themes]] name; base theme and bone
-   overlay are loaded from jsDelivr.
-
-Set to ="none"= to disable theming.
-
-#+begin_example
-bb export --html-theme org                             # pico-themes name
-bb export --html-theme https://example.com/custom.css  # external URL
-bb export --html-theme file:///home/user/my-theme.css  # local file
-bb export --html-theme themes/custom.css               # relative path
-bb export --html-theme none                            # no theme
-#+end_example
+#+end_src
 
 * Configuration
 
-See =config.edn.example=.  The configuration has three main sections.
+BONE reads =./config.edn= (override with =-c <path>= or =BONE_CONFIG=).
+Its two required sections are =:mailboxes= (where the mail comes from:
+IMAP or Maildir) and =:sources= (which mail belongs to which tracker:
+matched by =List-Id=, alias or delivery address).
 
-** Config file location
-
-By default BONE reads =./config.edn=.  To override:
-
-- Pass =-c <path>= to the daemon:
-  =clj -M:run -- -c /path/to/config.edn=
-- Or set =BONE_CONFIG=; all =bb= scripts honor it.
-
-Precedence: =-c= > =BONE_CONFIG= > =./config.edn=.
-
-The =BONE_DB= env var is honored as a fallback when no
-=:db {:path ...}= entry is set.
-
-** Mail sources (=:mailboxes=)
-
-=:mailboxes= is a vector; each entry is one mail source (IMAP or
-Maildir) with a unique =:name=. Batch mode iterates over them
-sequentially; watch mode runs one thread per mailbox. Watermarks are
-keyed per =:name=, so IMAP UID state never mixes between mailboxes.
-
-| Field         | Required     | Description                                  |
-|---------------+--------------+----------------------------------------------|
-| =:name=         | yes          | Unique identifier (keys the watermark, logs) |
-| =:type=         | yes          | =:imap= or =:maildir=                            |
-| =:host=         | IMAP only    | IMAP server hostname                         |
-| =:user=         | IMAP only    | IMAP login username                          |
-| =:password=     | IMAP *       | IMAP password (* or =:oauth2-token=)           |
-| =:oauth2-token= | IMAP *       | OAuth2 token (* or =:password=)                |
-| =:path=         | Maildir only | Root path of the Maildir                     |
-| =:folder=       | no           | Folder name (default: ="INBOX"=)               |
-
-See "Multiple mailboxes" in the [[file:docs/bone-manual.org][manual]] for the behaviour of batch
-and watch modes with several mailboxes.
-
-** Ingest settings (=:ingest=)
-
-| Field                | Default     | Description                                                                |
-|----------------------+-------------+----------------------------------------------------------------------------|
-| =:fetch=               | ={:limit 50}= | First-run fetch: ={:limit N}= or ={:since "30d"}= or ={:start "..." :end "..."}= |
-| =:max-size=            | none        | Skip emails larger than N bytes (e.g. =1048576=)                             |
-| =:max-attachment-size= | =1048576=     | Max bytes extracted from attachments (.patch, .ics, etc.)                  |
-
-** Sources (=:sources=)
-
-Each source classifies incoming emails by delivery type.  Sources
-are checked in order; the first match wins.  Each source must have
-exactly one of the three type keys:
-
-| Key    | Source type  | Matches against                                            |
-|--------+--------------+------------------------------------------------------------|
-| =:list=  | Mailing list | =List-Id= header (bare identifier, e.g. ="bugs.example.org"=)  |
-| =:alias= | Email alias  | =X-Original-To=, =Envelope-To=, =X-Envelope-To=, or =Delivered-To= |
-| =:to=    | Mailbox      | =Delivered-To= header                                        |
-
-| Field                  | Required | Description                                                           |
-|------------------------+----------+-----------------------------------------------------------------------|
-| =:name=                  | yes      | Unique source identifier                                              |
-| =:list= / =:alias= / =:to=   | yes      | Exactly one; determines source type and matched header                |
-| =:commands=              | no       | Command keyword overrides (per action)                                |
-| =:labels=                | no       | Report label overrides (per report type)                              |
-| =:maintainers=           | no       | Initial maintainers; first entry is the lead (see below)              |
-| =:list-archive=          | no       | URL of the list archive (shown in HTML reports)                       |
-| =:archive-format-string= | no       | URL template for message-ids (=%s= is replaced)                         |
-| =:base-url=              | no       | Base URL of this source's public directory (absolute RSS feed links)  |
-| =:website=               | no       | Project website, linked from page titles and footers                  |
-| =:contribute-url=        | no       | Contribution guide; drives the "Create new" button                    |
-| =:post-address=          | no       | Posting address shown on =docs.html= (mailbox sources fall back to =:to=) |
-| =:report-types=          | no       | Restrict detected and exported types, e.g. =#{:bug :patch}=             |
-| =:export-formats=        | no       | Output formats (default: =["json" "org" "rss"]=)                        |
-| =:expiry=                | no       | Auto-close delays in days per type                                    |
-| =:notifications=         | no       | ={:enabled false}= silences notifications for this source               |
-| =:awaiting-delay=        | no       | Duration before "awaiting reply" flag, e.g. ="14d"= (default: 14 days)  |
-
-Send all state-changing actions (commands, role controls) through
-the source's public channel.  Anyone running BONE on the same source
-then sees the same state.
-
-*** Maintainers and the "lead"
-
-Maintainers are seeded from the per-source =:maintainers= vector;
-the *first entry* is the *lead maintainer*.
-
-- Any active maintainer can run =Add maintainer:= commands.
-- Only the lead maintainer can run =Remove maintainer:= commands.
-- The lead cannot remove themselves.  To change the lead, edit
-  =config.edn= and redeploy.
-
-Each =Add= / =Remove= opens or closes a *tenure* in the DB -- a
-=[from, to)= interval recording when someone held maintainer
-status.  BONE exports the full history (active and closed) to
-=meta.json= and renders it in =docs.html=, so a fresh deployment
-replays commands consistently even when maintainers have changed.
-
-*** Canonical display names (=mailmap.edn=)
-
-To unify display names across addresses belonging to the same
-person, create =mailmap.edn= at the repo root:
-
-#+begin_src clojure
-{"Bastien Guerry" ["bzg@gnu.org" "bzg@bzg.fr"]}
-#+end_src
-
-BONE applies the mailmap at export time only (the DB is untouched)
-to maintainers, authors, and owners.  Unlisted emails keep their
-last observed =From:= name.
-
-For sources whose maintainer list or vocabulary evolved over time,
-declare the history inline via =:periods= on the source (see "Source
-periods" in the [[file:docs/bone-manual.org][manual]]).
-
-** Example config
-
-#+begin_src clojure
-{:mailboxes [{:name "primary"
-              :type :imap :host "imap.example.com" :port 993 :ssl true
-              :user "imap-login@example.com" :password "secret"
-              :folder "INBOX"}]
- :sources [{:name "public-list"
-            :list "bugs.example.org"
-            ;; First entry = lead maintainer.
-            :maintainers ["lead@example.org" "co-maint@example.org"]
-            :list-archive "https://lists.example.org/bugs/"}
-           {:name "team-alias"
-            :alias "team@example.com"}
-           {:name "direct-inbox"
-            :to "inbox@example.com"}]
- :db {:path "data/bone-db"}
- :ingest {:fetch {:limit 50}
-          :max-size 1048576}
- :notifications {:enabled true
-                 :smtp {:host "smtp.example.com" :port 587 :tls true
-                        :user "notify@example.com" :password "secret"
-                        :from "bone@example.com"}}}
-#+end_src
-
-** Report labels (=:labels=)
-
-Subject labels recognised per report type.  Set globally at the
-top level or per source (per-source wins).  Overrides apply only
-to the types you specify; others keep their defaults:
-
-| Type          | Default labels   |
-|---------------+------------------|
-| =:bug=          | =BUG=              |
-| =:patch=        | =PATCH=            |
-| =:request=      | =POLL= =TODO=        |
-| =:announcement= | =ANN= =ANNOUNCEMENT= |
-| =:release=      | =REL= =RELEASE=      |
-| =:change=       | =CHG= =CHANGE=       |
-
-Global override:
-
-#+begin_src clojure
-:labels {:bug     ["BUG" "DEFECT"]
-         :request ["POLL" "FR" "TODO" "RFE"]}
-#+end_src
-
-Per-source override (inside a source map):
-
-#+begin_src clojure
-{:name "my-list"
- :labels {:announcement ["ANN" "NEWS"]}}
-#+end_src
-
-** Notifications (=:notifications=)
-
-Optional.  When absent or ={:enabled false}=, =bb notify= exits
-immediately.
-
-| Field        | Required | Description                                            |
-|--------------+----------+--------------------------------------------------------|
-| =:enabled=     | yes      | Global kill switch (=true= / =false=)                      |
-| =:smtp=        | yes      | SMTP connection settings (see below)                   |
-| =:admin-bcc=   | no       | Hidden Bcc on every digest (string or vector of email) |
-| =:subscribers= | no       | Recipient list with per-source filters                 |
-
-SMTP fields:
-
-| Field     | Required | Description               |
-|-----------+----------+---------------------------|
-| =:host=     | yes      | SMTP server hostname      |
-| =:port=     | yes      | SMTP port (usually 587)   |
-| =:tls=      | no       | Enable STARTTLS (=true=)    |
-| =:user=     | yes      | SMTP login username       |
-| =:password= | yes      | SMTP password             |
-| =:from=     | yes      | Sender address for emails |
-| =:reply-to= | no       | Reply-To header           |
-
-Use =bb test-smtp= to validate the configuration (no email sent by
-default), or =bb test-smtp --send= to send a test email to the
-lead maintainer.
+- =config.edn.minimal= is the smallest working config.
+- =config.edn.example= is the annotated reference of every key.
+- The manual's [[docs/bone-manual.org#deploying-bone][Deploying BONE]] chapter documents each section: mailboxes,
+  sources, periods, expiry, notifications, theme, logging, production
+  setup.
+- Its [[docs/bone-manual.org#cli-reference][CLI reference]] lists every =bb= task and flag.
 
 * Contributing
 
