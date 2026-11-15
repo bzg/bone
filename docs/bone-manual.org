@@ -7,9 +7,9 @@
 /BONE/ is an email-driven report tracker.  A /report/ is an email that
 BONE classifies by its subject label (bug, patch, feature request,
 announcement); later emails in the thread update its state through a
-small fixed vocabulary of commands.  Maintainers can also write to the
-monitored inbox to update reports and manage roles.  BONE exposes the
-data as an HTML site and JSON, Org and RSS feeds.
+small fixed vocabulary of commands.  Maintainers manage roles by
+email too.  BONE exposes the data as an HTML site and JSON, Org and
+RSS feeds.
 
 * Example
 
@@ -122,7 +122,7 @@ update references its email, so you can audit and reverse it.
 ** Crediting a third party
 
 Anyone can act on behalf of someone else with a =-by= line (bare
-address or =Name <addr>=) sent to the BONE inbox:
+address or =Name <addr>=):
 
 : Acked-by: a-user@example.com
 : Owned-by: a-user@example.com
@@ -321,7 +321,7 @@ role controls require one:
 - Any maintainer can promote a user to maintainer.
 - Only the lead maintainer can demote a maintainer back to user.
 
-Write to the BONE inbox, with a bare address or the
+Write to the source's public channel, with a bare address or the
 =Display Name <addr>= form:
 
 #+begin_example
