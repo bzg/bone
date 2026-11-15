@@ -209,7 +209,7 @@ the old one: reason, credit and relation follow the last command.
 Undo with =Not superseded-by:= (old thread) or =Not supersedes:= (new
 thread).
 
-** Supersession of patches
+** Sending a new revision of a patch
 
 A new patch report automatically supersedes an earlier open patch
 report in its thread with the same base subject (ignoring =Re:=/=Fwd:=,
@@ -223,7 +223,7 @@ punctuation), covering re-sent unversioned patches:
 #+end_example
 
 Only (3) stays open.  The reply must itself be a patch report (see
-above); a plain =Re:= without a patch is discussion.  Versioned
+[[#bug-patch-request][Bug, Patch, Request]]); a plain =Re:= without a patch is discussion.  Versioned
 patches (=[PATCH v2]=) match on version and topic instead; see
 [[#patch-series][Patch series]].
 
@@ -505,7 +505,7 @@ Some updates propagate through threads and series:
 - Commands to a series' cover letter apply to every patch (except
   cross-references).  See [[#cover-letter-commands][Cover letter commands]].
 - A reply carrying a new patch supersedes the previous patch report
-  in the thread.  See [[#supersession-of-patches][Supersession of patches]].
+  in the thread.  See [[#sending-a-new-revision-of-a-patch][Sending a new revision of a patch]].
 - A new patch-series version (matching topic) closes the previous
   series (reason =:superseded=).  See [[#patch-series][Patch series]].
 - A =[REL v2.0]= release closes every open =[CHG v2.0]= report.  See
