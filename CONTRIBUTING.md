@@ -99,7 +99,7 @@ Run BONE locally:
 
 ```sh
 cp config.edn.minimal config.edn      # or copy config.edn.example
-$EDITOR config.edn                    # point :mailbox at your IMAP or Maildir
+$EDITOR config.edn                    # point :mailboxes at your IMAP or Maildir
 clj -M:run                            # single pass
 clj -M:run -- --watch                 # stay running
 ```

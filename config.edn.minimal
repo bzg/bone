@@ -2,9 +2,10 @@
 ;; :logging (stderr :info) and :ingest ({:fetch {:limit 50}}).  See
 ;; config.edn.example for the fully annotated template.
 
-{:mailbox {:type :maildir
-           :path "/path/to/your/Maildir"
-           :folder "INBOX"}
+{:mailboxes [{:name   "local"
+              :type   :maildir
+              :path   "/path/to/your/Maildir"
+              :folder "INBOX"}]
 
  :sources [{:name "my-source"
             :list "list-id.example.org"}]}
