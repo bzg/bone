@@ -11,7 +11,8 @@ vocabulary of commands. Maintainers manage roles the same way.
 BONE comes with two companions to help contributors handle reports: a
 command line interface [[https://codeberg.org/bzg/gnaw][gnaw]] and a GNU Emacs library [[https://codeberg.org/bzg/gnaw.el][gnaw.el]].
 
-For maintainers, see the full [[https://codeberg.org/bzg/bone/src/branch/main/docs/bone-manual.org][BONE manual]].
+For relations between reports, votes, deadlines and maintainer roles,
+see the full [[https://codeberg.org/bzg/bone/src/branch/main/docs/bone-manual.org][BONE manual]].
 
 ** Subject labels
 
